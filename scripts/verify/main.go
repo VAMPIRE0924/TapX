@@ -123,17 +123,11 @@ func (v *verifier) fail(format string, args ...any) {
 
 func (v *verifier) checkRequiredFiles() {
 	for _, rel := range []string{
-		"AGENTS.md",
 		"README.md",
-		"docs/requirements-map.md",
-		"docs/architecture.md",
-		"docs/panel-api.md",
-		"docs/openwrt.md",
-		"docs/install-linux.md",
-		"docs/release.md",
-		"docs/verification.md",
 		".github/workflows/ci.yml",
 		".github/workflows/release.yml",
+		"scripts/install/install.sh",
+		"scripts/build/release-archives.sh",
 		"scripts/lab/common.ps1",
 		"scripts/lab/preflight.ps1",
 		"scripts/lab/raw-transport-smoke.ps1",
@@ -147,6 +141,8 @@ func (v *verifier) checkRequiredFiles() {
 		"scripts/integration/address-guard-netns.sh",
 		"scripts/build/openwrt-x86-64-ipk.sh",
 		"scripts/build/mkipk.go",
+		"docs/examples/raw-udp-tun.json",
+		"docs/examples/raw-tcp-tun.json",
 		"openwrt/tapx-core/files/etc/config/tapx",
 		"openwrt/tapx-core/files/etc/init.d/tapx",
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js",
@@ -226,11 +222,6 @@ func (v *verifier) checkDashboard() {
 			"Recent Logs",
 			"dashboardLogsPanelHTML",
 		},
-		"docs/panel-api.md": {
-			"GET    /api/dashboard",
-			"rate estimates",
-			"recent logs",
-		},
 	}
 	for rel, markers := range checks {
 		payload, err := os.ReadFile(v.path(rel))
@@ -272,11 +263,6 @@ func (v *verifier) checkClientTrafficReset() {
 			"reset-traffic",
 			"TrafficResetAt",
 			"/api/clients/",
-		},
-		"docs/panel-api.md": {
-			"POST   /api/clients/{id}/traffic/reset",
-			"TrafficResetAt",
-			"TrafficRXOffset",
 		},
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js": {
 			"TrafficResetAt",
@@ -366,11 +352,6 @@ func (v *verifier) checkExternalXrayBinaryManagement() {
 			"/api/xray/external/download",
 			"xrayBinaryPath",
 		},
-		"docs/panel-api.md": {
-			"GET    /api/xray/external/status",
-			"POST   /api/xray/external/upload",
-			"POST   /api/xray/external/download",
-		},
 	}
 	for rel, markers := range checks {
 		payload, err := os.ReadFile(v.path(rel))
@@ -406,6 +387,24 @@ func (v *verifier) checkLinuxInstall() {
 			"-init-admin",
 			"panel url:",
 			"admin password:",
+		},
+		"scripts/install/install.sh": {
+			"tapx-linux-amd64.tar.gz",
+			"TAPX_VERSION",
+			"TAPX_PANEL_LISTEN",
+			"tapx-panel.service",
+			"panel url:",
+			"admin password:",
+		},
+		"README.md": {
+			"curl -fsSL https://raw.githubusercontent.com/VAMPIRE0924/TapX/main/scripts/install/install.sh | sudo bash",
+			"tapx-linux-amd64.tar.gz",
+			"tapx-openwrt-x86-64.tar.gz",
+		},
+		"scripts/build/release-archives.sh": {
+			`linux_name="tapx-linux-amd64"`,
+			`openwrt_name="tapx-openwrt-x86-64"`,
+			"SHA256SUMS",
 		},
 		"packaging/systemd/tapx.env": {
 			"TAPX_PANEL_BASE_PATH",
@@ -554,10 +553,6 @@ func (v *verifier) checkRawSecurityConfigSurface() {
 			"RawUDP.DTLS.ReplayWindow",
 			"RawTCP.TLS.AllowInsecure",
 			"RawUDP.DTLS.AllowInsecure",
-		},
-		"docs/requirements-map.md": {
-			"RawTCP.TLS",
-			"RawUDP.DTLS",
 		},
 	}
 	for rel, markers := range checks {

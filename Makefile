@@ -1,4 +1,4 @@
-.PHONY: all test go-test fastpath verify-local verify-release build-linux-amd64 build-openwrt-x86 package-openwrt-x86 install-linux integration-netns integration-device-apply-netns integration-bridge-apply-netns integration-mss-clamp-netns integration-dns-apply-netns integration-tun-netns integration-tun-vkey-netns integration-tap-netns integration-tcp-tun-netns integration-tcp-tls-tun-netns integration-udp-dtls-tun-netns integration-address-guard-netns clean env
+.PHONY: all test go-test fastpath verify-local verify-release build-linux-amd64 build-openwrt-x86 package-openwrt-x86 package-release install-linux integration-netns integration-device-apply-netns integration-bridge-apply-netns integration-mss-clamp-netns integration-dns-apply-netns integration-tun-netns integration-tun-vkey-netns integration-tap-netns integration-tcp-tun-netns integration-tcp-tls-tun-netns integration-udp-dtls-tun-netns integration-address-guard-netns clean env
 
 CC ?= gcc
 CFLAGS ?= -std=c11 -O3 -Wall -Wextra -Werror -fPIC
@@ -30,6 +30,9 @@ build-openwrt-x86:
 
 package-openwrt-x86: build-openwrt-x86
 	bash ./scripts/build/openwrt-x86-64-ipk.sh
+
+package-release: build-linux-amd64 package-openwrt-x86
+	bash ./scripts/build/release-archives.sh
 
 install-linux: build-linux-amd64
 	bash ./scripts/install/linux-install.sh
