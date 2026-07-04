@@ -108,20 +108,6 @@ ip -d addr
 
 TapX creates real Linux TUN/TAP devices, so nftables, routes, bridges, and normal Linux networking tools can use those interfaces.
 
-## Examples
-
-Example runtime configs are kept under:
-
-```text
-docs/examples/
-```
-
-Check a config:
-
-```bash
-tapx-core -config docs/examples/raw-udp-tun.json -check
-```
-
 ## License
 
 GPL-2.0

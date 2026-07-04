@@ -171,6 +171,12 @@ func (v *verifier) checkRequiredFiles() {
 func (v *verifier) checkJSONFiles() {
 	for _, dir := range []string{"docs", "openwrt"} {
 		root := v.path(dir)
+		if _, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			v.fail("stat %s: %v", dir, err)
+			continue
+		}
 		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
 				v.fail("walk %s: %v", path, err)
@@ -194,15 +200,20 @@ func (v *verifier) checkJSONFiles() {
 }
 
 func (v *verifier) checkRuntimeExamples() {
-	for _, rel := range []string{
-		"docs/examples/raw-udp-tun.json",
-		"docs/examples/raw-udp-tun-vkey.json",
-		"docs/examples/raw-udp-tap-guard.json",
-		"docs/examples/raw-tcp-tun.json",
-		"docs/examples/xray-external-listener.json",
-		"docs/examples/xray-embedded-core.json",
+	examples := []string{
 		"openwrt/tapx-core/files/etc/tapx/runtime.json.example",
-	} {
+	}
+	if v.exists("docs/examples/raw-udp-tun.json") {
+		examples = append(examples,
+			"docs/examples/raw-udp-tun.json",
+			"docs/examples/raw-udp-tun-vkey.json",
+			"docs/examples/raw-udp-tap-guard.json",
+			"docs/examples/raw-tcp-tun.json",
+			"docs/examples/xray-external-listener.json",
+			"docs/examples/xray-embedded-core.json",
+		)
+	}
+	for _, rel := range examples {
 		payload, err := os.ReadFile(v.path(rel))
 		if err != nil {
 			v.fail("read runtime config %s: %v", rel, err)
