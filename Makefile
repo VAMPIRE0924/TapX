@@ -1,4 +1,4 @@
-.PHONY: all test go-test fastpath verify-local verify-release build-linux-amd64 build-openwrt-x86 package-openwrt-x86 package-release install-linux integration-netns integration-device-apply-netns integration-bridge-apply-netns integration-mss-clamp-netns integration-dns-apply-netns integration-tun-netns integration-tun-vkey-netns integration-tap-netns integration-tcp-tun-netns integration-tcp-tls-tun-netns integration-udp-dtls-tun-netns integration-address-guard-netns clean env
+.PHONY: all test panel-web go-test fastpath verify-local verify-release build-linux-amd64 build-openwrt-x86 package-openwrt-x86 package-release install-linux integration-netns integration-device-apply-netns integration-bridge-apply-netns integration-mss-clamp-netns integration-dns-apply-netns integration-tun-netns integration-tun-vkey-netns integration-tap-netns integration-tcp-tun-netns integration-tcp-tls-tun-netns integration-udp-dtls-tun-netns integration-address-guard-netns clean env
 
 CC ?= gcc
 CFLAGS ?= -std=c11 -O3 -Wall -Wextra -Werror -fPIC
@@ -9,6 +9,9 @@ env:
 	bash ./scripts/dev/check-env.sh
 
 test: go-test fastpath
+
+panel-web:
+	cd web && npm ci && npm run typecheck && npm run build
 
 go-test:
 	go test ./...

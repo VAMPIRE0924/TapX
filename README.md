@@ -12,7 +12,7 @@ Raw UDP and Raw TCP can run without encryption or authentication when your netwo
 curl -fsSL https://raw.githubusercontent.com/VAMPIRE0924/TapX/main/scripts/install/install.sh | sudo bash
 ```
 
-The installer downloads the latest Linux package, installs `tapx-core` and `tapx-panel`, creates the systemd service, starts the panel, and prints the panel URL plus the first admin password.
+The installer downloads the latest Linux package and opens an interactive wizard. It installs `tapx-core` and `tapx-panel`, creates the systemd service, and lets you set the listen address, port, panel path, admin username, admin password, database path, autostart, and start behavior.
 
 Default listen address:
 
@@ -30,15 +30,23 @@ sudo TAPX_PANEL_LISTEN=0.0.0.0:8080 bash /tmp/tapx-install.sh
 Install a specific release:
 
 ```bash
-sudo TAPX_VERSION=v0.1.0 bash /tmp/tapx-install.sh
+sudo TAPX_VERSION=v0.1.1 bash /tmp/tapx-install.sh
 ```
 
-Service commands:
+After installation, run the manager again:
 
 ```bash
-sudo systemctl status tapx-panel
-sudo systemctl restart tapx-panel
-sudo journalctl -u tapx-panel -f
+sudo tapx
+```
+
+Common commands:
+
+```bash
+sudo tapx status
+sudo tapx restart
+sudo tapx settings
+sudo tapx set-panel
+sudo tapx logs
 ```
 
 Installed paths:

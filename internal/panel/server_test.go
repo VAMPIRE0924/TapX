@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -359,7 +360,10 @@ func TestServerStaticUI(t *testing.T) {
 	if !bytes.Contains(index, []byte("<title>TapX</title>")) {
 		t.Fatalf("index page missing TapX title")
 	}
-	app := getRaw(t, server.URL+"/app.js", http.StatusOK)
+	if !bytes.Contains(index, []byte(`id="root"`)) || !bytes.Contains(index, []byte(`./assets/`)) {
+		t.Fatalf("index page missing Vite root/assets")
+	}
+	app := getRaw(t, server.URL+"/"+firstJSAsset(t, index), http.StatusOK)
 	if !bytes.Contains(app, []byte("runtime/apply")) {
 		t.Fatalf("app script missing runtime apply call")
 	}
@@ -381,14 +385,8 @@ func TestServerStaticUI(t *testing.T) {
 	if !bytes.Contains(app, []byte("/api/diagnostics")) {
 		t.Fatalf("app script missing diagnostics API call")
 	}
-	if !bytes.Contains(app, []byte("/api/stats")) || !bytes.Contains(app, []byte("Client Quota")) {
-		t.Fatalf("app script missing stats API/UI markers")
-	}
 	if !bytes.Contains(app, []byte("/api/dashboard")) || !bytes.Contains(app, []byte("Recent Logs")) || !bytes.Contains(app, []byte("RX Rate")) {
 		t.Fatalf("app script missing dashboard API/UI markers")
-	}
-	if !bytes.Contains(app, []byte("/api/templates/raw-pair")) || !bytes.Contains(app, []byte("template-generate")) {
-		t.Fatalf("app script missing raw template UI/API markers")
 	}
 	if !bytes.Contains(app, []byte("/api/share/clients")) || !bytes.Contains(app, []byte("Client Share")) {
 		t.Fatalf("app script missing client share UI/API markers")
@@ -396,17 +394,11 @@ func TestServerStaticUI(t *testing.T) {
 	if !bytes.Contains(app, []byte("/api/clients/")) || !bytes.Contains(app, []byte("reset-traffic")) || !bytes.Contains(app, []byte("TrafficResetAt")) {
 		t.Fatalf("app script missing client traffic reset UI/API markers")
 	}
-	if !bytes.Contains(app, []byte("xrayRuntimes")) || !bytes.Contains(app, []byte("Xray Runtimes")) {
-		t.Fatalf("app script missing xray runtime state UI markers")
-	}
 	if !bytes.Contains(app, []byte("xrayPipes")) || !bytes.Contains(app, []byte("Xray Pipes")) {
 		t.Fatalf("app script missing xray pipe state UI markers")
 	}
 	if !bytes.Contains(app, []byte("/api/xray/external/status")) || !bytes.Contains(app, []byte("Xray Binary")) {
 		t.Fatalf("app script missing external xray binary UI/API markers")
-	}
-	if !bytes.Contains(index, []byte(`id="objectForm"`)) {
-		t.Fatalf("index page missing object field form")
 	}
 }
 
@@ -421,13 +413,22 @@ func TestServerBasePathScopesUIAndAPI(t *testing.T) {
 		t.Fatalf("health = %+v, want ok", health)
 	}
 	index := getRaw(t, server.URL+"/tapx-secret/", http.StatusOK)
-	if !bytes.Contains(index, []byte(`href="app.css"`)) || !bytes.Contains(index, []byte(`src="app.js"`)) {
+	if !bytes.Contains(index, []byte(`./assets/`)) || !bytes.Contains(index, []byte(`id="root"`)) {
 		t.Fatalf("index should use relative assets under base path")
 	}
-	app := getRaw(t, server.URL+"/tapx-secret/app.js", http.StatusOK)
-	if !bytes.Contains(app, []byte("detectBasePath")) || !bytes.Contains(app, []byte("apiURL")) {
+	app := getRaw(t, server.URL+"/tapx-secret/"+firstJSAsset(t, index), http.StatusOK)
+	if !bytes.Contains(app, []byte("apiURL")) {
 		t.Fatalf("app script missing base-path API helpers")
 	}
+}
+
+func firstJSAsset(t *testing.T, index []byte) string {
+	t.Helper()
+	match := regexp.MustCompile(`(?:src|href)="\./(assets/[^"]+\.js)"`).FindSubmatch(index)
+	if len(match) != 2 {
+		t.Fatalf("index missing JS asset: %s", string(index))
+	}
+	return string(match[1])
 }
 
 func TestServerValidationProblems(t *testing.T) {

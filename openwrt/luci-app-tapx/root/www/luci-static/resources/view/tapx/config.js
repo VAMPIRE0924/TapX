@@ -264,6 +264,76 @@ function fieldsFor(kind) {
 	]);
 }
 
+function fieldGroupsFor(kind) {
+	var fields = fieldsFor(kind);
+
+	function byPath(paths) {
+		return fields.filter(function(field) {
+			return paths.indexOf(field.path) !== -1;
+		});
+	}
+
+	function byPrefix(prefix) {
+		return fields.filter(function(field) {
+			return field.path.indexOf(prefix) === 0;
+		});
+	}
+
+	function rest(used) {
+		return fields.filter(function(field) {
+			return used.indexOf(field.path) === -1;
+		});
+	}
+
+	if (kind === 'listeners') {
+		var inbound = byPath([ 'ID', 'Enabled', 'Name', 'BindHost', 'BindPort', 'Transport', 'XrayProfileID', 'Remark' ]);
+		return [
+			{ title: _('Inbound'), fields: inbound },
+			{ title: _('Binding'), fields: byPrefix('Binding.') },
+			{ title: _('Raw UDP'), fields: byPrefix('RawUDP.') },
+			{ title: _('Raw TCP'), fields: byPrefix('RawTCP.') }
+		];
+	}
+	if (kind === 'connectors') {
+		var outbound = byPath([ 'ID', 'Enabled', 'Name', 'Remote', 'Port', 'Transport', 'XrayProfileID', 'Remark' ]);
+		return [
+			{ title: _('Outbound'), fields: outbound },
+			{ title: _('Binding'), fields: byPrefix('Binding.') },
+			{ title: _('Raw UDP'), fields: byPrefix('RawUDP.') },
+			{ title: _('Raw TCP'), fields: byPrefix('RawTCP.') }
+		];
+	}
+	if (kind === 'clients') {
+		var client = byPath([ 'ID', 'Enabled', 'Name', 'Email', 'ListenerID', 'CredentialType', 'CredentialValue', 'AddressID', 'ExpiresAt', 'TrafficCap', 'TrafficResetAt', 'TrafficRXOffset', 'TrafficTXOffset', 'Remark' ]);
+		return [
+			{ title: _('Client'), fields: client },
+			{ title: _('Binding'), fields: byPrefix('Binding.') }
+		];
+	}
+	if (kind === 'devices') {
+		return [
+			{ title: _('Device'), fields: byPath([ 'ID', 'Enabled', 'Name', 'Type', 'IfName', 'MTU', 'MSSClamp', 'IPv4CIDR', 'IPv6CIDR', 'Remark' ]) },
+			{ title: _('Bridge'), fields: byPath([ 'Bridge' ]) },
+			{ title: _('Routes and DNS'), fields: byPath([ 'Routes', 'DNS' ]) }
+		];
+	}
+	if (kind === 'xrayProfiles') {
+		return [
+			{ title: _('Xray Profile'), fields: byPath([ 'ID', 'Enabled', 'Name', 'Runtime', 'InboundProtocol', 'OutboundProtocol', 'Network', 'Security', 'Remark' ]) },
+			{ title: _('Endpoint JSON'), fields: byPath([ 'InboundSettingsJSON', 'OutboundSettingsJSON' ]) },
+			{ title: _('Template JSON'), fields: byPath([ 'StreamSettingsJSON', 'SniffingJSON', 'MuxJSON', 'SockoptJSON', 'FallbacksJSON', 'RoutingJSON', 'DNSJSON', 'PolicyJSON', 'AdvancedJSON' ]) }
+		];
+	}
+	if (kind === 'settings') {
+		var panel = byPath([ 'ID', 'Enabled', 'Name', 'PanelListen', 'PanelHTTPS', 'PanelCertFile', 'PanelKeyFile', 'PanelAuthEnabled', 'AdminUsername', 'AdminPasswordHash', 'SessionTTLSecond', 'Remark' ]);
+		return [
+			{ title: _('Panel'), fields: panel },
+			{ title: _('Runtime'), fields: rest(panel.map(function(field) { return field.path; })) }
+		];
+	}
+	return [ { title: kindMeta(kind)[2], fields: fields } ];
+}
+
 function getPath(value, path) {
 	var parts = path.split('.');
 	var current = value;
@@ -330,36 +400,39 @@ function renderObjectBuilder(runtimePath, runtimeJSON) {
 	function fillFields(obj) {
 		state.inputs = {};
 		fieldsNode.innerHTML = '';
-		var defs = fieldsFor(state.kind);
-		for (var i = 0; i < defs.length; i++) {
-			var def = defs[i];
-			var value = getPath(obj, def.path);
-			var input;
-			if (def.type === 'select') {
-				input = E('select', { 'class': 'cbi-input-select' });
-				for (var j = 0; j < def.options.length; j++)
-					input.appendChild(E('option', { value: def.options[j] }, def.options[j]));
-				input.value = value == null ? '' : String(value);
-			} else if (def.type === 'checkbox') {
-				input = E('input', { type: 'checkbox', 'class': 'cbi-input-checkbox' });
-				input.checked = Boolean(value);
-			} else if (def.type === 'textarea' || def.type === 'json' || def.type === 'array') {
-				input = E('textarea', { 'class': 'cbi-input-textarea', rows: def.type === 'array' ? 3 : 5, spellcheck: 'false' });
-				if (def.type === 'json')
-					input.value = value == null ? '' : JSON.stringify(value, null, 2);
-				else if (def.type === 'array')
-					input.value = Array.isArray(value) ? value.join('\n') : '';
-				else
+		var groups = fieldGroupsFor(state.kind);
+		for (var g = 0; g < groups.length; g++) {
+			fieldsNode.appendChild(E('h4', {}, groups[g].title));
+			for (var i = 0; i < groups[g].fields.length; i++) {
+				var def = groups[g].fields[i];
+				var value = getPath(obj, def.path);
+				var input;
+				if (def.type === 'select') {
+					input = E('select', { 'class': 'cbi-input-select' });
+					for (var j = 0; j < def.options.length; j++)
+						input.appendChild(E('option', { value: def.options[j] }, def.options[j]));
 					input.value = value == null ? '' : String(value);
-			} else {
-				input = E('input', { type: def.type === 'number' ? 'number' : 'text', 'class': 'cbi-input-text' });
-				input.value = value == null ? '' : String(value);
+				} else if (def.type === 'checkbox') {
+					input = E('input', { type: 'checkbox', 'class': 'cbi-input-checkbox' });
+					input.checked = Boolean(value);
+				} else if (def.type === 'textarea' || def.type === 'json' || def.type === 'array') {
+					input = E('textarea', { 'class': 'cbi-input-textarea', rows: def.type === 'array' ? 3 : 5, spellcheck: 'false' });
+					if (def.type === 'json')
+						input.value = value == null ? '' : JSON.stringify(value, null, 2);
+					else if (def.type === 'array')
+						input.value = Array.isArray(value) ? value.join('\n') : '';
+					else
+						input.value = value == null ? '' : String(value);
+				} else {
+					input = E('input', { type: def.type === 'number' ? 'number' : 'text', 'class': 'cbi-input-text' });
+					input.value = value == null ? '' : String(value);
+				}
+				state.inputs[def.path] = input;
+				fieldsNode.appendChild(E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, def.label),
+					E('div', { 'class': 'cbi-value-field' }, input)
+				]));
 			}
-			state.inputs[def.path] = input;
-			fieldsNode.appendChild(E('div', { 'class': 'cbi-value' }, [
-				E('label', { 'class': 'cbi-value-title' }, def.label),
-				E('div', { 'class': 'cbi-value-field' }, input)
-			]));
 		}
 		objectJSON.value = JSON.stringify(obj, null, 2);
 	}

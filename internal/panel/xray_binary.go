@@ -1,6 +1,8 @@
 package panel
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -136,7 +138,7 @@ func (s *Server) handleXrayExternalDownload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	status, err := writeXrayBinary(path, response.Body)
+	status, err := writeDownloadedXrayBinary(path, req.URL, response.Header.Get("Content-Type"), response.Body)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -186,6 +188,71 @@ func validateDownloadURL(raw string) error {
 }
 
 func writeXrayBinary(path string, reader io.Reader) (xrayBinaryStatus, error) {
+	payload, err := readXrayBinaryPayload(reader)
+	if err != nil {
+		return xrayBinaryStatus{}, err
+	}
+	return writeXrayBinaryBytes(path, payload)
+}
+
+func writeDownloadedXrayBinary(path string, sourceURL string, contentType string, reader io.Reader) (xrayBinaryStatus, error) {
+	payload, err := readXrayBinaryPayload(reader)
+	if err != nil {
+		return xrayBinaryStatus{}, err
+	}
+	if looksLikeZip(sourceURL, contentType, payload) {
+		payload, err = extractXrayFromZip(payload)
+		if err != nil {
+			return xrayBinaryStatus{}, err
+		}
+	}
+	return writeXrayBinaryBytes(path, payload)
+}
+
+func readXrayBinaryPayload(reader io.Reader) ([]byte, error) {
+	limited := &io.LimitedReader{R: reader, N: maxXrayBinarySize + 1}
+	payload, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read xray binary: %w", err)
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("xray binary is empty")
+	}
+	if len(payload) > maxXrayBinarySize {
+		return nil, fmt.Errorf("xray binary exceeds %d bytes", maxXrayBinarySize)
+	}
+	return payload, nil
+}
+
+func looksLikeZip(sourceURL string, contentType string, payload []byte) bool {
+	contentType = strings.ToLower(contentType)
+	sourceURL = strings.ToLower(sourceURL)
+	return strings.Contains(contentType, "zip") ||
+		strings.HasSuffix(sourceURL, ".zip") ||
+		bytes.HasPrefix(payload, []byte("PK\x03\x04"))
+}
+
+func extractXrayFromZip(payload []byte) ([]byte, error) {
+	reader, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		return nil, fmt.Errorf("read xray zip: %w", err)
+	}
+	for _, file := range reader.File {
+		name := strings.ToLower(filepath.Base(file.Name))
+		if file.FileInfo().IsDir() || (name != "xray" && name != "xray.exe") {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open xray in zip: %w", err)
+		}
+		defer rc.Close()
+		return readXrayBinaryPayload(rc)
+	}
+	return nil, fmt.Errorf("xray executable not found in zip")
+}
+
+func writeXrayBinaryBytes(path string, payload []byte) (xrayBinaryStatus, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return xrayBinaryStatus{}, fmt.Errorf("create xray binary directory: %w", err)
 	}
@@ -202,16 +269,12 @@ func writeXrayBinary(path string, reader io.Reader) (xrayBinaryStatus, error) {
 		}
 	}()
 
-	limited := &io.LimitedReader{R: reader, N: maxXrayBinarySize + 1}
-	written, err := io.Copy(temp, limited)
+	written, err := temp.Write(payload)
 	if err != nil {
 		return xrayBinaryStatus{}, fmt.Errorf("write xray binary: %w", err)
 	}
-	if written == 0 {
-		return xrayBinaryStatus{}, fmt.Errorf("xray binary is empty")
-	}
-	if written > maxXrayBinarySize {
-		return xrayBinaryStatus{}, fmt.Errorf("xray binary exceeds %d bytes", maxXrayBinarySize)
+	if written != len(payload) {
+		return xrayBinaryStatus{}, fmt.Errorf("write xray binary: short write")
 	}
 	if err := temp.Chmod(0o755); err != nil {
 		return xrayBinaryStatus{}, fmt.Errorf("chmod temporary xray binary: %w", err)

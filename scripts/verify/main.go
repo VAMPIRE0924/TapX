@@ -89,7 +89,7 @@ func (v *verifier) checkRuntimeReload() {
 			"TestRuntimeManagerUsesStopFirstWhenResourcesConflict",
 			"TestRuntimeManagerPrepareFirstFailureKeepsOldRuntime",
 		},
-		"internal/panel/static/app.js": {
+		"web/src/pages/DashboardPage.tsx": {
 			"Reload Mode",
 			"lastReloadMode",
 		},
@@ -122,10 +122,14 @@ func (v *verifier) fail(format string, args ...any) {
 }
 
 func (v *verifier) checkRequiredFiles() {
-	for _, rel := range []string{
+	required := []string{
 		"README.md",
 		".github/workflows/ci.yml",
 		".github/workflows/release.yml",
+		"web/package.json",
+		"web/src/App.tsx",
+		"web/src/schema.ts",
+		"web/src/pages/XrayPage.tsx",
 		"scripts/install/install.sh",
 		"scripts/build/release-archives.sh",
 		"scripts/lab/common.ps1",
@@ -141,12 +145,23 @@ func (v *verifier) checkRequiredFiles() {
 		"scripts/integration/address-guard-netns.sh",
 		"scripts/build/openwrt-x86-64-ipk.sh",
 		"scripts/build/mkipk.go",
-		"docs/examples/raw-udp-tun.json",
-		"docs/examples/raw-tcp-tun.json",
 		"openwrt/tapx-core/files/etc/config/tapx",
 		"openwrt/tapx-core/files/etc/init.d/tapx",
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js",
-	} {
+	}
+	if v.exists("AGENTS.md") {
+		required = append(required,
+			"AGENTS.md",
+			"docs/requirements-map.md",
+			"docs/architecture.md",
+			"docs/panel-api.md",
+			"docs/openwrt.md",
+			"docs/install-linux.md",
+			"docs/release.md",
+			"docs/verification.md",
+		)
+	}
+	for _, rel := range required {
 		if _, err := os.Stat(v.path(rel)); err != nil {
 			v.fail("required file %s: %v", rel, err)
 		}
@@ -216,12 +231,21 @@ func (v *verifier) checkDashboard() {
 			"/api/dashboard",
 			"handleDashboard",
 		},
-		"internal/panel/static/app.js": {
+		"web/src/api.ts": {
 			"/api/dashboard",
+		},
+		"web/src/pages/DashboardPage.tsx": {
+			"loadDashboard",
 			"RX Rate",
 			"Recent Logs",
-			"dashboardLogsPanelHTML",
 		},
+	}
+	if v.exists("docs/panel-api.md") {
+		checks["docs/panel-api.md"] = []string{
+			"GET    /api/dashboard",
+			"rate estimates",
+			"recent logs",
+		}
 	}
 	for rel, markers := range checks {
 		payload, err := os.ReadFile(v.path(rel))
@@ -259,9 +283,15 @@ func (v *verifier) checkClientTrafficReset() {
 			"/api/clients/",
 			"handleClientTraffic",
 		},
-		"internal/panel/static/app.js": {
+		"web/src/pages/ObjectListPage.tsx": {
 			"reset-traffic",
+			"Reset Traffic",
+		},
+		"web/src/schema.ts": {
 			"TrafficResetAt",
+			"TrafficRXOffset",
+		},
+		"web/src/api.ts": {
 			"/api/clients/",
 		},
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js": {
@@ -269,6 +299,13 @@ func (v *verifier) checkClientTrafficReset() {
 			"TrafficRXOffset",
 			"TrafficTXOffset",
 		},
+	}
+	if v.exists("docs/panel-api.md") {
+		checks["docs/panel-api.md"] = []string{
+			"POST   /api/clients/{id}/traffic/reset",
+			"TrafficResetAt",
+			"TrafficRXOffset",
+		}
 	}
 	for rel, markers := range checks {
 		payload, err := os.ReadFile(v.path(rel))
@@ -345,13 +382,22 @@ func (v *verifier) checkExternalXrayBinaryManagement() {
 			"/api/xray/external/upload",
 			"/api/xray/external/download",
 		},
-		"internal/panel/static/app.js": {
+		"web/src/pages/XrayPage.tsx": {
 			"Xray Binary",
+			"Official latest Linux x86_64",
+		},
+		"web/src/api.ts": {
 			"/api/xray/external/status",
 			"/api/xray/external/upload",
 			"/api/xray/external/download",
-			"xrayBinaryPath",
 		},
+	}
+	if v.exists("docs/panel-api.md") {
+		checks["docs/panel-api.md"] = []string{
+			"GET    /api/xray/external/status",
+			"POST   /api/xray/external/upload",
+			"POST   /api/xray/external/download",
+		}
 	}
 	for rel, markers := range checks {
 		payload, err := os.ReadFile(v.path(rel))
@@ -380,30 +426,21 @@ func (v *verifier) checkLinuxInstall() {
 		},
 		"scripts/install/linux-install.sh": {
 			"TAPX_PANEL_BASE_PATH",
-			"--admin-username",
-			"--admin-password",
-			"--base-path",
-			"--unit-dir",
+			"TapX Linux install wizard",
+			"TapX management menu",
+			"set-panel",
+			"core-apply",
 			"-init-admin",
-			"panel url:",
-			"admin password:",
+			"Admin password is stored",
 		},
 		"scripts/install/install.sh": {
+			"releases/latest/download",
 			"tapx-linux-amd64.tar.gz",
-			"TAPX_VERSION",
-			"TAPX_PANEL_LISTEN",
-			"tapx-panel.service",
-			"panel url:",
-			"admin password:",
-		},
-		"README.md": {
-			"curl -fsSL https://raw.githubusercontent.com/VAMPIRE0924/TapX/main/scripts/install/install.sh | sudo bash",
-			"tapx-linux-amd64.tar.gz",
-			"tapx-openwrt-x86-64.tar.gz",
+			"TAPX_BUILD_DIR",
 		},
 		"scripts/build/release-archives.sh": {
-			`linux_name="tapx-linux-amd64"`,
-			`openwrt_name="tapx-openwrt-x86-64"`,
+			"tapx-linux-amd64.tar.gz",
+			"tapx-openwrt-x86-64.tar.gz",
 			"SHA256SUMS",
 		},
 		"packaging/systemd/tapx.env": {
@@ -413,11 +450,10 @@ func (v *verifier) checkLinuxInstall() {
 			"-base-path=${TAPX_PANEL_BASE_PATH}",
 		},
 		"internal/panel/static/index.html": {
-			`href="app.css"`,
-			`src="app.js"`,
+			`<div id="root">`,
+			`./assets/`,
 		},
-		"internal/panel/static/app.js": {
-			"detectBasePath",
+		"web/src/api.ts": {
 			"apiURL",
 		},
 	}
@@ -458,9 +494,14 @@ func (v *verifier) checkClientSharing() {
 			"/api/share/clients/",
 			"handleClientShare",
 		},
-		"internal/panel/static/app.js": {
+		"web/src/pages/ObjectListPage.tsx": {
 			"Client Share",
+			"loadClientShare",
+		},
+		"web/src/api.ts": {
 			"/api/share/clients",
+		},
+		"web/src/schema.ts": {
 			"CredentialType",
 			"Binding.ConnectorID",
 			"IPv4Gateway",
@@ -540,7 +581,7 @@ func (v *verifier) checkRawSecurityConfigSurface() {
 			"Raw UDP/DTLS/TUN",
 			"ip a show dev",
 		},
-		"internal/panel/static/app.js": {
+		"web/src/schema.ts": {
 			"RawTCP.TLS.CertFile",
 			"RawUDP.DTLS.CertFile",
 			"RawUDP.DTLS.ReplayWindow",
@@ -554,6 +595,12 @@ func (v *verifier) checkRawSecurityConfigSurface() {
 			"RawTCP.TLS.AllowInsecure",
 			"RawUDP.DTLS.AllowInsecure",
 		},
+	}
+	if v.exists("docs/requirements-map.md") {
+		checks["docs/requirements-map.md"] = []string{
+			"RawTCP.TLS",
+			"RawUDP.DTLS",
+		}
 	}
 	for rel, markers := range checks {
 		payload, err := os.ReadFile(v.path(rel))
@@ -780,6 +827,11 @@ func (v *verifier) rel(path string) string {
 		return path
 	}
 	return filepath.ToSlash(rel)
+}
+
+func (v *verifier) exists(rel string) bool {
+	_, err := os.Stat(v.path(rel))
+	return err == nil
 }
 
 type ipkExpectation struct {

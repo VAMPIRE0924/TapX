@@ -17,12 +17,22 @@ jobs:
           go-version: "1.26.x"
           cache: true
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc make pkg-config file nodejs npm \
+            gcc make pkg-config file \
             iproute2 iptables iputils-ping
+
+      - name: Build panel web
+        run: make panel-web
 
       - name: Verify repository structure
         run: make verify-local
@@ -32,9 +42,6 @@ jobs:
 
       - name: Go vet
         run: GOTOOLCHAIN=local go vet ./...
-
-      - name: Frontend syntax
-        run: node --check internal/panel/static/app.js
 
       - name: Fastpath tests
         run: make fastpath

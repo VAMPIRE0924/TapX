@@ -1,0 +1,115 @@
+.tapx-sidebar > .ant-layout-sider {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-self: flex-start;
+}
+
+.tapx-sidebar > .ant-layout-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.sider-brand,
+.drawer-brand {
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0;
+  color: var(--ant-color-text);
+}
+
+.sider-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 64px;
+  padding: 12px 12px 12px 18px;
+  border-bottom: 1px solid var(--ant-color-border-secondary);
+  user-select: none;
+}
+
+.sider-brand-collapsed {
+  justify-content: center;
+  padding: 12px 4px;
+}
+
+.brand-block,
+.brand-actions,
+.drawer-header {
+  display: inline-flex;
+  align-items: center;
+}
+
+.brand-block {
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-actions {
+  gap: 6px;
+}
+
+.brand-mark {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--ant-color-primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.sider-nav {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+.drawer-handle {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 1100;
+  display: none;
+}
+
+.drawer-header {
+  justify-content: space-between;
+  width: 100%;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ant-color-border-secondary);
+}
+
+.sider-nav .ant-menu-item-selected,
+.sider-nav .ant-menu-submenu-selected > .ant-menu-submenu-title {
+  background-color: color-mix(in srgb, var(--ant-color-primary) 18%, transparent) !important;
+  color: var(--ant-color-primary) !important;
+}
+
+body.dark .ant-drawer-content,
+body.dark .ant-drawer-body {
+  background-color: #15161a;
+}
+
+@media (max-width: 768px) {
+  .drawer-handle {
+    display: inline-flex;
+  }
+
+  .tapx-sidebar > .ant-layout-sider .ant-layout-sider-children,
+  .tapx-sidebar > .ant-layout-sider .ant-layout-sider-trigger {
+    display: none;
+  }
+
+  .tapx-sidebar > .ant-layout-sider {
+    flex: 0 0 0 !important;
+    max-width: 0 !important;
+    min-width: 0 !important;
+    width: 0 !important;
+  }
+}
