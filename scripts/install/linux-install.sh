@@ -339,7 +339,6 @@ api_call() {
   local base cookie result username password
   base="$(api_base_url)"
   cookie="$(mktemp)"
-  trap 'rm -f "$cookie"' RETURN
   username=""
   password=""
   if [[ -r "$(result_file)" ]]; then
@@ -356,9 +355,11 @@ api_call() {
       "$base/api/auth/login" >/dev/null 2>&1 || true
   fi
   result="$(curl -fsS -b "$cookie" -X "$method" "$base$path" 2>&1)" || {
+    rm -f "$cookie"
     echo -e "${red}API call failed:${plain} $result" >&2
     return 1
   }
+  rm -f "$cookie"
   echo "$result"
 }
 

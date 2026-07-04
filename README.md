@@ -30,7 +30,7 @@ sudo TAPX_PANEL_LISTEN=0.0.0.0:8080 bash /tmp/tapx-install.sh
 Install a specific release:
 
 ```bash
-sudo TAPX_VERSION=v0.1.1 bash /tmp/tapx-install.sh
+sudo TAPX_VERSION=v0.1.2 bash /tmp/tapx-install.sh
 ```
 
 After installation, run the manager again:
