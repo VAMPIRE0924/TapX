@@ -17,7 +17,7 @@ db_path_default="${TAPX_DB_PATH:-/var/lib/tapx/tapx.db}"
 
 need_root() {
   if [[ "$(id -u)" != "0" ]]; then
-    echo -e "${red}TapX installer must run as root.${plain}" >&2
+    echo -e "${red}TapX 安装/管理脚本必须使用 root 权限运行。${plain}" >&2
     exit 1
   fi
 }
@@ -31,17 +31,25 @@ random_token() {
   fi
 }
 
+has_tty() {
+  [[ -r /dev/tty ]] && { : </dev/tty; } 2>/dev/null
+}
+
+is_yes() {
+  [[ "${1:-}" =~ ^([Yy]|[Yy][Ee][Ss]|是|确认)$ ]]
+}
+
 read_prompt() {
   local __var="$1" __prompt="$2" __secret="${3:-0}" __value=""
   if [[ "$__secret" == "1" ]]; then
-    if [[ -r /dev/tty ]]; then
+    if has_tty; then
       read -r -s -p "$__prompt" __value </dev/tty
     else
       read -r -s -p "$__prompt" __value
     fi
     echo
   else
-    if [[ -r /dev/tty ]]; then
+    if has_tty; then
       read -r -p "$__prompt" __value </dev/tty
     else
       read -r -p "$__prompt" __value
@@ -60,7 +68,7 @@ prompt_default() {
 prompt_secret_default() {
   local var="$1" prompt="$2" default="$3"
   local value=""
-  read_prompt value "$prompt [empty=random]: " 1
+  read_prompt value "$prompt [留空=随机生成]: " 1
   printf -v "$var" '%s' "${value:-$default}"
 }
 
@@ -160,7 +168,7 @@ install_service_file() {
   install -d -m 0755 "$unit_dir"
   cat >"$unit_dir/$service_name" <<EOF
 [Unit]
-Description=TapX panel and runtime manager
+Description=TapX 面板和运行时管理服务
 Wants=network-online.target
 After=network-online.target
 
@@ -197,8 +205,8 @@ install_cli_entry() {
 require_binaries() {
   for bin in tapx-core tapx-panel; do
     if [[ ! -x "$build_dir/$bin" ]]; then
-      echo -e "${red}Missing $build_dir/$bin.${plain}" >&2
-      echo "Build first: make build-linux-amd64" >&2
+      echo -e "${red}缺少 $build_dir/$bin。${plain}" >&2
+      echo "请先构建：make build-linux-amd64" >&2
       exit 1
     fi
   done
@@ -227,19 +235,19 @@ install_wizard() {
   need_root
   require_binaries
 
-  echo -e "${green}TapX Linux install wizard${plain}"
+  echo -e "${green}TapX Linux 安装向导${plain}"
   echo
   local host port listen base_path username password db_path enable start
-  prompt_default host "Panel listen address" "${TAPX_PANEL_HOST:-127.0.0.1}"
-  prompt_default port "Panel listen port" "${TAPX_PANEL_PORT:-8080}"
+  prompt_default host "面板监听地址" "${TAPX_PANEL_HOST:-127.0.0.1}"
+  prompt_default port "面板监听端口" "${TAPX_PANEL_PORT:-8080}"
   listen="${host}:${port}"
-  prompt_default base_path "Panel URL path" "${TAPX_PANEL_BASE_PATH:-/tapx-$(random_token 9)}"
+  prompt_default base_path "面板访问路径" "${TAPX_PANEL_BASE_PATH:-/tapx-$(random_token 9)}"
   base_path="$(normalize_base_path "$base_path")"
-  prompt_default username "Admin username" "${TAPX_ADMIN_USERNAME:-admin}"
-  prompt_secret_default password "Admin password" "${TAPX_ADMIN_PASSWORD:-$(random_token 18)}"
-  prompt_default db_path "SQLite database path" "$db_path_default"
-  prompt_default enable "Enable systemd autostart" "y"
-  prompt_default start "Start panel now" "y"
+  prompt_default username "管理员用户名" "${TAPX_ADMIN_USERNAME:-admin}"
+  prompt_secret_default password "管理员密码" "${TAPX_ADMIN_PASSWORD:-$(random_token 18)}"
+  prompt_default db_path "SQLite 数据库路径" "$db_path_default"
+  prompt_default enable "启用 systemd 开机自启" "y"
+  prompt_default start "现在启动面板" "y"
 
   install -d -m 0755 "$prefix/bin" "$(dirname "$db_path")" /var/log/tapx /run/tapx
   install -m 0755 "$build_dir/tapx-core" "$prefix/bin/tapx-core"
@@ -253,14 +261,14 @@ install_wizard() {
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
-    [[ "$enable" =~ ^[Yy] ]] && systemctl enable "$service_name"
-    [[ "$start" =~ ^[Yy] ]] && systemctl restart "$service_name"
+    is_yes "$enable" && systemctl enable "$service_name"
+    is_yes "$start" && systemctl restart "$service_name"
   fi
 
   echo
-  echo -e "${green}TapX installed.${plain}"
+  echo -e "${green}TapX 已安装完成。${plain}"
   show_settings
-  echo -e "${yellow}Admin password is stored once in $(result_file) with mode 600.${plain}"
+  echo -e "${yellow}管理员密码仅保存一次：$(result_file)，权限为 600。${plain}"
 }
 
 is_installed() {
@@ -268,27 +276,27 @@ is_installed() {
 }
 
 show_status() {
-  echo -e "${blue}Panel service:${plain}"
+  echo -e "${blue}面板服务：${plain}"
   if command -v systemctl >/dev/null 2>&1; then
     systemctl status "$service_name" --no-pager || true
   else
     pgrep -a tapx-panel || true
   fi
   echo
-  echo -e "${blue}Binaries:${plain}"
+  echo -e "${blue}程序版本：${plain}"
   "$prefix/bin/tapx-panel" -version 2>/dev/null || true
   "$prefix/bin/tapx-core" -version 2>/dev/null || true
 }
 
 show_settings() {
   load_env
-  echo -e "${blue}Panel settings:${plain}"
-  echo "  listen:    ${TAPX_PANEL_LISTEN:-127.0.0.1:8080}"
-  echo "  path:      ${TAPX_PANEL_BASE_PATH:-/}"
-  echo "  db:        ${TAPX_DB_PATH:-$db_path_default}"
-  echo "  url:       $(panel_url_host "${TAPX_PANEL_LISTEN:-127.0.0.1:8080}")"
-  echo "  env:       $(env_file)"
-  echo "  result:    $(result_file)"
+  echo -e "${blue}面板参数：${plain}"
+  echo "  监听地址：      ${TAPX_PANEL_LISTEN:-127.0.0.1:8080}"
+  echo "  访问路径：      ${TAPX_PANEL_BASE_PATH:-/}"
+  echo "  数据库：        ${TAPX_DB_PATH:-$db_path_default}"
+  echo "  面板地址：      $(panel_url_host "${TAPX_PANEL_LISTEN:-127.0.0.1:8080}")"
+  echo "  环境文件：      $(env_file)"
+  echo "  安装结果文件：  $(result_file)"
 }
 
 modify_panel_settings() {
@@ -301,19 +309,19 @@ modify_panel_settings() {
   local current_db="${TAPX_DB_PATH:-$db_path_default}"
   local host port listen base_path db_path username password change_auth
 
-  echo -e "${green}Modify TapX panel settings${plain}"
-  prompt_default host "Panel listen address" "$current_host"
-  prompt_default port "Panel listen port" "$current_port"
+  echo -e "${green}修改 TapX 面板参数${plain}"
+  prompt_default host "面板监听地址" "$current_host"
+  prompt_default port "面板监听端口" "$current_port"
   listen="${host}:${port}"
-  prompt_default base_path "Panel URL path" "$current_base"
+  prompt_default base_path "面板访问路径" "$current_base"
   base_path="$(normalize_base_path "$base_path")"
-  prompt_default db_path "SQLite database path" "$current_db"
-  prompt_default change_auth "Change admin username/password" "n"
+  prompt_default db_path "SQLite 数据库路径" "$current_db"
+  prompt_default change_auth "是否修改管理员用户名/密码" "n"
 
   write_env_file "$listen" "$base_path" "$db_path"
-  if [[ "$change_auth" =~ ^[Yy] ]]; then
-    prompt_default username "Admin username" "${TAPX_ADMIN_USERNAME:-admin}"
-    prompt_secret_default password "Admin password" "$(random_token 18)"
+  if is_yes "$change_auth"; then
+    prompt_default username "管理员用户名" "${TAPX_ADMIN_USERNAME:-admin}"
+    prompt_secret_default password "管理员密码" "$(random_token 18)"
     init_admin "$username" "$password" "$listen"
     write_result_file "$username" "$password" "$listen" "$base_path"
   fi
@@ -356,7 +364,7 @@ api_call() {
   fi
   result="$(curl -fsS -b "$cookie" -X "$method" "$base$path" 2>&1)" || {
     rm -f "$cookie"
-    echo -e "${red}API call failed:${plain} $result" >&2
+    echo -e "${red}API 调用失败：${plain} $result" >&2
     return 1
   }
   rm -f "$cookie"
@@ -378,13 +386,13 @@ core_stop() {
 uninstall_tapx() {
   need_root
   local confirm=""
-  read_prompt confirm "Uninstall TapX panel, binaries, and systemd unit? [y/N]: "
-  [[ "$confirm" =~ ^[Yy] ]] || return 0
+  read_prompt confirm "确认卸载 TapX 面板、二进制文件和 systemd 服务？[y/N]: "
+  is_yes "$confirm" || return 0
   systemctl_if_available stop "$service_name" >/dev/null 2>&1 || true
   systemctl_if_available disable "$service_name" >/dev/null 2>&1 || true
   rm -f "$unit_dir/$service_name" "$prefix/bin/tapx" "$prefix/bin/tapx-core" "$prefix/bin/tapx-panel"
   systemctl_if_available daemon-reload >/dev/null 2>&1 || true
-  echo -e "${yellow}Kept data directory and config:${plain} $sysconfdir /var/lib/tapx /var/log/tapx"
+  echo -e "${yellow}已保留数据和配置目录：${plain} $sysconfdir /var/lib/tapx /var/log/tapx"
 }
 
 show_logs() {
@@ -398,23 +406,23 @@ show_logs() {
 show_menu() {
   while true; do
     echo
-    echo -e "${green}TapX management menu${plain}"
-    echo "  1. Install / reinstall"
-    echo "  2. Panel status"
-    echo "  3. Start panel"
-    echo "  4. Stop panel"
-    echo "  5. Restart panel"
-    echo "  6. Core runtime state"
-    echo "  7. Core runtime apply"
-    echo "  8. Core runtime stop"
-    echo "  9. View panel parameters"
-    echo " 10. Modify panel parameters"
-    echo " 11. View logs"
-    echo " 12. Enable autostart"
-    echo " 13. Disable autostart"
-    echo " 14. Uninstall"
-    echo "  0. Exit"
-    read_prompt choice "Choose: "
+    echo -e "${green}TapX 管理菜单${plain}"
+    echo "  1. 安装 / 重新安装"
+    echo "  2. 查看面板状态"
+    echo "  3. 启动面板"
+    echo "  4. 停止面板"
+    echo "  5. 重启面板"
+    echo "  6. 查看 Core 运行状态"
+    echo "  7. 应用 Core 运行配置"
+    echo "  8. 停止 Core 运行时"
+    echo "  9. 查看面板参数"
+    echo " 10. 修改面板参数"
+    echo " 11. 查看日志"
+    echo " 12. 启用开机自启"
+    echo " 13. 禁用开机自启"
+    echo " 14. 卸载"
+    echo "  0. 退出"
+    read_prompt choice "请选择: "
     case "$choice" in
       1) install_wizard ;;
       2) show_status ;;
@@ -431,31 +439,31 @@ show_menu() {
       13) need_root; systemctl_if_available disable "$service_name" || true ;;
       14) uninstall_tapx ;;
       0) exit 0 ;;
-      *) echo -e "${red}Invalid option.${plain}" ;;
+      *) echo -e "${red}无效选项。${plain}" ;;
     esac
   done
 }
 
 usage() {
   cat <<EOF
-Usage: tapx [command]
+用法：tapx [command]
 
-Commands:
-  install       Run install wizard
-  menu          Show management menu
-  status        Show panel status and binary versions
-  start         Start panel service
-  stop          Stop panel service
-  restart       Restart panel service
-  core-state    Show TapX runtime state through panel API
-  core-apply    Apply TapX runtime through panel API
-  core-stop     Stop TapX runtime through panel API
-  settings      View panel parameters
-  set-panel     Modify panel parameters
-  logs          Show panel logs
-  enable        Enable autostart
-  disable       Disable autostart
-  uninstall     Uninstall binaries and service, keep data
+命令：
+  install       运行安装向导
+  menu          显示管理菜单
+  status        查看面板状态和程序版本
+  start         启动面板服务
+  stop          停止面板服务
+  restart       重启面板服务
+  core-state    通过面板 API 查看 TapX 运行状态
+  core-apply    通过面板 API 应用 TapX 运行配置
+  core-stop     通过面板 API 停止 TapX 运行时
+  settings      查看面板参数
+  set-panel     修改面板参数
+  logs          查看面板日志
+  enable        启用开机自启
+  disable       禁用开机自启
+  uninstall     卸载程序和服务，保留数据
 EOF
 }
 
@@ -481,7 +489,7 @@ main() {
     disable) need_root; systemctl_if_available disable "$service_name" ;;
     uninstall) uninstall_tapx ;;
     -h|--help|help) usage ;;
-    *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
+    *) echo "未知命令：$cmd" >&2; usage >&2; exit 2 ;;
   esac
 }
 

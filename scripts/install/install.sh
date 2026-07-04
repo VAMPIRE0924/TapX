@@ -6,12 +6,12 @@ version="${TAPX_VERSION:-latest}"
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [install|menu|status|start|stop|restart|settings|set-panel|logs|uninstall]
+用法：install.sh [install|menu|status|start|stop|restart|settings|set-panel|logs|uninstall]
 
-This script downloads the latest TapX Linux amd64 bundle, then runs the
-interactive TapX manager. After installation, run `tapx` again for the menu.
+这个脚本会下载最新的 TapX Linux amd64 安装包，然后启动交互式
+TapX 管理器。安装完成后，可以再次运行 `tapx` 打开管理菜单。
 
-Environment:
+环境变量：
   TAPX_VERSION=latest|v0.1.0|0.1.0
   TAPX_REPO=VAMPIRE0924/TapX
 EOF
@@ -23,12 +23,12 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
 fi
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "TapX installer must run on Linux" >&2
+  echo "TapX 安装脚本必须在 Linux 上运行" >&2
   exit 1
 fi
 
 if [[ "$(id -u)" != "0" ]]; then
-  echo "TapX installer must run as root" >&2
+  echo "TapX 安装脚本必须使用 root 权限运行" >&2
   exit 1
 fi
 
@@ -38,8 +38,8 @@ case "$(uname -m)" in
     package_dir="tapx-linux-amd64"
     ;;
   *)
-    echo "unsupported architecture: $(uname -m)" >&2
-    echo "current public Linux release supports amd64 only" >&2
+    echo "不支持的架构：$(uname -m)" >&2
+    echo "当前公开 Linux 版本仅支持 amd64" >&2
     exit 1
     ;;
 esac
@@ -51,7 +51,7 @@ download() {
   elif command -v wget >/dev/null 2>&1; then
     wget -O "$out" "$url"
   else
-    echo "missing required command: curl or wget" >&2
+    echo "缺少必要命令：curl 或 wget" >&2
     exit 1
   fi
 }
@@ -70,7 +70,7 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "downloading $url"
+echo "正在下载：$url"
 download "$url" "$tmp/$asset"
 tar -xzf "$tmp/$asset" -C "$tmp"
 
@@ -79,7 +79,7 @@ if [[ ! -d "$bundle_dir" ]]; then
   bundle_dir="$(find "$tmp" -type f -name tapx-core -exec dirname {} \; | head -n 1)"
 fi
 if [[ -z "$bundle_dir" || ! -x "$bundle_dir/tapx-core" || ! -x "$bundle_dir/tapx-panel" || ! -x "$bundle_dir/tapx" ]]; then
-  echo "invalid TapX Linux package: missing tapx-core, tapx-panel, or tapx manager" >&2
+  echo "TapX Linux 安装包无效：缺少 tapx-core、tapx-panel 或 tapx 管理器" >&2
   exit 1
 fi
 

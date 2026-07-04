@@ -437,12 +437,12 @@ func (v *verifier) checkLinuxInstall() {
 		},
 		"scripts/install/linux-install.sh": {
 			"TAPX_PANEL_BASE_PATH",
-			"TapX Linux install wizard",
-			"TapX management menu",
+			"TapX Linux 安装向导",
+			"TapX 管理菜单",
 			"set-panel",
 			"core-apply",
 			"-init-admin",
-			"Admin password is stored",
+			"管理员密码仅保存一次",
 		},
 		"scripts/install/install.sh": {
 			"releases/latest/download",
