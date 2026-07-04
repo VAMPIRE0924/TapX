@@ -1,0 +1,21 @@
+{
+  "luci-app-tapx": {
+    "description": "Grant access to TapX configuration",
+    "read": {
+      "uci": [ "tapx" ],
+      "file": {
+        "/etc/tapx/runtime.json": [ "read" ],
+        "/etc/tapx/runtime.json.example": [ "read" ],
+        "/usr/bin/tapx-core": [ "exec" ],
+        "/etc/init.d/tapx": [ "exec" ]
+      }
+    },
+    "write": {
+      "uci": [ "tapx" ],
+      "file": {
+        "/etc/tapx/runtime.json": [ "write" ],
+        "/etc/init.d/tapx": [ "exec" ]
+      }
+    }
+  }
+}

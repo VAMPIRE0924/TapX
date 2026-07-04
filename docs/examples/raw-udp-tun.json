@@ -1,0 +1,39 @@
+{
+  "Devices": [
+    {
+      "ID": "tun0",
+      "Enabled": true,
+      "Name": "Raw UDP TUN",
+      "Type": "tun",
+      "IfName": "tapx%d",
+      "MTU": 1500
+    }
+  ],
+  "Routes": [
+    {
+      "ID": "route0",
+      "Enabled": true,
+      "DeviceID": "tun0"
+    }
+  ],
+  "Listeners": [
+    {
+      "ID": "udp-listener",
+      "Enabled": true,
+      "Name": "Bare UDP Listener",
+      "BindHost": "127.0.0.1",
+      "BindPort": 40000,
+      "Transport": "udp",
+      "RawUDP": {
+        "PeerMode": "learn",
+        "BindAddress": "127.0.0.1",
+        "ReceiveBuffer": 65536,
+        "SendBuffer": 65536,
+        "ReuseAddr": true
+      },
+      "Binding": {
+        "RouteID": "route0"
+      }
+    }
+  ]
+}

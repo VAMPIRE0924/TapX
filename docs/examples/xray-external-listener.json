@@ -1,0 +1,52 @@
+{
+  "XrayProfiles": [
+    {
+      "ID": "xray-external",
+      "Enabled": true,
+      "Name": "external dokodemo sample",
+      "Runtime": "external",
+      "InboundProtocol": "dokodemo-door",
+      "InboundSettingsJSON": "{\"address\":\"127.0.0.1\",\"port\":80,\"network\":\"tcp\"}",
+      "OutboundProtocol": "",
+      "OutboundSettingsJSON": "",
+      "Network": "tcp",
+      "Security": "none",
+      "StreamSettingsJSON": "{}",
+      "SniffingJSON": "{\"enabled\":false}",
+      "MuxJSON": "",
+      "SockoptJSON": "",
+      "FallbacksJSON": "",
+      "RoutingJSON": "",
+      "DNSJSON": "",
+      "PolicyJSON": "",
+      "AdvancedJSON": "{\"outbounds\":[{\"tag\":\"direct\",\"protocol\":\"freedom\"}],\"routing\":{\"rules\":[{\"type\":\"field\",\"inboundTag\":[\"xray-in\"],\"outboundTag\":\"direct\"}]}}",
+      "Remark": "For -check and external xray smoke tests. Update ExternalXrayPath before running."
+    }
+  ],
+  "Listeners": [
+    {
+      "ID": "xray-in",
+      "Enabled": true,
+      "Name": "external xray inbound",
+      "BindHost": "127.0.0.1",
+      "BindPort": 18080,
+      "Transport": "xray",
+      "XrayProfileID": "xray-external",
+      "RawUDP": {},
+      "RawTCP": {},
+      "Binding": {},
+      "Remark": ""
+    }
+  ],
+  "Settings": [
+    {
+      "ID": "global",
+      "Enabled": true,
+      "Name": "global",
+      "ExternalXrayPath": "/usr/bin/xray",
+      "LogLevel": "info",
+      "StatsIntervalSecond": 5,
+      "OpenWrtBuildTarget": "x86-64"
+    }
+  ]
+}

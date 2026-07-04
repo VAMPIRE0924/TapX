@@ -1,0 +1,8 @@
+config tapx 'core'
+	option enabled '0'
+	option config_path '/etc/tapx/runtime.json'
+	option respawn_threshold '3600'
+	option respawn_timeout '5'
+	option respawn_retry '5'
+
+config tapx_runtime 'runtime'

@@ -1,0 +1,42 @@
+# Local/private material
+.local/
+.env
+.env.*
+!.env.example
+*.local.*
+
+# Secrets and host keys
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Local requirement source files; keep public docs as Markdown.
+*.docx
+
+# Build outputs
+/bin/
+/build/
+/dist/
+/out/
+/coverage/
+!scripts/build/
+!scripts/build/**
+*.exe
+*.test
+*.out
+*.prof
+
+# Go
+vendor/
+
+# Node
+node_modules/
+web/node_modules/
+web/dist/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

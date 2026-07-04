@@ -1,0 +1,53 @@
+{
+  "Devices": [
+    {
+      "ID": "tap0",
+      "Enabled": true,
+      "Name": "Raw UDP TAP",
+      "Type": "tap",
+      "IfName": "tapx%d",
+      "MTU": 1500
+    }
+  ],
+  "Addresses": [
+    {
+      "ID": "tap-guard",
+      "Enabled": true,
+      "Name": "TAP MAC and IPv4 Guard",
+      "DeviceID": "tap0",
+      "MACs": [
+        "02:00:00:00:00:01"
+      ],
+      "IPv4CIDRs": [
+        "10.0.0.0/24"
+      ],
+      "IPv6CIDRs": [
+        "2001:db8::/64"
+      ]
+    }
+  ],
+  "Routes": [
+    {
+      "ID": "route0",
+      "Enabled": true,
+      "DeviceID": "tap0",
+      "AddressID": "tap-guard"
+    }
+  ],
+  "Listeners": [
+    {
+      "ID": "udp-tap-listener",
+      "Enabled": true,
+      "Name": "Guarded TAP UDP Listener",
+      "BindHost": "127.0.0.1",
+      "BindPort": 40001,
+      "Transport": "udp",
+      "RawUDP": {
+        "PeerMode": "learn"
+      },
+      "Binding": {
+        "RouteID": "route0"
+      }
+    }
+  ]
+}

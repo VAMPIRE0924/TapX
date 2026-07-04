@@ -1,0 +1,14 @@
+{
+  "admin/services/tapx": {
+    "title": "TapX",
+    "order": 60,
+    "action": {
+      "type": "view",
+      "path": "tapx/config"
+    },
+    "depends": {
+      "acl": [ "luci-app-tapx" ],
+      "uci": { "tapx": true }
+    }
+  }
+}

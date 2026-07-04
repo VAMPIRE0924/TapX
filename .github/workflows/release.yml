@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release/package version, for example 0.1.0"
+        required: true
+        default: "0.1.0"
+      openwrt_version:
+        description: "OpenWrt SDK release version"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAPX_OPENWRT_SDK_ROOT: ${{ github.workspace }}/.openwrt-sdk
+      TAPX_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize version
+        shell: bash
+        run: |
+          version="${TAPX_VERSION#v}"
+          echo "TAPX_VERSION=$version" >> "$GITHUB_ENV"
+          if [[ -n "${{ github.event.inputs.openwrt_version }}" ]]; then
+            echo "OPENWRT_VERSION=${{ github.event.inputs.openwrt_version }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc make pkg-config file curl ca-certificates \
+            zstd xz-utils tar gzip nodejs npm
+
+      - name: Cache OpenWrt SDK
+        uses: actions/cache@v4
+        with:
+          path: .openwrt-sdk
+          key: openwrt-x86-64-${{ github.event.inputs.openwrt_version || 'default' }}
+
+      - name: Test and verify source
+        run: |
+          make verify-local
+          GOTOOLCHAIN=local go test ./...
+          GOTOOLCHAIN=local go vet ./...
+          node --check internal/panel/static/app.js
+          make fastpath
+
+      - name: Build Linux amd64 binaries
+        run: make build-linux-amd64
+
+      - name: Prepare OpenWrt SDK
+        run: bash ./scripts/dev/prepare-openwrt-sdk.sh x86-64
+
+      - name: Build OpenWrt packages
+        run: make package-openwrt-x86
+
+      - name: Verify release artifacts
+        run: make verify-release
+
+      - name: Assemble artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/linux-amd64/tapx-core dist/tapx-core_linux_amd64
+          cp build/linux-amd64/tapx-panel dist/tapx-panel_linux_amd64
+          cp build/openwrt-x86-64/packages/*.ipk dist/
+          sha256sum dist/* > dist/SHA256SUMS
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tapx-${{ env.TAPX_VERSION }}
+          path: dist/*
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
