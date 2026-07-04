@@ -231,7 +231,8 @@ func TestServerPanelAuthSessionFlow(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	getJSON(t, server.URL+"/api/config", http.StatusUnauthorized)
-	getRaw(t, server.URL+"/app.js", http.StatusOK)
+	index := getRaw(t, server.URL+"/", http.StatusOK)
+	getRaw(t, server.URL+"/"+firstJSAsset(t, index), http.StatusOK)
 	session := getJSON(t, server.URL+"/api/auth/session", http.StatusOK)
 	if session["authEnabled"] != true || session["authenticated"] != false {
 		t.Fatalf("unexpected unauthenticated session: %+v", session)
@@ -417,8 +418,8 @@ func TestServerBasePathScopesUIAndAPI(t *testing.T) {
 		t.Fatalf("index should use relative assets under base path")
 	}
 	app := getRaw(t, server.URL+"/tapx-secret/"+firstJSAsset(t, index), http.StatusOK)
-	if !bytes.Contains(app, []byte("apiURL")) {
-		t.Fatalf("app script missing base-path API helpers")
+	if !bytes.Contains(app, []byte("/api/auth/session")) || !bytes.Contains(app, []byte("/api/config")) {
+		t.Fatalf("app script missing stable API paths")
 	}
 }
 
