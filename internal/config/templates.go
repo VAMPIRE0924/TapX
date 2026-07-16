@@ -114,7 +114,7 @@ func normalizeRawPairOptions(in RawPairTemplateOptions) RawPairTemplateOptions {
 		}
 	}
 	if in.MTU == 0 {
-		in.MTU = 1400
+		in.MTU = 1500
 	}
 	return in
 }
@@ -170,6 +170,7 @@ func rawUDPPeerConfig(side, ifName, cidr, peerHost string, port uint16, mtu int,
 			ReuseAddr:     true,
 			ReceiveBuffer: 1048576,
 			SendBuffer:    1048576,
+			ZeroCopy:      true,
 		},
 		Binding: model.Binding{RouteID: routeID},
 	}}
@@ -243,5 +244,6 @@ func rawTCPTemplateSettings() model.RawTCPSettings {
 		NoDelay:         true,
 		KeepAliveSecond: 30,
 		ConnectTimeout:  5,
+		ZeroCopy:        true,
 	}
 }

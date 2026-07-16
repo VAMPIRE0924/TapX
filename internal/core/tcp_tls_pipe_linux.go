@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"tapx/internal/fastpath"
+	"tapx/internal/linkdiag"
 	"tapx/internal/model"
 	"tapx/internal/rawtcp"
 )
@@ -41,35 +42,47 @@ func (h *TCPPipeHandle) startTLSListener(frameKind fastpath.FrameKind, guard fas
 	h.LocalAddr = local
 	done := make(chan struct{})
 	h.acceptDone = done
-	go h.acceptOneTLS(ctx, listener, done, frameKind, guard, tlsConfig)
+	go h.acceptTLSLoop(ctx, listener, done, frameKind, guard, tlsConfig)
 	return nil
 }
 
-func (h *TCPPipeHandle) acceptOneTLS(ctx context.Context, listener *net.TCPListener, done chan struct{}, frameKind fastpath.FrameKind, guard fastpath.AddressGuard, tlsConfig *tls.Config) {
+func (h *TCPPipeHandle) acceptTLSLoop(ctx context.Context, listener *net.TCPListener, done chan struct{}, frameKind fastpath.FrameKind, guard fastpath.AddressGuard, tlsConfig *tls.Config) {
 	defer close(done)
-	conn, err := listener.AcceptTCP()
-	if err != nil {
-		if !errors.Is(err, net.ErrClosed) {
-			h.setErr(fmt.Errorf("core: accept tls tcp %s: %w", h.Pipe.EndpointID, err))
+	for {
+		conn, err := listener.AcceptTCP()
+		if err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				h.setErr(fmt.Errorf("core: accept tls tcp %s: %w", h.Pipe.EndpointID, err))
+			}
+			return
 		}
-		return
-	}
-	if err := configureTCPConn(conn, h.Pipe); err != nil {
-		_ = conn.Close()
-		h.setErr(err)
-		return
-	}
-	remote, err := tcpAddrPort(conn.RemoteAddr())
-	if err != nil {
-		_ = conn.Close()
-		h.setErr(err)
-		return
-	}
-	h.mu.Lock()
-	h.acceptedRemote = remote
-	h.mu.Unlock()
-	if err := h.startTLSBridge(ctx, tls.Server(conn, tlsConfig), frameKind, guard); err != nil {
-		h.setErr(err)
+		if err := configureTCPConn(conn, h.Pipe); err != nil {
+			_ = conn.Close()
+			h.setErr(err)
+			continue
+		}
+		tlsConn := tls.Server(conn, tlsConfig)
+		h.mu.Lock()
+		active := h.tlsDone != nil
+		h.mu.Unlock()
+		if active {
+			go func() {
+				_ = linkdiag.ServeStream(ctx, tlsConn, h.Pipe.Binding.VKeyValue)
+			}()
+			continue
+		}
+		remote, err := tcpAddrPort(conn.RemoteAddr())
+		if err != nil {
+			_ = conn.Close()
+			h.setErr(err)
+			continue
+		}
+		h.mu.Lock()
+		h.acceptedRemote = remote
+		h.mu.Unlock()
+		if _, err := h.startTLSBridge(ctx, tlsConn, frameKind, guard); err != nil {
+			h.setErr(err)
+		}
 	}
 }
 
@@ -78,44 +91,101 @@ func (h *TCPPipeHandle) startTLSConnector(frameKind fastpath.FrameKind, guard fa
 	if err != nil {
 		return err
 	}
+	if h.Pipe.ReconnectSecond <= 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		h.tlsCancel = cancel
+		if _, err := h.connectTLS(ctx, frameKind, guard, tlsConfig); err != nil {
+			cancel()
+			return err
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	h.reconnectCancel = cancel
+	h.reconnectDone = done
+	sessionDone, err := h.connectTLS(ctx, frameKind, guard, tlsConfig)
+	if err != nil {
+		h.setErr(err)
+	}
+	go h.tlsReconnectLoop(ctx, done, sessionDone, frameKind, guard, tlsConfig)
+	return nil
+}
+
+func (h *TCPPipeHandle) connectTLS(ctx context.Context, frameKind fastpath.FrameKind, guard fastpath.AddressGuard, tlsConfig *tls.Config) (<-chan struct{}, error) {
 	tcpConn, local, remote, err := dialTCP(h.Pipe)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := configureTCPConn(tcpConn, h.Pipe); err != nil {
 		_ = tcpConn.Close()
-		return err
+		return nil, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.tlsCancel = cancel
 	tlsConn := tls.Client(tcpConn, tlsConfig)
 	handshakeCtx, stopHandshake := h.tlsHandshakeContext(ctx)
 	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
 		stopHandshake()
-		cancel()
 		_ = tlsConn.Close()
-		return fmt.Errorf("core: tls handshake %s: %w", h.Pipe.EndpointID, err)
+		return nil, fmt.Errorf("core: tls handshake %s: %w", h.Pipe.EndpointID, err)
 	}
 	stopHandshake()
 	h.LocalAddr = local
 	h.RemoteAddr = remote
-	if err := h.startTLSBridge(ctx, tlsConn, frameKind, guard); err != nil {
-		cancel()
-		return err
+	done, err := h.startTLSBridge(ctx, tlsConn, frameKind, guard)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	h.mu.Lock()
+	h.lastErr = nil
+	h.mu.Unlock()
+	return done, nil
 }
 
-func (h *TCPPipeHandle) startTLSBridge(ctx context.Context, conn net.Conn, frameKind fastpath.FrameKind, guard fastpath.AddressGuard) error {
+func (h *TCPPipeHandle) tlsReconnectLoop(ctx context.Context, loopDone chan struct{}, sessionDone <-chan struct{}, frameKind fastpath.FrameKind, guard fastpath.AddressGuard, tlsConfig *tls.Config) {
+	defer close(loopDone)
+	delay := time.Duration(h.Pipe.ReconnectSecond) * time.Second
+	for {
+		if sessionDone != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sessionDone:
+			}
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+		var err error
+		sessionDone, err = h.connectTLS(ctx, frameKind, guard, tlsConfig)
+		if err != nil {
+			h.setErr(err)
+			sessionDone = nil
+		}
+	}
+}
+
+func (h *TCPPipeHandle) startTLSBridge(ctx context.Context, conn net.Conn, frameKind fastpath.FrameKind, guard fastpath.AddressGuard) (<-chan struct{}, error) {
 	if _, err := rawVKeyHeaderSize([]byte(h.Pipe.Binding.VKeyValue)); err != nil {
 		_ = conn.Close()
-		return err
+		return nil, err
+	}
+	if !h.acquireSharedDevice() {
+		_ = conn.Close()
+		return nil, fmt.Errorf("core: device %s already has an active stream", h.Pipe.DeviceID)
 	}
 	h.mu.Lock()
 	if h.tlsDone != nil {
 		h.mu.Unlock()
+		h.releaseSharedDevice()
 		_ = conn.Close()
-		return fmt.Errorf("core: tls tcp pipe %s already has an active stream", h.Pipe.EndpointID)
+		return nil, fmt.Errorf("core: tls tcp pipe %s already has an active stream", h.Pipe.EndpointID)
 	}
 	done := make(chan struct{})
 	h.tlsDone = done
@@ -124,6 +194,7 @@ func (h *TCPPipeHandle) startTLSBridge(ctx context.Context, conn net.Conn, frame
 
 	go func() {
 		defer close(done)
+		defer h.releaseSharedDevice()
 		h.runTLSBridge(ctx, conn, frameKind, guard)
 		h.mu.Lock()
 		if h.tlsConn == conn {
@@ -134,11 +205,10 @@ func (h *TCPPipeHandle) startTLSBridge(ctx context.Context, conn net.Conn, frame
 		}
 		h.mu.Unlock()
 	}()
-	return nil
+	return done, nil
 }
 
 func (h *TCPPipeHandle) runTLSBridge(ctx context.Context, conn net.Conn, frameKind fastpath.FrameKind, guard fastpath.AddressGuard) {
-	defer conn.Close()
 	if tlsConn, ok := conn.(*tls.Conn); ok {
 		handshakeCtx, stopHandshake := h.tlsHandshakeContext(ctx)
 		err := tlsConn.HandshakeContext(handshakeCtx)
@@ -148,6 +218,8 @@ func (h *TCPPipeHandle) runTLSBridge(ctx context.Context, conn net.Conn, frameKi
 			return
 		}
 	}
+	conn = applyUserRateLimits(conn, h.Pipe.EndpointKind, h.Pipe.Binding)
+	defer conn.Close()
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	errc := make(chan error, 2)
@@ -168,28 +240,31 @@ func (h *TCPPipeHandle) tlsDeviceToConn(ctx context.Context, conn net.Conn, fram
 		return err
 	}
 	maxFrame := maxPositive(h.Pipe.MaxFrameSize, rawtcp.DefaultMaxFrameSize)
-	buf := make([]byte, maxFrame)
-	wire := make([]byte, maxFrame+vkeyHeaderSize)
+	frameHeaderSize, err := rawtcp.FrameHeaderSize(h.Pipe.LengthMode)
+	if err != nil {
+		return err
+	}
+	wire := make([]byte, frameHeaderSize+vkeyHeaderSize+maxFrame)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		n, err := readDeviceFrame(ctx, h.device, buf)
+		n, err := readDeviceFrame(ctx, h.device, wire[frameHeaderSize+vkeyHeaderSize:])
 		if err != nil {
 			return err
 		}
-		frame := buf[:n]
-		if !xrayFrameAllowed(frameKind, frame, guard) {
+		frame := wire[frameHeaderSize+vkeyHeaderSize : frameHeaderSize+vkeyHeaderSize+n]
+		if !xrayFrameAllowed(frameKind, frame, guard, addressGuardSource(h.Pipe.AddressGuardRemote, true)) {
 			h.tlsCounter.dropsGuard.Add(1)
 			continue
 		}
-		payload := frame
 		if vkeyHeaderSize > 0 {
-			payload = wire[:vkeyHeaderSize+n]
-			writeRawVKeyHeader(payload[:vkeyHeaderSize], vkey)
-			copy(payload[vkeyHeaderSize:], frame)
+			writeRawVKeyHeader(wire[frameHeaderSize:frameHeaderSize+vkeyHeaderSize], vkey)
 		}
-		if err := rawtcp.WriteFrame(conn, h.Pipe.LengthMode, payload); err != nil {
+		if _, err := rawtcp.EncodeFrameHeader(wire[:frameHeaderSize], h.Pipe.LengthMode, vkeyHeaderSize+n); err != nil {
+			return err
+		}
+		if err := writeFull(conn, wire[:frameHeaderSize+vkeyHeaderSize+n]); err != nil {
 			h.tlsCounter.dropsIO.Add(1)
 			return err
 		}
@@ -206,11 +281,12 @@ func (h *TCPPipeHandle) tlsConnToDevice(ctx context.Context, conn net.Conn, fram
 	}
 	maxFrame := maxPositive(h.Pipe.MaxFrameSize, rawtcp.DefaultMaxFrameSize)
 	readMax := maxFrame + vkeyHeaderSize
+	wire := make([]byte, readMax)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		wireFrame, err := rawtcp.ReadFrame(conn, h.Pipe.LengthMode, readMax)
+		wireFrame, err := rawtcp.ReadFrameInto(conn, h.Pipe.LengthMode, wire, readMax)
 		if err != nil {
 			return err
 		}
@@ -219,7 +295,7 @@ func (h *TCPPipeHandle) tlsConnToDevice(ctx context.Context, conn net.Conn, fram
 			h.tlsCounter.dropsGuard.Add(1)
 			continue
 		}
-		if !xrayFrameAllowed(frameKind, frame, guard) {
+		if !xrayFrameAllowed(frameKind, frame, guard, addressGuardSource(h.Pipe.AddressGuardRemote, false)) {
 			h.tlsCounter.dropsGuard.Add(1)
 			continue
 		}
@@ -230,6 +306,20 @@ func (h *TCPPipeHandle) tlsConnToDevice(ctx context.Context, conn net.Conn, fram
 		h.tlsCounter.rxPackets.Add(1)
 		h.tlsCounter.rxBytes.Add(uint64(len(frame)))
 	}
+}
+
+func writeFull(writer io.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		n, err := writer.Write(payload)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+		payload = payload[n:]
+	}
+	return nil
 }
 
 func (h *TCPPipeHandle) tlsHandshakeContext(ctx context.Context) (context.Context, context.CancelFunc) {

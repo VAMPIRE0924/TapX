@@ -15,7 +15,10 @@ param(
     [int]$UdpDTLSPort = 46602,
     [ValidateSet("tls", "dtls", "both")]
     [string]$Mode = "both",
+    [ValidateSet("tun", "tap")]
+    [string]$DeviceType = "tun",
     [switch]$Build,
+    [switch]$UseInstalledBinary,
     [switch]$KeepRemote
 )
 
@@ -55,7 +58,7 @@ function New-TapXTLSListenerConfig {
     return @"
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "tapxtls0", "MTU": 1400, "IPv4CIDR": "10.94.0.1/30"}
+    {"ID": "tun-a", "Enabled": true, "Type": "$DeviceType", "IfName": "tapxtls0", "MTU": 1500, "LinkAutoOptimize": true, "IPv4CIDR": "10.94.0.1/30"}
   ],
   "VKeys": [
     {"ID": "vk-a", "Enabled": true, "Value": "$vkeyTLS"}
@@ -96,7 +99,7 @@ function New-TapXTLSConnectorConfig {
     return @"
 {
   "Devices": [
-    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "tapxtls0", "MTU": 1400, "IPv4CIDR": "10.94.0.2/30"}
+    {"ID": "tun-b", "Enabled": true, "Type": "$DeviceType", "IfName": "tapxtls0", "MTU": 1500, "LinkAutoOptimize": true, "IPv4CIDR": "10.94.0.2/30"}
   ],
   "VKeys": [
     {"ID": "vk-b", "Enabled": true, "Value": "$vkeyTLS"}
@@ -137,7 +140,7 @@ function New-TapXDTLSListenerConfig {
     return @"
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "tapxdtls0", "MTU": 1400, "IPv4CIDR": "10.95.0.1/30"}
+    {"ID": "tun-a", "Enabled": true, "Type": "$DeviceType", "IfName": "tapxdtls0", "MTU": 1500, "LinkAutoOptimize": true, "IPv4CIDR": "10.95.0.1/30"}
   ],
   "VKeys": [
     {"ID": "vk-a", "Enabled": true, "Value": "$vkeyDTLS"}
@@ -177,7 +180,7 @@ function New-TapXDTLSConnectorConfig {
     return @"
 {
   "Devices": [
-    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "tapxdtls0", "MTU": 1400, "IPv4CIDR": "10.95.0.2/30"}
+    {"ID": "tun-b", "Enabled": true, "Type": "$DeviceType", "IfName": "tapxdtls0", "MTU": 1500, "LinkAutoOptimize": true, "IPv4CIDR": "10.95.0.2/30"}
   ],
   "VKeys": [
     {"ID": "vk-b", "Enabled": true, "Value": "$vkeyDTLS"}
@@ -264,8 +267,19 @@ Write-TapXTextFile $dtlsB (New-TapXDTLSConnectorConfig)
 
 try {
     Write-Host "prepare remote hosts in $RemoteDir"
-    Prepare-TapXHost -Context $ctx -HostName $HostA
-    Prepare-TapXHost -Context $ctx -HostName $HostB
+    if ($UseInstalledBinary) {
+        foreach ($hostName in @($HostA, $HostB)) {
+            Invoke-TapXRemoteScript -Context $ctx -HostName $hostName -Script @"
+set -euo pipefail
+mkdir -p '$RemoteDir'
+cp /usr/local/bin/tapx-core '$RemoteDir/tapx-core'
+chmod 700 '$RemoteDir/tapx-core'
+"@ | Out-Null
+        }
+    } else {
+        Prepare-TapXHost -Context $ctx -HostName $HostA
+        Prepare-TapXHost -Context $ctx -HostName $HostB
+    }
     New-TapXRemoteCertificate
 
     if ($Mode -eq "tls" -or $Mode -eq "both") {

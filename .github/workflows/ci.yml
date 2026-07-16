@@ -14,7 +14,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.26.x"
+          go-version: "1.26.5"
           cache: true
 
       - name: Set up Node
@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc make pkg-config file \
+            gcc gcc-aarch64-linux-gnu make pkg-config file \
             iproute2 iptables iputils-ping
 
       - name: Build panel web
@@ -45,6 +45,9 @@ jobs:
 
       - name: Fastpath tests
         run: make fastpath
+
+      - name: Build Linux release architectures
+        run: make build-linux
 
       - name: Network namespace integration
         run: sudo -E env "PATH=$PATH" "GOTOOLCHAIN=local" make integration-netns

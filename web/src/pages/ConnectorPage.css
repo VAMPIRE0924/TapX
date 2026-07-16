@@ -1,0 +1,26 @@
+.connector-page {
+  width: 100%;
+}
+
+.connector-form-alert {
+  margin-bottom: 12px;
+}
+
+.connector-action-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 88px;
+}
+
+.toolbar-right {
+  display: flex;
+  justify-content: flex-end;
+}
+
+@media (max-width: 576px) {
+  .toolbar-right {
+    justify-content: flex-start;
+  }
+}

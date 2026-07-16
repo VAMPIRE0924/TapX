@@ -6,6 +6,11 @@ sdk_root="${TAPX_OPENWRT_SDK_ROOT:-$HOME/tapx-openwrt-sdk}"
 out_dir="${TAPX_BUILD_OUT:-$repo_root/build/openwrt-x86-64}"
 version="${TAPX_VERSION:-dev}"
 
+if command -v cygpath >/dev/null 2>&1; then
+  sdk_root="$(cygpath -u "$sdk_root")"
+  out_dir="$(cygpath -u "$out_dir")"
+fi
+
 tool="$(
   find "$sdk_root" \
     -path "*/staging_dir/toolchain-*/bin/x86_64-openwrt-linux-musl-gcc" \
@@ -50,19 +55,25 @@ fi
 
 mkdir -p "$out_dir"
 
-echo "build tapx-core for OpenWrt x86-64"
+echo "build TapX binaries for OpenWrt x86-64"
 echo "cc: $cc"
-echo "out: $out_dir/tapx-core"
 
-(
-  cd "$repo_root"
-  STAGING_DIR="$staging_dir" \
-    GOTOOLCHAIN="${GOTOOLCHAIN:-local}" \
-    CGO_ENABLED=1 \
-    GOOS=linux \
-    GOARCH=amd64 \
-    CC="$cc" \
-    go build -trimpath -ldflags="$ldflags -X tapx/internal/buildinfo.Version=$version" -o "$out_dir/tapx-core" ./cmd/tapx-core
-)
+build_one() {
+  local name="$1"
+  local package="$2"
+  echo "out: $out_dir/$name"
+  (
+    cd "$repo_root"
+    STAGING_DIR="$staging_dir" \
+      GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" \
+      CGO_ENABLED=1 \
+      GOOS=linux \
+      GOARCH=amd64 \
+      CC="$cc" \
+      go build -trimpath -ldflags="$ldflags -X tapx/internal/buildinfo.Version=$version" -o "$out_dir/$name" "$package"
+  )
+  file "$out_dir/$name"
+}
 
-file "$out_dir/tapx-core"
+build_one tapx-core ./cmd/tapx-core
+build_one tapx-panel ./cmd/tapx-panel

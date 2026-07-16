@@ -66,7 +66,7 @@ show_cmd gawk gawk --version
 show_cmd msgfmt msgfmt --version
 
 section "Go environment"
-GOTOOLCHAIN=local go env GOVERSION GOOS GOARCH CGO_ENABLED CC CXX GOTOOLCHAIN GOPATH GOMODCACHE
+GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go env GOVERSION GOOS GOARCH CGO_ENABLED CC CXX GOTOOLCHAIN GOPATH GOMODCACHE
 
 section "Native libraries"
 if pkg-config --exists sqlite3; then
@@ -119,7 +119,7 @@ echo "extra OpenWrt targets: not checked in current x86-only phase"
 find /opt "$HOME/tapx-openwrt-sdk" "$HOME" -maxdepth 4 \( -iname "*openwrt*sdk*" -o -iname "staging_dir" \) 2>/dev/null | head -20 || true
 
 section "Repository checks"
-GOTOOLCHAIN=local go test ./internal/... >/tmp/tapx-env-go-test.log
+GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go test ./internal/... >/tmp/tapx-env-go-test.log
 echo "go internal tests: ok"
 make -C core/fastpath >/tmp/tapx-env-fastpath.log
 echo "fastpath build: ok"

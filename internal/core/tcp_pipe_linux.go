@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -18,6 +19,7 @@ import (
 
 	"tapx/internal/config"
 	"tapx/internal/fastpath"
+	"tapx/internal/linkdiag"
 	"tapx/internal/netapply"
 	"tapx/internal/tuntap"
 )
@@ -30,22 +32,67 @@ type TCPPipeHandle struct {
 
 	device     tuntap.Device
 	netApply   netapply.Handle
+	shared     *tcpSharedDevice
+	owner      bool
 	listener   *net.TCPListener
-	tcpFile    *os.File
-	worker     *fastpath.Worker
+	session    *tcpWorkerSession
 	counter    *fastpath.Counters
 	acceptDone chan struct{}
 
-	mu             sync.Mutex
-	acceptedRemote netip.AddrPort
-	lastErr        error
-	tlsCancel      context.CancelFunc
-	tlsDone        chan struct{}
-	tlsConn        net.Conn
-	tlsCounter     xrayPipeCounters
+	mu              sync.Mutex
+	acceptedRemote  netip.AddrPort
+	lastErr         error
+	tlsCancel       context.CancelFunc
+	tlsDone         chan struct{}
+	tlsConn         net.Conn
+	tlsCounter      xrayPipeCounters
+	reconnectCancel context.CancelFunc
+	reconnectDone   chan struct{}
+}
+
+type tcpWorkerSession struct {
+	worker      *fastpath.Worker
+	file        *os.File
+	fd          int
+	done        chan struct{}
+	monitorDone chan struct{}
+	stopOnce    sync.Once
+	stopErr     error
+}
+
+func (s *tcpWorkerSession) Stop() error {
+	if s == nil {
+		return nil
+	}
+	s.stopOnce.Do(func() {
+		if s.worker != nil {
+			s.stopErr = s.worker.Stop()
+			s.worker = nil
+		}
+		if s.file != nil {
+			if err := s.file.Close(); err != nil && s.stopErr == nil {
+				s.stopErr = err
+			}
+			s.file = nil
+		}
+		close(s.done)
+	})
+	return s.stopErr
+}
+
+type tcpSharedDevice struct {
+	device   tuntap.Device
+	netApply netapply.Handle
+
+	mu     sync.Mutex
+	active bool
 }
 
 func startTCPPipe(pipe config.RuntimeTCPPipe, device config.RuntimeDevice) (*TCPPipeHandle, error) {
+	return startTCPPipeShared(pipe, device, nil)
+}
+
+func startTCPPipeShared(pipe config.RuntimeTCPPipe, device config.RuntimeDevice, shared *tcpSharedDevice) (*TCPPipeHandle, error) {
 	frameKind, err := fastpath.FrameKindFromDevice(device.Type)
 	if err != nil {
 		return nil, err
@@ -59,47 +106,17 @@ func startTCPPipe(pipe config.RuntimeTCPPipe, device config.RuntimeDevice) (*TCP
 		return nil, err
 	}
 
-	tunDevice, err := tuntap.Open(tuntap.OpenOptions{
-		Name:     device.IfName,
-		Type:     device.Type,
-		NonBlock: true,
-	})
+	handle, err := prepareTCPPipeHandle(pipe, device, shared)
 	if err != nil {
-		return nil, fmt.Errorf("core: open %s %s: %w", device.Type, device.IfName, err)
-	}
-	netHandle, err := netapply.ApplyDevice(netapply.DeviceConfig{
-		Type:     device.Type,
-		IfName:   tunDevice.Name(),
-		MTU:      device.MTU,
-		MSSClamp: device.MSSClamp,
-		IPv4CIDR: device.IPv4CIDR,
-		IPv6CIDR: device.IPv6CIDR,
-		Bridge: netapply.BridgeConfig{
-			Enabled: device.Bridge.Enabled,
-			Name:    device.Bridge.Name,
-			IfName:  device.Bridge.IfName,
-			MTU:     device.Bridge.MTU,
-		},
-		Routes: netapplyRoutes(device.Routes),
-		DNS:    netapplyDNS(device.DNS),
-	})
-	if err != nil {
-		_ = tunDevice.Close()
-		return nil, fmt.Errorf("core: apply device %s: %w", tunDevice.Name(), err)
-	}
-
-	handle := &TCPPipeHandle{
-		Pipe:       pipe,
-		DeviceName: tunDevice.Name(),
-		device:     tunDevice,
-		netApply:   netHandle,
-		counter:    fastpath.NewCounters(),
+		return nil, err
 	}
 
 	switch pipe.EndpointKind {
 	case "listener":
 		var err error
-		if pipe.TLS.Enabled {
+		if pipe.ExternalXrayBridge {
+			err = handle.startGoListener(frameKind, addressGuard)
+		} else if pipe.TLS.Enabled {
 			err = handle.startTLSListener(frameKind, addressGuard)
 		} else {
 			err = handle.startListener(frameKind, lengthMode, addressGuard)
@@ -110,7 +127,9 @@ func startTCPPipe(pipe config.RuntimeTCPPipe, device config.RuntimeDevice) (*TCP
 		}
 	case "connector":
 		var err error
-		if pipe.TLS.Enabled {
+		if pipe.ExternalXrayBridge {
+			err = handle.startGoConnector(frameKind, addressGuard)
+		} else if pipe.TLS.Enabled {
 			err = handle.startTLSConnector(frameKind, addressGuard)
 		} else {
 			err = handle.startConnector(frameKind, lengthMode, addressGuard)
@@ -127,6 +146,34 @@ func startTCPPipe(pipe config.RuntimeTCPPipe, device config.RuntimeDevice) (*TCP
 	return handle, nil
 }
 
+func prepareTCPPipeHandle(pipe config.RuntimeTCPPipe, device config.RuntimeDevice, shared *tcpSharedDevice) (*TCPPipeHandle, error) {
+	owner := false
+	if shared == nil {
+		tunDevice, err := tuntap.Open(tuntap.OpenOptions{
+			Name: device.IfName, Type: device.Type, NonBlock: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("core: open %s %s: %w", device.Type, device.IfName, err)
+		}
+		netHandle, err := netapply.ApplyDevice(netapply.DeviceConfig{
+			Type: device.Type, IfName: tunDevice.Name(), MTU: device.MTU, MSSClamp: device.MSSClamp,
+			LinkAutoOptimize: device.LinkAutoOptimize, IPv4CIDR: device.IPv4CIDR, IPv6CIDR: device.IPv6CIDR,
+			Bridge: netapply.BridgeConfig{Enabled: device.Bridge.Enabled, Name: device.Bridge.Name, IfName: device.Bridge.IfName, MTU: device.Bridge.MTU},
+			Routes: netapplyRoutes(device.Routes), DNS: netapplyDNS(device.DNS),
+		})
+		if err != nil {
+			_ = tunDevice.Close()
+			return nil, fmt.Errorf("core: apply device %s: %w", tunDevice.Name(), err)
+		}
+		shared = &tcpSharedDevice{device: tunDevice, netApply: netHandle}
+		owner = true
+	}
+	return &TCPPipeHandle{
+		Pipe: pipe, DeviceName: shared.device.Name(), device: shared.device, netApply: shared.netApply,
+		shared: shared, owner: owner, counter: fastpath.NewCounters(),
+	}, nil
+}
+
 func (h *TCPPipeHandle) startListener(frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) error {
 	listener, local, err := listenTCP(h.Pipe)
 	if err != nil {
@@ -137,44 +184,119 @@ func (h *TCPPipeHandle) startListener(frameKind fastpath.FrameKind, lengthMode f
 	h.LocalAddr = local
 	done := make(chan struct{})
 	h.acceptDone = done
-	go h.acceptOne(listener, done, frameKind, lengthMode, addressGuard)
+	go h.acceptLoop(listener, done, frameKind, lengthMode, addressGuard)
 	return nil
 }
 
-func (h *TCPPipeHandle) acceptOne(listener *net.TCPListener, done chan struct{}, frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) {
+func (h *TCPPipeHandle) acceptLoop(listener *net.TCPListener, done chan struct{}, frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) {
 	defer close(done)
-	conn, err := listener.AcceptTCP()
-	if err != nil {
-		if !errors.Is(err, net.ErrClosed) {
-			h.setErr(fmt.Errorf("core: accept tcp %s: %w", h.Pipe.EndpointID, err))
+	for {
+		conn, err := listener.AcceptTCP()
+		if err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				h.setErr(fmt.Errorf("core: accept tcp %s: %w", h.Pipe.EndpointID, err))
+			}
+			return
 		}
-		return
-	}
-	remote, err := tcpAddrPort(conn.RemoteAddr())
-	if err != nil {
-		_ = conn.Close()
-		h.setErr(err)
-		return
-	}
-	h.mu.Lock()
-	h.acceptedRemote = remote
-	h.mu.Unlock()
-	if err := h.startWorkerFromConn(conn, frameKind, lengthMode, addressGuard); err != nil {
-		h.setErr(err)
+		h.mu.Lock()
+		active := h.session != nil
+		h.mu.Unlock()
+		if active {
+			go func() {
+				_ = linkdiag.ServeStream(context.Background(), conn, h.Pipe.Binding.VKeyValue)
+			}()
+			continue
+		}
+		remote, err := tcpAddrPort(conn.RemoteAddr())
+		if err != nil {
+			_ = conn.Close()
+			h.setErr(err)
+			continue
+		}
+		h.mu.Lock()
+		h.acceptedRemote = remote
+		h.mu.Unlock()
+		if err := h.startWorkerFromConn(conn, frameKind, lengthMode, addressGuard); err != nil {
+			h.setErr(err)
+		}
 	}
 }
 
 func (h *TCPPipeHandle) startConnector(frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) error {
+	if h.Pipe.ReconnectSecond <= 0 {
+		_, err := h.connectRawTCP(frameKind, lengthMode, addressGuard)
+		return err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	h.reconnectCancel = cancel
+	h.reconnectDone = done
+	session, err := h.connectRawTCP(frameKind, lengthMode, addressGuard)
+	if err != nil {
+		h.setErr(err)
+	}
+	go h.rawTCPReconnectLoop(ctx, done, session, frameKind, lengthMode, addressGuard)
+	return nil
+}
+
+func (h *TCPPipeHandle) connectRawTCP(frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) (*tcpWorkerSession, error) {
 	tcpConn, local, remote, err := dialTCP(h.Pipe)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	h.LocalAddr = local
 	h.RemoteAddr = remote
-	return h.startWorkerFromConn(tcpConn, frameKind, lengthMode, addressGuard)
+	if err := h.startWorkerFromConn(tcpConn, frameKind, lengthMode, addressGuard); err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	session := h.session
+	h.lastErr = nil
+	h.mu.Unlock()
+	return session, nil
+
+}
+
+func (h *TCPPipeHandle) rawTCPReconnectLoop(ctx context.Context, done chan struct{}, session *tcpWorkerSession, frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) {
+	defer close(done)
+	delay := time.Duration(h.Pipe.ReconnectSecond) * time.Second
+	for {
+		if session != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-session.monitorDone:
+			}
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+		var err error
+		session, err = h.connectRawTCP(frameKind, lengthMode, addressGuard)
+		if err != nil {
+			h.setErr(err)
+			session = nil
+		}
+	}
 }
 
 func (h *TCPPipeHandle) startWorkerFromConn(conn *net.TCPConn, frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) error {
+	if !h.acquireSharedDevice() {
+		_ = conn.Close()
+		return fmt.Errorf("core: tcp device %s already has an active stream", h.Pipe.DeviceID)
+	}
+	releaseDevice := true
+	defer func() {
+		if releaseDevice {
+			h.releaseSharedDevice()
+		}
+	}()
 	if err := configureTCPConn(conn, h.Pipe); err != nil {
 		_ = conn.Close()
 		return err
@@ -185,31 +307,92 @@ func (h *TCPPipeHandle) startWorkerFromConn(conn *net.TCPConn, frameKind fastpat
 		return fmt.Errorf("core: duplicate tcp fd for %s: %w", h.Pipe.EndpointID, err)
 	}
 	_ = conn.Close()
+	// Fd may restore blocking mode, so capture it once before C enables O_NONBLOCK.
+	fd := int(file.Fd())
 
+	networkToDeviceRate, deviceToNetworkRate := userTrafficRates(h.Pipe.EndpointKind, h.Pipe.Binding)
 	worker, err := fastpath.StartTCPPipe(fastpath.TCPConfig{
-		TUNFD:        h.device.FD(),
-		TCPFD:        int(file.Fd()),
-		FrameKind:    frameKind,
-		MaxFrameSize: uint32(h.Pipe.MaxFrameSize),
-		LengthMode:   lengthMode,
-		VKey:         []byte(h.Pipe.Binding.VKeyValue),
-		AddressGuard: addressGuard,
-		Counters:     h.counter,
+		TUNFD:                  h.device.FD(),
+		TCPFD:                  fd,
+		FrameKind:              frameKind,
+		MaxFrameSize:           uint32(h.Pipe.MaxFrameSize),
+		LengthMode:             lengthMode,
+		AddressGuardRemote:     h.Pipe.AddressGuardRemote,
+		DeviceToNetworkRateBPS: deviceToNetworkRate,
+		NetworkToDeviceRateBPS: networkToDeviceRate,
+		VKey:                   []byte(h.Pipe.Binding.VKeyValue),
+		AddressGuard:           addressGuard,
+		Counters:               h.counter,
 	})
 	if err != nil {
 		_ = file.Close()
 		return err
 	}
 
+	session := &tcpWorkerSession{
+		worker: worker, file: file, fd: fd, done: make(chan struct{}), monitorDone: make(chan struct{}),
+	}
 	h.mu.Lock()
-	h.tcpFile = file
-	h.worker = worker
+	if h.session != nil {
+		h.mu.Unlock()
+		_ = session.Stop()
+		return fmt.Errorf("core: tcp pipe %s already has an active worker", h.Pipe.EndpointID)
+	}
+	h.session = session
 	h.mu.Unlock()
+	releaseDevice = false
+	go h.monitorWorkerSession(session)
 	return nil
+}
+
+func (h *TCPPipeHandle) monitorWorkerSession(session *tcpWorkerSession) {
+	defer close(session.monitorDone)
+	fd := session.fd
+	for {
+		select {
+		case <-session.done:
+			h.clearWorkerSession(session)
+			return
+		default:
+		}
+		pollFDs := [1]unix.PollFd{{Fd: int32(fd), Events: unix.POLLRDHUP}}
+		_, err := unix.Poll(pollFDs[:], 250)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			h.setErr(fmt.Errorf("core: monitor tcp pipe %s: %w", h.Pipe.EndpointID, err))
+			_ = session.Stop()
+			h.clearWorkerSession(session)
+			return
+		}
+		if pollFDs[0].Revents&(unix.POLLRDHUP|unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+			_ = session.Stop()
+			h.clearWorkerSession(session)
+			return
+		}
+	}
+}
+
+func (h *TCPPipeHandle) clearWorkerSession(session *tcpWorkerSession) {
+	h.mu.Lock()
+	if h.session == session {
+		h.session = nil
+	}
+	h.mu.Unlock()
+	h.releaseSharedDevice()
 }
 
 func (h *TCPPipeHandle) Close() error {
 	var firstErr error
+	if h.reconnectCancel != nil {
+		h.reconnectCancel()
+		h.reconnectCancel = nil
+	}
+	if h.reconnectDone != nil {
+		<-h.reconnectDone
+		h.reconnectDone = nil
+	}
 	if h.listener != nil {
 		if err := h.listener.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -236,31 +419,31 @@ func (h *TCPPipeHandle) Close() error {
 	}
 
 	h.mu.Lock()
+	session := h.session
+	h.mu.Unlock()
+	if session != nil {
+		if err := session.Stop(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		<-session.monitorDone
+	}
+	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.worker != nil {
-		if err := h.worker.Stop(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		h.worker = nil
-	}
-	if h.tcpFile != nil {
-		if err := h.tcpFile.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		h.tcpFile = nil
-	}
-	if h.device != nil {
-		if h.netApply != nil {
-			if err := h.netApply.Rollback(); err != nil && firstErr == nil {
+	if h.owner && h.shared != nil {
+		if h.shared.netApply != nil {
+			if err := h.shared.netApply.Rollback(); err != nil && firstErr == nil {
 				firstErr = err
 			}
-			h.netApply = nil
+			h.shared.netApply = nil
 		}
-		if err := h.device.Close(); err != nil && firstErr == nil {
-			firstErr = err
+		if h.shared.device != nil {
+			if err := h.shared.device.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			h.shared.device = nil
 		}
-		h.device = nil
 	}
+	h.device = nil
 	if h.counter != nil {
 		h.counter.Close()
 		h.counter = nil
@@ -268,19 +451,39 @@ func (h *TCPPipeHandle) Close() error {
 	return firstErr
 }
 
+func (h *TCPPipeHandle) acquireSharedDevice() bool {
+	if h.shared == nil {
+		return true
+	}
+	h.shared.mu.Lock()
+	defer h.shared.mu.Unlock()
+	if h.shared.active {
+		return false
+	}
+	h.shared.active = true
+	return true
+}
+
+func (h *TCPPipeHandle) releaseSharedDevice() {
+	if h.shared == nil {
+		return
+	}
+	h.shared.mu.Lock()
+	h.shared.active = false
+	h.shared.mu.Unlock()
+}
+
 func (h *TCPPipeHandle) Counters() fastpath.CountersSnapshot {
 	if h == nil {
 		return fastpath.CountersSnapshot{}
 	}
-	if h.Pipe.TLS.Enabled {
+	if h.Pipe.TLS.Enabled || h.Pipe.ExternalXrayBridge {
 		return h.tlsCounters()
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.worker == nil {
+	if h.counter == nil {
 		return fastpath.CountersSnapshot{}
 	}
-	return h.worker.Counters()
+	return h.counter.Snapshot()
 }
 
 func (h *TCPPipeHandle) Err() error {
@@ -301,6 +504,94 @@ func (h *TCPPipeHandle) setErr(err error) {
 		h.lastErr = err
 	}
 	h.mu.Unlock()
+}
+
+func (h *TCPPipeHandle) Diagnose(ctx context.Context, kind string, duration time.Duration) (ConnectorDiagnostic, error) {
+	conn, target, err := h.openDiagnosticStream(ctx)
+	if err != nil {
+		return ConnectorDiagnostic{}, err
+	}
+	defer conn.Close()
+	transport := "tcp"
+	if h.Pipe.ExternalXrayBridge {
+		transport = "xray"
+		target = net.JoinHostPort(h.Pipe.XrayRemote, strconv.Itoa(int(h.Pipe.XrayPort)))
+	}
+	result := ConnectorDiagnostic{Kind: kind, Transport: transport, Target: target}
+	switch kind {
+	case "channel":
+		result.Delay, err = linkdiag.Ping(ctx, conn, h.Pipe.Binding.VKeyValue)
+	case "throughput":
+		measured, measureErr := linkdiag.Throughput(ctx, conn, h.Pipe.Binding.VKeyValue, duration)
+		err = measureErr
+		result.Delay = measured.Delay
+		result.UploadBytes = measured.UploadBytes
+		result.DownloadBytes = measured.DownloadBytes
+		result.UploadBPS = measured.UploadBPS
+		result.DownloadBPS = measured.DownloadBPS
+		result.Duration = measured.Duration
+	case "path-mtu":
+		if h.Pipe.ExternalXrayBridge {
+			result.Delay, err = linkdiag.ProbeFrame(ctx, conn, "", h.Pipe.MaxFrameSize)
+			if err == nil {
+				result.PathMTU = h.Pipe.DeviceMTU
+			}
+		} else {
+			result.TCPMSS = tcpConnMSS(conn)
+			if result.TCPMSS <= 0 {
+				err = errors.New("core: kernel did not report a TCP MSS for the diagnostic stream")
+			}
+		}
+	default:
+		err = fmt.Errorf("core: unsupported connector diagnostic %q", kind)
+	}
+	return result, err
+}
+
+func (h *TCPPipeHandle) openDiagnosticStream(ctx context.Context) (net.Conn, string, error) {
+	tcpConn, _, remote, err := dialTCP(h.Pipe)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := configureTCPConn(tcpConn, h.Pipe); err != nil {
+		_ = tcpConn.Close()
+		return nil, "", err
+	}
+	var conn net.Conn = tcpConn
+	if h.Pipe.TLS.Enabled {
+		tlsConfig, err := rawTCPClientTLSConfig(h.Pipe.TLS, h.Pipe.Remote)
+		if err != nil {
+			_ = tcpConn.Close()
+			return nil, "", err
+		}
+		tlsConn := tls.Client(tcpConn, tlsConfig)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = tlsConn.Close()
+			return nil, "", fmt.Errorf("core: diagnostic TLS handshake %s: %w", h.Pipe.EndpointID, err)
+		}
+		conn = tlsConn
+	}
+	return conn, remote.String(), nil
+}
+
+func tcpConnMSS(conn net.Conn) int {
+	var raw syscall.RawConn
+	switch value := conn.(type) {
+	case *net.TCPConn:
+		raw, _ = value.SyscallConn()
+	case *tls.Conn:
+		if tcp, ok := value.NetConn().(*net.TCPConn); ok {
+			raw, _ = tcp.SyscallConn()
+		}
+	}
+	if raw == nil {
+		return 0
+	}
+	result := 0
+	_ = raw.Control(func(fd uintptr) {
+		result, _ = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG)
+	})
+	return result
 }
 
 func configureTCPConn(conn *net.TCPConn, pipe config.RuntimeTCPPipe) error {
@@ -426,6 +717,11 @@ func configureRawTCPSocket(fd int, pipe config.RuntimeTCPPipe, listener bool) er
 		}
 		if err := unix.SetsockoptInt(fd, unix.IPPROTO_TCP, opt, value); err != nil {
 			return fmt.Errorf("core: set tcp fast open: %w", err)
+		}
+	}
+	if pipe.TCPMaxSeg > 0 {
+		if err := unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_MAXSEG, pipe.TCPMaxSeg); err != nil {
+			return fmt.Errorf("core: set tcp maximum segment size: %w", err)
 		}
 	}
 	return nil

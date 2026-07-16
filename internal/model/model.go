@@ -23,19 +23,33 @@ const (
 )
 
 type Device struct {
-	ID       string
-	Enabled  bool
-	Name     string
-	Type     DeviceType
-	IfName   string
-	MTU      int
-	MSSClamp int
-	IPv4CIDR string
-	IPv6CIDR string
-	Bridge   *BridgeConfig
-	Routes   []DeviceRoute
-	DNS      *DNSConfig
-	Remark   string
+	ID                   string
+	Enabled              bool
+	Name                 string
+	Type                 DeviceType
+	IfName               string
+	MTU                  int
+	MSSClamp             int
+	LinkAutoOptimize     bool
+	AddressConfigEnabled bool
+	AddressAssignMode    string
+	IPv4CIDR             string
+	IPv6CIDR             string
+	Gateway              string
+	Bridge               *BridgeConfig
+	Routes               []DeviceRoute
+	DNS                  *DNSConfig
+	DNSSearch            []string
+	AllowDefaultRoute    bool
+	BridgeEnabled        bool
+	BridgeName           string
+	BridgeMember         string
+	Source               string
+	LinkedListenerIDs    []string
+	LinkedListenerNames  []string
+	LinkedConnectorIDs   []string
+	LinkedConnectorNames []string
+	Remark               string
 }
 
 type BridgeConfig struct {
@@ -64,54 +78,78 @@ type DNSConfig struct {
 }
 
 type Listener struct {
-	ID            string
-	Enabled       bool
-	Name          string
-	BindHost      string
-	BindPort      uint16
-	Transport     Transport
-	XrayProfileID string
-	RawUDP        RawUDPSettings
-	RawTCP        RawTCPSettings
-	Binding       Binding
-	Remark        string
+	ID                     string
+	Enabled                bool
+	Name                   string
+	BindHost               string
+	BindPort               uint16
+	Transport              Transport
+	XrayProfileID          string
+	RawUDP                 RawUDPSettings
+	RawTCP                 RawTCPSettings
+	Binding                Binding
+	ShareAddressStrategy   string
+	ShareAddress           string
+	ExpiresAt              int64
+	TrafficCap             uint64
+	TrafficReset           string
+	TrafficResetAt         int64
+	TrafficResetGeneration uint64
+	TrafficRXOffset        uint64
+	TrafficTXOffset        uint64
+	Remark                 string
 }
 
 type Connector struct {
-	ID            string
-	Enabled       bool
-	Name          string
-	Remote        string
-	Port          uint16
-	Transport     Transport
-	XrayProfileID string
-	RawUDP        RawUDPSettings
-	RawTCP        RawTCPSettings
-	Binding       Binding
-	Remark        string
+	ID                     string
+	Enabled                bool
+	Name                   string
+	Remote                 string
+	Port                   uint16
+	Transport              Transport
+	XrayProfileID          string
+	RawUDP                 RawUDPSettings
+	RawTCP                 RawTCPSettings
+	Binding                Binding
+	TrafficResetAt         int64
+	TrafficResetGeneration uint64
+	TrafficRXOffset        uint64
+	TrafficTXOffset        uint64
+	Remark                 string
 }
 
 type Client struct {
-	ID              string
-	Enabled         bool
-	Name            string
-	Email           string
-	ListenerID      string
-	CredentialType  string
-	CredentialValue string
-	Binding         Binding
-	AddressID       string
-	ExpiresAt       int64
-	TrafficCap      uint64
-	TrafficResetAt  int64
-	TrafficRXOffset uint64
-	TrafficTXOffset uint64
-	Remark          string
+	ID                     string
+	Enabled                bool
+	Name                   string
+	Email                  string
+	ListenerID             string
+	ListenerIDs            []string
+	CredentialType         string
+	CredentialValue        string
+	UUID                   string
+	Password               string
+	Auth                   string
+	AllowedDeviceIDs       []string
+	Binding                Binding
+	AddressID              string
+	ExpiresAt              int64
+	TrafficCap             uint64
+	UploadRateLimit        uint64
+	DownloadRateLimit      uint64
+	TrafficReset           string
+	TrafficResetAt         int64
+	TrafficResetGeneration uint64
+	TrafficRXOffset        uint64
+	TrafficTXOffset        uint64
+	Remark                 string
 }
 
 type Route struct {
 	ID          string
 	Enabled     bool
+	Priority    int
+	Action      RouteAction
 	VKeyID      string
 	ListenerID  string
 	DeviceID    string
@@ -119,6 +157,14 @@ type Route struct {
 	ClientID    string
 	AddressID   string
 }
+
+type RouteAction string
+
+const (
+	RouteActionBindDevice RouteAction = "bind-device"
+	RouteActionAllow      RouteAction = "allow"
+	RouteActionDrop       RouteAction = "drop"
+)
 
 // Binding captures optional advanced-panel knobs. Empty fields mean the feature
 // is not enabled and must not add packet-time work after runtime config generation.
@@ -151,6 +197,9 @@ type RawUDPSettings struct {
 	KeepAliveSecond int
 	Workers         int
 	QueueSize       int
+	ZeroCopy        bool
+	ConnectTimeout  int
+	IdleTimeout     int
 	DTLS            RawDTLSSettings
 }
 
@@ -173,6 +222,9 @@ type RawTCPSettings struct {
 	ConnectTimeout  int
 	ReconnectSecond int
 	Workers         int
+	QueueSize       int
+	ZeroCopy        bool
+	IdleTimeout     int
 	ReadBuffer      int
 	WriteBuffer     int
 	TLS             RawTLSSettings
@@ -238,6 +290,8 @@ type XrayProfile struct {
 	InboundSettingsJSON  string
 	OutboundProtocol     string
 	OutboundSettingsJSON string
+	SendThrough          string
+	TargetStrategy       string
 	Network              string
 	Security             string
 	StreamSettingsJSON   string
@@ -253,23 +307,30 @@ type XrayProfile struct {
 }
 
 type Settings struct {
-	ID                  string
-	Enabled             bool
-	Name                string
-	PanelListen         string
-	PanelHTTPS          bool
-	PanelCertFile       string
-	PanelKeyFile        string
-	PanelAuthEnabled    bool
-	AdminUsername       string
-	AdminPasswordHash   string
-	SessionTTLSecond    int
-	ExternalXrayPath    string
-	LogLevel            string
-	StatsIntervalSecond int
-	BackupDir           string
-	DataDir             string
-	OpenWrtBuildTarget  string
-	AdvancedJSON        string
-	Remark              string
+	ID                     string
+	Enabled                bool
+	Name                   string
+	PanelListen            string
+	PanelDomain            string
+	PanelBasePath          string
+	PanelHTTPS             bool
+	PanelCertFile          string
+	PanelKeyFile           string
+	PanelAuthEnabled       bool
+	AdminUsername          string
+	AdminPasswordHash      string
+	SessionTTLSecond       int
+	Timezone               string
+	PanelOutbound          string
+	ExternalXrayPath       string
+	ExternalXrayConfigFile string
+	ExternalXrayWorkDir    string
+	ExternalXrayArgs       string
+	LogLevel               string
+	StatsIntervalSecond    int
+	BackupDir              string
+	DataDir                string
+	OpenWrtBuildTarget     string
+	AdvancedJSON           string
+	Remark                 string
 }

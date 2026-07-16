@@ -10,13 +10,14 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 
 	"tapx/internal/config"
 	"tapx/internal/fastpath"
-	"tapx/internal/model"
 	"tapx/internal/netapply"
+	"tapx/internal/pathmtu"
 	"tapx/internal/tuntap"
 )
 
@@ -41,24 +42,165 @@ type UDPPipeHandle struct {
 	dtlsPacketConn net.PacketConn
 	dtlsListener   net.Listener
 	dtlsCounter    xrayPipeCounters
+	pathPreparer   rawUDPPathPreparer
+	runtimeDevice  config.RuntimeDevice
+	startupCancel  context.CancelFunc
+	startupDone    chan struct{}
 }
 
 func startUDPPipe(pipe config.RuntimeUDPPipe, device config.RuntimeDevice) (*UDPPipeHandle, error) {
+	return startUDPPipeWithCache(pipe, device, nil)
+}
+
+func startUDPPipeWithCache(pipe config.RuntimeUDPPipe, device config.RuntimeDevice, pathCache *pathmtu.Cache) (*UDPPipeHandle, error) {
+	handle, err := prepareUDPPipeHandle(pipe, device, pathCache)
+	if err != nil {
+		return nil, err
+	}
 	frameKind, err := fastpath.FrameKindFromDevice(device.Type)
 	if err != nil {
+		_ = handle.Close()
 		return nil, err
 	}
 	peerMode, err := fastpath.PeerModeFromModel(pipe.PeerMode)
 	if err != nil {
+		_ = handle.Close()
 		return nil, err
 	}
 	peer, peerMode, err := peerForPipe(pipe, peerMode)
 	if err != nil {
+		_ = handle.Close()
 		return nil, err
 	}
 	addressGuard, err := fastpathAddressGuard(pipe.AddressGuard)
 	if err != nil {
+		_ = handle.Close()
 		return nil, err
+	}
+
+	if pipe.DTLS.Enabled {
+		if err := handle.startDTLS(frameKind, addressGuard, peer); err != nil {
+			_ = handle.Close()
+			return nil, err
+		}
+		return handle, nil
+	}
+
+	udpFD, local, err := openUDPSocket(pipe, peer)
+	if err != nil {
+		_ = handle.Close()
+		return nil, err
+	}
+	handle.LocalAddr = local
+	handle.udpFD = udpFD
+	if pipe.LinkAutoOptimize && pipe.MaxDatagramPayload <= pathmtu.SegmentHeaderSize && pipe.EndpointKind == "listener" {
+		probeConn, err := duplicateUDPConn(udpFD)
+		if err != nil {
+			_ = handle.Close()
+			return nil, fmt.Errorf("core: prepare UDP path probe socket %s: %w", pipe.EndpointID, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		handle.startupCancel = cancel
+		handle.startupDone = done
+		go func() {
+			defer close(done)
+			var preparedPipe config.RuntimeUDPPipe
+			var confirmedPeer netip.AddrPort
+			for {
+				var prepareErr error
+				preparedPipe, confirmedPeer, prepareErr = handle.pathPreparer.prepare(ctx, pipe, device, probeConn, peer)
+				if prepareErr == nil {
+					break
+				}
+				handle.replaceErr(prepareErr)
+				retry := time.NewTimer(time.Second)
+				select {
+				case <-retry.C:
+				case <-ctx.Done():
+					if !retry.Stop() {
+						<-retry.C
+					}
+					_ = probeConn.Close()
+					return
+				}
+			}
+			closeErr := probeConn.Close()
+			if closeErr != nil {
+				handle.setErr(fmt.Errorf("core: close UDP path probe socket %s: %w", pipe.EndpointID, closeErr))
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			if clampErr := handle.netApply.SetMSSClamp(preparedPipe.TCPMSSIPv4, preparedPipe.TCPMSSIPv6); clampErr != nil {
+				handle.setErr(fmt.Errorf("core: apply confirmed UDP MSS for %s: %w", pipe.EndpointID, clampErr))
+				return
+			}
+			worker, counters, startErr := startRawUDPWorker(handle.device, preparedPipe, frameKind, addressGuard, udpFD, fastpath.UDPPeerFixed, confirmedPeer)
+			if startErr != nil {
+				handle.setErr(startErr)
+				return
+			}
+			handle.mu.Lock()
+			handle.lastErr = nil
+			handle.Pipe = preparedPipe
+			handle.RemoteAddr = confirmedPeer
+			handle.acceptedRemote = confirmedPeer
+			handle.worker = worker
+			handle.counter = counters
+			handle.mu.Unlock()
+		}()
+		return handle, nil
+	}
+	if pipe.LinkAutoOptimize && pipe.MaxDatagramPayload <= pathmtu.SegmentHeaderSize {
+		probeConn, err := duplicateUDPConn(udpFD)
+		if err != nil {
+			_ = handle.Close()
+			return nil, fmt.Errorf("core: prepare UDP path probe socket %s: %w", pipe.EndpointID, err)
+		}
+		probeTimeout := time.Duration(pipe.ConnectTimeout) * time.Second
+		if probeTimeout <= 0 {
+			probeTimeout = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		preparedPipe, confirmedPeer, prepareErr := defaultRawUDPPathPreparer(pathCache).prepare(ctx, pipe, device, probeConn, peer)
+		cancel()
+		closeErr := probeConn.Close()
+		if prepareErr != nil {
+			_ = handle.Close()
+			return nil, prepareErr
+		}
+		if closeErr != nil {
+			_ = handle.Close()
+			return nil, fmt.Errorf("core: close UDP path probe socket %s: %w", pipe.EndpointID, closeErr)
+		}
+		pipe = preparedPipe
+		peer = confirmedPeer
+		peerMode = fastpath.UDPPeerFixed
+		handle.Pipe = pipe
+		if err := handle.netApply.SetMSSClamp(pipe.TCPMSSIPv4, pipe.TCPMSSIPv6); err != nil {
+			_ = handle.Close()
+			return nil, fmt.Errorf("core: apply confirmed UDP MSS for %s: %w", pipe.EndpointID, err)
+		}
+	}
+
+	worker, counters, err := startRawUDPWorker(handle.device, pipe, frameKind, addressGuard, udpFD, peerMode, peer)
+	if err != nil {
+		_ = handle.Close()
+		return nil, err
+	}
+
+	handle.RemoteAddr = peer
+	handle.acceptedRemote = peer
+	handle.worker = worker
+	handle.counter = counters
+	return handle, nil
+}
+
+func prepareUDPPipeHandle(pipe config.RuntimeUDPPipe, device config.RuntimeDevice, pathCache *pathmtu.Cache) (*UDPPipeHandle, error) {
+	if !pipe.LinkAutoOptimize && pipe.MaxDatagramPayload != 0 {
+		return nil, fmt.Errorf("core: udp pipe %s has a datagram path plan while automatic link optimization is disabled", pipe.EndpointID)
 	}
 
 	tunDevice, err := tuntap.Open(tuntap.OpenOptions{
@@ -70,12 +212,13 @@ func startUDPPipe(pipe config.RuntimeUDPPipe, device config.RuntimeDevice) (*UDP
 		return nil, fmt.Errorf("core: open %s %s: %w", device.Type, device.IfName, err)
 	}
 	netHandle, err := netapply.ApplyDevice(netapply.DeviceConfig{
-		Type:     device.Type,
-		IfName:   tunDevice.Name(),
-		MTU:      device.MTU,
-		MSSClamp: device.MSSClamp,
-		IPv4CIDR: device.IPv4CIDR,
-		IPv6CIDR: device.IPv6CIDR,
+		Type:             device.Type,
+		IfName:           tunDevice.Name(),
+		MTU:              device.MTU,
+		MSSClamp:         device.MSSClamp,
+		LinkAutoOptimize: device.LinkAutoOptimize,
+		IPv4CIDR:         device.IPv4CIDR,
+		IPv6CIDR:         device.IPv6CIDR,
 		Bridge: netapply.BridgeConfig{
 			Enabled: device.Bridge.Enabled,
 			Name:    device.Bridge.Name,
@@ -91,54 +234,96 @@ func startUDPPipe(pipe config.RuntimeUDPPipe, device config.RuntimeDevice) (*UDP
 	}
 
 	handle := &UDPPipeHandle{
-		Pipe:       pipe,
-		DeviceName: tunDevice.Name(),
-		device:     tunDevice,
-		netApply:   netHandle,
-		udpFD:      -1,
+		Pipe:          pipe,
+		DeviceName:    tunDevice.Name(),
+		device:        tunDevice,
+		netApply:      netHandle,
+		udpFD:         -1,
+		pathPreparer:  defaultRawUDPPathPreparer(pathCache),
+		runtimeDevice: device,
 	}
-	if pipe.DTLS.Enabled {
-		if err := handle.startDTLS(frameKind, addressGuard, peer); err != nil {
-			_ = handle.Close()
-			return nil, err
-		}
-		return handle, nil
-	}
+	return handle, nil
+}
 
-	udpFD, local, err := openUDPSocket(pipe, peer)
-	if err != nil {
-		_ = handle.Close()
-		return nil, err
+func startRawUDPWorker(device tuntap.Device, pipe config.RuntimeUDPPipe, frameKind fastpath.FrameKind, addressGuard fastpath.AddressGuard, udpFD int, peerMode fastpath.UDPPeerMode, peer netip.AddrPort) (*fastpath.Worker, *fastpath.Counters, error) {
+	if err := prepareRawUDPWorkerSocket(udpFD, pipe, peer); err != nil {
+		return nil, nil, err
 	}
-
 	counters := fastpath.NewCounters()
+	networkToDeviceRate, deviceToNetworkRate := userTrafficRates(pipe.EndpointKind, pipe.Binding)
 	worker, err := fastpath.StartUDPPipe(fastpath.UDPConfig{
-		TUNFD:        tunDevice.FD(),
-		UDPFD:        udpFD,
-		FrameKind:    frameKind,
-		MaxFrameSize: uint32(pipe.MaxFrameSize),
-		PeerMode:     peerMode,
-		Peer:         peer,
-		VKey:         []byte(pipe.Binding.VKeyValue),
-		AddressGuard: addressGuard,
-		Counters:     counters,
+		TUNFD:                  device.FD(),
+		UDPFD:                  udpFD,
+		FrameKind:              frameKind,
+		MaxFrameSize:           uint32(pipe.MaxFrameSize),
+		MaxDatagramPayload:     uint32(pipe.MaxDatagramPayload),
+		PeerMode:               peerMode,
+		AddressGuardRemote:     pipe.AddressGuardRemote,
+		Peer:                   peer,
+		DeviceToNetworkRateBPS: deviceToNetworkRate,
+		NetworkToDeviceRateBPS: networkToDeviceRate,
+		VKey:                   []byte(pipe.Binding.VKeyValue),
+		AddressGuard:           addressGuard,
+		Counters:               counters,
 	})
 	if err != nil {
-		_ = unix.Close(udpFD)
 		counters.Close()
-		_ = handle.Close()
-		return nil, err
+		return nil, nil, err
 	}
+	return worker, counters, nil
+}
 
-	handle.LocalAddr = local
-	handle.udpFD = udpFD
-	handle.worker = worker
-	handle.counter = counters
-	return handle, nil
+func prepareRawUDPWorkerSocket(fd int, pipe config.RuntimeUDPPipe, peer netip.AddrPort) error {
+	if !pipe.LinkAutoOptimize {
+		return nil
+	}
+	if !peer.IsValid() {
+		return fmt.Errorf("core: automatic UDP path adaptation for %s requires a confirmed peer", pipe.EndpointID)
+	}
+	// A connected UDP socket may leave or reorder its SO_REUSEPORT listener
+	// group. Dispatch sockets must keep their kernel BPF socket indexes stable;
+	// the fastpath already pins and validates their peer explicitly.
+	if pipe.DispatchGroup == "" {
+		if err := connectUDPSocket(fd, peer); err != nil {
+			return fmt.Errorf("core: connect confirmed UDP peer for %s: %w", pipe.EndpointID, err)
+		}
+	}
+	if err := enableUDPPathErrorQueue(fd, peer.Addr().Is6()); err != nil {
+		return fmt.Errorf("core: enable UDP path error queue for %s: %w", pipe.EndpointID, err)
+	}
+	return nil
+}
+
+func connectUDPSocket(fd int, peer netip.AddrPort) error {
+	addr := peer.Addr().Unmap()
+	if addr.Is4() {
+		raw := addr.As4()
+		return unix.Connect(fd, &unix.SockaddrInet4{Port: int(peer.Port()), Addr: raw})
+	}
+	if addr.Is6() {
+		raw := addr.As16()
+		return unix.Connect(fd, &unix.SockaddrInet6{Port: int(peer.Port()), Addr: raw})
+	}
+	return fmt.Errorf("peer address %s is not IPv4 or IPv6", peer.Addr())
+}
+
+func enableUDPPathErrorQueue(fd int, ipv6 bool) error {
+	if ipv6 {
+		return unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_RECVERR, 1)
+	}
+	return unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_RECVERR, 1)
 }
 
 func (h *UDPPipeHandle) Close() error {
 	var firstErr error
+	if h.startupCancel != nil {
+		h.startupCancel()
+		h.startupCancel = nil
+	}
+	if h.startupDone != nil {
+		<-h.startupDone
+		h.startupDone = nil
+	}
 	if h.dtlsListener != nil {
 		if err := h.dtlsListener.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -200,13 +385,17 @@ func (h *UDPPipeHandle) Counters() fastpath.CountersSnapshot {
 	if h == nil {
 		return fastpath.CountersSnapshot{}
 	}
-	if h.Pipe.DTLS.Enabled {
+	h.mu.Lock()
+	dtlsEnabled := h.Pipe.DTLS.Enabled
+	worker := h.worker
+	h.mu.Unlock()
+	if dtlsEnabled {
 		return h.dtlsCounters()
 	}
-	if h.worker == nil {
+	if worker == nil {
 		return fastpath.CountersSnapshot{}
 	}
-	return h.worker.Counters()
+	return worker.Counters()
 }
 
 func (h *UDPPipeHandle) Err() error {
@@ -226,6 +415,12 @@ func (h *UDPPipeHandle) setErr(err error) {
 	if h.lastErr == nil {
 		h.lastErr = err
 	}
+	h.mu.Unlock()
+}
+
+func (h *UDPPipeHandle) replaceErr(err error) {
+	h.mu.Lock()
+	h.lastErr = err
 	h.mu.Unlock()
 }
 
@@ -252,6 +447,10 @@ func peerForPipe(pipe config.RuntimeUDPPipe, mode fastpath.UDPPeerMode) (netip.A
 }
 
 func openUDPSocket(pipe config.RuntimeUDPPipe, peer netip.AddrPort) (int, netip.AddrPort, error) {
+	return openUDPSocketWithHook(pipe, peer, nil)
+}
+
+func openUDPSocketWithHook(pipe config.RuntimeUDPPipe, peer netip.AddrPort, beforeBind func(int) error) (int, netip.AddrPort, error) {
 	bind := netip.IPv4Unspecified()
 	if peer.IsValid() && peer.Addr().Is6() {
 		bind = netip.IPv6Unspecified()
@@ -279,9 +478,15 @@ func openUDPSocket(pipe config.RuntimeUDPPipe, peer netip.AddrPort) (int, netip.
 	if err != nil {
 		return -1, netip.AddrPort{}, fmt.Errorf("core: create udp socket: %w", err)
 	}
-	if err := configureUDPSocket(fd, pipe); err != nil {
+	if err := configureUDPSocket(fd, pipe, family); err != nil {
 		_ = unix.Close(fd)
 		return -1, netip.AddrPort{}, err
+	}
+	if beforeBind != nil {
+		if err := beforeBind(fd); err != nil {
+			_ = unix.Close(fd)
+			return -1, netip.AddrPort{}, err
+		}
 	}
 	if err := bindUDP(fd, bind, pipe.BindPort); err != nil {
 		_ = unix.Close(fd)
@@ -315,7 +520,21 @@ func openUDPPacketConn(pipe config.RuntimeUDPPipe, peer netip.AddrPort) (net.Pac
 	return packetConn, local, nil
 }
 
-func configureUDPSocket(fd int, pipe config.RuntimeUDPPipe) error {
+func configureUDPSocket(fd int, pipe config.RuntimeUDPPipe, family int) error {
+	if pipe.LinkAutoOptimize {
+		switch family {
+		case unix.AF_INET:
+			if err := unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_MTU_DISCOVER, unix.IP_PMTUDISC_DO); err != nil {
+				return fmt.Errorf("core: enable IPv4 path MTU discovery: %w", err)
+			}
+		case unix.AF_INET6:
+			if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_MTU_DISCOVER, unix.IPV6_PMTUDISC_DO); err != nil {
+				return fmt.Errorf("core: enable IPv6 path MTU discovery: %w", err)
+			}
+		default:
+			return fmt.Errorf("core: unsupported UDP address family %d", family)
+		}
+	}
 	if pipe.BindInterface != "" {
 		if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, pipe.BindInterface); err != nil {
 			return fmt.Errorf("core: bind udp socket to interface %q: %w", pipe.BindInterface, err)
@@ -374,11 +593,4 @@ func localUDPAddr(fd int, ipv6 bool) (netip.AddrPort, error) {
 	default:
 		return netip.AddrPort{}, fmt.Errorf("core: unsupported udp sockname %T ipv6=%s", sa, strconv.FormatBool(ipv6))
 	}
-}
-
-func modelPeerMode(mode model.UDPPeerMode) model.UDPPeerMode {
-	if mode == "" {
-		return model.UDPPeerAny
-	}
-	return mode
 }

@@ -1,0 +1,251 @@
+.kernel-page {
+  width: 100%;
+}
+
+.kernel-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.kernel-actions-toolbar {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.kernel-content,
+.kernel-section-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.kernel-loading-card {
+  min-height: 240px;
+}
+
+.kernel-settings-card {
+  height: 100%;
+}
+
+.kernel-settings-card .ant-card-head {
+  min-height: 48px;
+}
+
+.kernel-settings-card .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+.kernel-runtime-card .ant-card-head,
+.kernel-options-card .ant-card-head {
+  min-height: 48px;
+}
+
+.kernel-runtime-card .ant-card-body {
+  padding: 0;
+}
+
+.kernel-engine-list {
+  display: grid;
+}
+
+.kernel-engine-row {
+  min-height: 78px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.kernel-engine-row:last-child {
+  border-bottom: 0;
+}
+
+.kernel-engine-identity,
+.kernel-engine-actions,
+.kernel-engine-switch,
+.kernel-option-title {
+  display: flex;
+  align-items: center;
+}
+
+.kernel-engine-identity {
+  min-width: 0;
+  gap: 10px;
+}
+
+.kernel-engine-identity strong {
+  min-width: 110px;
+  font-size: 15px;
+}
+
+.kernel-engine-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--hover-bg);
+  color: var(--text-secondary);
+  font-size: 17px;
+}
+
+.kernel-engine-actions {
+  justify-content: flex-end;
+  gap: 22px;
+}
+
+.kernel-engine-switch {
+  gap: 10px;
+  color: var(--text-primary);
+}
+
+.kernel-engine-switch span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.kernel-options-card .ant-card-body {
+  padding: 20px;
+}
+
+.kernel-options-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
+.kernel-option-group {
+  min-width: 0;
+  padding: 0 24px;
+  border-right: 1px solid var(--line-soft);
+}
+
+.kernel-option-group:first-child {
+  padding-left: 0;
+}
+
+.kernel-option-group:last-child {
+  padding-right: 0;
+  border-right: 0;
+}
+
+.kernel-option-title {
+  gap: 8px;
+  margin-bottom: 18px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.kernel-option-group .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+.kernel-engine-error {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--danger-bg);
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.kernel-hint {
+  margin-bottom: 12px;
+}
+
+.kernel-muted {
+  color: var(--text-secondary);
+}
+
+.kernel-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  flex-wrap: wrap;
+}
+
+.kernel-status-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kernel-download-advanced {
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+}
+
+.kernel-download-advanced .ant-collapse-header {
+  min-height: 42px;
+  align-items: center !important;
+}
+
+.kernel-platform-warning {
+  margin-top: 12px;
+}
+
+.kernel-install-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 16px;
+  margin-top: 16px;
+  border-top: 1px solid var(--line-soft);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 575px) {
+  .kernel-actions {
+    align-items: stretch;
+  }
+
+  .kernel-actions,
+  .kernel-actions > .ant-btn {
+    width: 100%;
+  }
+
+  .kernel-actions-toolbar {
+    margin-bottom: 8px;
+  }
+
+  .kernel-engine-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .kernel-engine-actions {
+    justify-content: space-between;
+  }
+
+  .kernel-options-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .kernel-option-group,
+  .kernel-option-group:first-child,
+  .kernel-option-group:last-child {
+    padding: 0 0 20px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .kernel-option-group:last-child {
+    padding: 20px 0 0;
+    border-bottom: 0;
+  }
+
+  .kernel-install-actions > .ant-btn,
+  .kernel-install-actions .ant-upload-wrapper,
+  .kernel-install-actions .ant-upload-wrapper .ant-btn {
+    width: 100%;
+  }
+}

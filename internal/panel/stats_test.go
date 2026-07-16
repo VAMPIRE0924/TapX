@@ -75,15 +75,17 @@ func TestBuildStatsReportAppliesClientTrafficResetOffsets(t *testing.T) {
 	now := time.Unix(2000, 0)
 	cfg := config.RuntimeConfig{
 		Clients: []model.Client{{
-			ID:              "client-a",
-			Enabled:         true,
-			TrafficCap:      100,
-			TrafficResetAt:  1900,
-			TrafficRXOffset: 30,
-			TrafficTXOffset: 20,
+			ID:                     "client-a",
+			Enabled:                true,
+			TrafficCap:             100,
+			TrafficResetAt:         1900,
+			TrafficRXOffset:        30,
+			TrafficTXOffset:        20,
+			TrafficResetGeneration: 3,
 		}},
 	}
 	state := RuntimeState{
+		Generation: 3,
 		UDPPipes: []RuntimePipeState{{
 			EndpointID:   "udp-a",
 			EndpointKind: "listener",
@@ -137,5 +139,36 @@ func TestBuildClientEnforcementPlan(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing enforcement items: %+v", want)
+	}
+}
+
+func TestBuildListenerEnforcementPlan(t *testing.T) {
+	now := time.Unix(2000, 0)
+	cfg := config.RuntimeConfig{Listeners: []model.Listener{
+		{ID: "disabled", Enabled: false},
+		{ID: "expired", Enabled: true, ExpiresAt: 1000},
+		{ID: "quota", Enabled: true, TrafficCap: 100},
+		{ID: "ok", Enabled: true, TrafficCap: 1000, ExpiresAt: 3000},
+	}}
+	state := RuntimeState{UDPPipes: []RuntimePipeState{
+		{EndpointID: "disabled", EndpointKind: "listener"},
+		{EndpointID: "expired", EndpointKind: "listener"},
+		{EndpointID: "quota", EndpointKind: "listener", Counters: fastpath.CountersSnapshot{RXBytes: 60, TXBytes: 40}},
+		{EndpointID: "ok", EndpointKind: "listener", Counters: fastpath.CountersSnapshot{RXBytes: 10}},
+	}}
+
+	plan := BuildListenerEnforcementPlan(cfg, state, now)
+	if len(plan) != 3 {
+		t.Fatalf("plan = %+v, want 3 enforcement items", plan)
+	}
+	want := map[string]string{"disabled": "disabled", "expired": "expired", "quota": "quota"}
+	for _, item := range plan {
+		if item.EndpointKind != "listener" || want[item.EndpointID] != item.Reason {
+			t.Fatalf("plan item = %+v", item)
+		}
+		delete(want, item.EndpointID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing listener enforcement items: %+v", want)
 	}
 }

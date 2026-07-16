@@ -108,10 +108,19 @@ func TestApplyDeviceBuildsBridgeCommandsAndRollback(t *testing.T) {
 		{"ip", "link", "show", "dev", "brx0"},
 		{"ip", "link", "add", "name", "brx0", "type", "bridge"},
 		{"ip", "link", "set", "dev", "brx0", "mtu", "1400"},
+		{"ip", "link", "set", "dev", "brx0", "type", "bridge", "group_fwd_mask", "65528"},
 		{"ip", "link", "set", "dev", "brx0", "up"},
 		{"ip", "link", "set", "dev", "tapx0", "master", "brx0"},
 		{"ip", "link", "set", "dev", "eth1", "master", "brx0"},
 		{"ip", "link", "set", "dev", "eth1", "up"},
+		{"tc", "qdisc", "replace", "dev", "tapx0", "clsact"},
+		{"tc", "filter", "replace", "dev", "tapx0", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580001", "flower", "skip_hw", "dst_mac", "01:80:c2:00:00:00", "action", "mirred", "egress", "redirect", "dev", "eth1"},
+		{"tc", "filter", "replace", "dev", "tapx0", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580002", "flower", "skip_hw", "dst_mac", "01:80:c2:00:00:01", "action", "mirred", "egress", "redirect", "dev", "eth1"},
+		{"tc", "filter", "replace", "dev", "tapx0", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580003", "flower", "skip_hw", "dst_mac", "01:80:c2:00:00:02", "action", "mirred", "egress", "redirect", "dev", "eth1"},
+		{"tc", "qdisc", "replace", "dev", "eth1", "clsact"},
+		{"tc", "filter", "replace", "dev", "eth1", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580001", "flower", "skip_hw", "dst_mac", "01:80:c2:00:00:00", "action", "mirred", "egress", "redirect", "dev", "tapx0"},
+		{"tc", "filter", "replace", "dev", "eth1", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580002", "flower", "skip_hw", "dst_mac", "01:80:c2:00:00:01", "action", "mirred", "egress", "redirect", "dev", "tapx0"},
+		{"tc", "filter", "replace", "dev", "eth1", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580003", "flower", "skip_hw", "dst_mac", "01:80:c2:00:00:02", "action", "mirred", "egress", "redirect", "dev", "tapx0"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %#v, want %#v", calls, want)
@@ -121,6 +130,12 @@ func TestApplyDeviceBuildsBridgeCommandsAndRollback(t *testing.T) {
 		t.Fatalf("rollback bridge: %v", err)
 	}
 	want = append(want,
+		[]string{"tc", "filter", "delete", "dev", "eth1", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580003", "flower"},
+		[]string{"tc", "filter", "delete", "dev", "eth1", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580002", "flower"},
+		[]string{"tc", "filter", "delete", "dev", "eth1", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580001", "flower"},
+		[]string{"tc", "filter", "delete", "dev", "tapx0", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580003", "flower"},
+		[]string{"tc", "filter", "delete", "dev", "tapx0", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580002", "flower"},
+		[]string{"tc", "filter", "delete", "dev", "tapx0", "ingress", "protocol", "all", "pref", "62000", "handle", "0x54580001", "flower"},
 		[]string{"ip", "link", "set", "dev", "tapx0", "nomaster"},
 		[]string{"ip", "link", "set", "dev", "eth1", "nomaster"},
 		[]string{"ip", "link", "delete", "brx0", "type", "bridge"},
@@ -216,6 +231,55 @@ func TestApplyDeviceBuildsMSSClampCommandsAndRollback(t *testing.T) {
 	)
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls after rollback = %#v, want %#v", calls, want)
+	}
+}
+
+func TestApplyDeviceBuildsAutomaticPMTUMSSCommands(t *testing.T) {
+	var calls [][]string
+	runner := func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}
+
+	handle, err := applyDevice(DeviceConfig{
+		Type:             model.DeviceTUN,
+		IfName:           "tapx0",
+		LinkAutoOptimize: true,
+	}, runner)
+	if err != nil {
+		t.Fatalf("apply automatic MSS optimization: %v", err)
+	}
+
+	want := [][]string{
+		{"ip", "link", "set", "dev", "tapx0", "up"},
+		{"iptables", "-t", "mangle", "-A", "FORWARD", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+		{"iptables", "-t", "mangle", "-A", "OUTPUT", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+		{"ip6tables", "-t", "mangle", "-A", "FORWARD", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+		{"ip6tables", "-t", "mangle", "-A", "OUTPUT", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+
+	if err := handle.SetMSSClamp(1412, 1392); err != nil {
+		t.Fatalf("replace automatic MSS optimization: %v", err)
+	}
+	want = append(want,
+		[]string{"ip6tables", "-t", "mangle", "-D", "OUTPUT", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+		[]string{"ip6tables", "-t", "mangle", "-D", "FORWARD", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+		[]string{"iptables", "-t", "mangle", "-D", "OUTPUT", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+		[]string{"iptables", "-t", "mangle", "-D", "FORWARD", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+		[]string{"iptables", "-t", "mangle", "-A", "FORWARD", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1412"},
+		[]string{"iptables", "-t", "mangle", "-A", "OUTPUT", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1412"},
+		[]string{"ip6tables", "-t", "mangle", "-A", "FORWARD", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1392"},
+		[]string{"ip6tables", "-t", "mangle", "-A", "OUTPUT", "-o", "tapx0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1392"},
+	)
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls after discovered MSS = %#v, want %#v", calls, want)
+	}
+
+	if err := handle.Rollback(); err != nil {
+		t.Fatalf("rollback automatic MSS optimization: %v", err)
 	}
 }
 

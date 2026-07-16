@@ -1,0 +1,93 @@
+.security-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.security-toggle-row {
+  min-height: 84px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 20px 16px;
+}
+
+.security-toggle-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.security-toggle-copy span {
+  color: var(--ant-color-text-secondary);
+}
+
+.totp-setup-content {
+  display: grid;
+  padding-top: 4px;
+}
+
+.totp-setup-modal .ant-modal-close {
+  box-shadow: none;
+  outline: none;
+}
+
+.totp-setup-modal .ant-modal-close:focus-visible {
+  outline: 2px solid var(--ant-color-primary-border);
+  outline-offset: 2px;
+}
+
+.totp-setup-content .ant-divider {
+  margin: 22px 0;
+}
+
+.totp-setup-step {
+  display: grid;
+  gap: 14px;
+}
+
+.totp-qr-copy-surface {
+  justify-self: center;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  max-width: 100%;
+  cursor: pointer;
+}
+
+.totp-qr-copy-surface:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--ant-color-primary-border);
+  outline-offset: 4px;
+}
+
+.totp-qr-shell {
+  justify-self: center;
+  width: 184px;
+  height: 184px;
+  padding: 2px;
+  background: #fff;
+  border: 1px solid #fff;
+}
+
+.totp-secret {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.totp-code-step .ant-input {
+  width: 100%;
+}
+
+@media (max-width: 575px) {
+  .security-toggle-row {
+    padding-inline: 4px;
+  }
+
+  .totp-setup-content .ant-divider {
+    margin: 18px 0;
+  }
+}

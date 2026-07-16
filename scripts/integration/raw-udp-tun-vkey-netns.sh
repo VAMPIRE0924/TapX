@@ -70,6 +70,18 @@ wait_for_link() {
   return 1
 }
 
+wait_for_ping() {
+  local ns="$1"
+  shift
+  for _ in $(seq 1 30); do
+    if ip netns exec "$ns" ping -c 1 -W 1 "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 show_interface_evidence() {
   local ns="$1"
   local name="$2"
@@ -94,12 +106,12 @@ cleanup
 rm -f "${BUILD_DIR}/tapx-a.log" "${BUILD_DIR}/tapx-b.log" "${BUILD_DIR}/tapx-a.json" "${BUILD_DIR}/tapx-b.json"
 
 echo "build tapx-core"
-(cd "$ROOT" && GOTOOLCHAIN=local go build -o "$CORE_BIN" ./cmd/tapx-core)
+(cd "$ROOT" && GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go build -o "$CORE_BIN" ./cmd/tapx-core)
 
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500}
+    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500, "LinkAutoOptimize": true}
   ],
   "VKeys": [
     {"ID": "vk-a", "Enabled": true, "Value": "${VKEY}"}
@@ -124,7 +136,7 @@ JSON
 cat >"${BUILD_DIR}/tapx-b.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500}
+    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500, "LinkAutoOptimize": true}
   ],
   "VKeys": [
     {"ID": "vk-b", "Enabled": true, "Value": "${VKEY}"}
@@ -157,6 +169,8 @@ ip -n "$NS_A" link set lo up
 ip -n "$NS_B" link set lo up
 ip -n "$NS_A" addr add 172.31.253.1/30 dev "$VETH_A"
 ip -n "$NS_B" addr add 172.31.253.2/30 dev "$VETH_B"
+ip -n "$NS_A" link set "$VETH_A" mtu 1280
+ip -n "$NS_B" link set "$VETH_B" mtu 1280
 ip -n "$NS_A" link set "$VETH_A" up
 ip -n "$NS_B" link set "$VETH_B" up
 
@@ -183,7 +197,9 @@ echo "verify underlay"
 ip netns exec "$NS_A" ping -c 1 -W 1 172.31.253.2 >/dev/null || fail_with_logs
 
 echo "verify raw UDP/TUN vKey tunnel"
-ip netns exec "$NS_A" ping -c 3 -W 1 10.91.0.2 >/dev/null || fail_with_logs
-ip netns exec "$NS_B" ping -c 3 -W 1 10.91.0.1 >/dev/null || fail_with_logs
+wait_for_ping "$NS_A" 10.91.0.2 || fail_with_logs
+wait_for_ping "$NS_B" 10.91.0.1 || fail_with_logs
+wait_for_ping "$NS_A" -M do -s 1400 10.91.0.2 || fail_with_logs
+wait_for_ping "$NS_B" -M do -s 1400 10.91.0.1 || fail_with_logs
 
 echo "raw UDP/TUN vKey netns integration: ok"

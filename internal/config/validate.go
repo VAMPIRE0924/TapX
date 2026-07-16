@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 
 	"tapx/internal/model"
 )
@@ -261,6 +262,12 @@ func (v *validator) validateDevices() {
 		if item.MSSClamp != 0 && (item.MSSClamp < 536 || item.MSSClamp > 65535) {
 			v.add("Device", item.ID, "MSSClamp", "must be between 536 and 65535")
 		}
+		if item.LinkAutoOptimize && item.MSSClamp != 0 {
+			v.add("Device", item.ID, "MSSClamp", "must be zero when automatic link optimization is enabled")
+		}
+		if item.LinkAutoOptimize && item.MTU == 0 {
+			v.add("Device", item.ID, "MTU", "is required when automatic link optimization is enabled")
+		}
 		v.ipPrefix("Device", item.ID, "IPv4CIDR", item.IPv4CIDR, true)
 		v.ipPrefix("Device", item.ID, "IPv6CIDR", item.IPv6CIDR, false)
 		if item.Bridge != nil && item.Type != model.DeviceTAP {
@@ -316,7 +323,56 @@ func (v *validator) validateXrayProfiles() {
 		} {
 			v.jsonObject("XrayProfile", item.ID, field, value)
 		}
+		if v.xrayProfileUsesAutomaticLink(item.ID) && xrayDisablesQUICPathMTU(item) {
+			v.add("XrayProfile", item.ID, "StreamSettingsJSON", "cannot disable QUIC path MTU discovery while a bound device enables automatic link optimization")
+		}
 	}
+}
+
+func (v *validator) xrayProfileUsesAutomaticLink(profileID string) bool {
+	uses := func(enabled bool, transport model.Transport, xrayProfileID string, binding model.Binding) bool {
+		if !enabled || transport != model.TransportXray || xrayProfileID != profileID {
+			return false
+		}
+		deviceID := binding.DeviceID
+		if deviceID == "" && binding.RouteID != "" {
+			if route, ok := v.routes[binding.RouteID]; ok {
+				deviceID = route.DeviceID
+			}
+		}
+		device, ok := v.devices[deviceID]
+		return ok && device.Enabled && device.LinkAutoOptimize
+	}
+	for _, item := range v.cfg.Listeners {
+		if uses(item.Enabled, item.Transport, item.XrayProfileID, item.Binding) {
+			return true
+		}
+	}
+	for _, item := range v.cfg.Connectors {
+		if uses(item.Enabled, item.Transport, item.XrayProfileID, item.Binding) {
+			return true
+		}
+	}
+	return false
+}
+
+func xrayDisablesQUICPathMTU(profile model.XrayProfile) bool {
+	var stream map[string]any
+	if strings.TrimSpace(profile.StreamSettingsJSON) == "" || json.Unmarshal([]byte(profile.StreamSettingsJSON), &stream) != nil {
+		return false
+	}
+	network := strings.ToLower(strings.TrimSpace(profile.Network))
+	if network == "" {
+		network, _ = stream["network"].(string)
+		network = strings.ToLower(strings.TrimSpace(network))
+	}
+	if network != "hysteria" && network != "xhttp" && network != "splithttp" {
+		return false
+	}
+	finalMask, _ := stream["finalmask"].(map[string]any)
+	quicParams, _ := finalMask["quicParams"].(map[string]any)
+	disabled, _ := quicParams["disablePathMTUDiscovery"].(bool)
+	return disabled
 }
 
 func (v *validator) validateSettings() {
@@ -328,6 +384,54 @@ func (v *validator) validateSettings() {
 		}
 		if item.OpenWrtBuildTarget != "" && item.OpenWrtBuildTarget != "x86-64" {
 			v.add("Settings", item.ID, "OpenWrtBuildTarget", "currently must be x86-64")
+		}
+		if listen := strings.TrimSpace(item.PanelListen); listen != "" {
+			host, portText, err := net.SplitHostPort(listen)
+			if err != nil {
+				v.add("Settings", item.ID, "PanelListen", "must be an IP and port, for example :2053 or 127.0.0.1:2053")
+			} else {
+				if host != "" && net.ParseIP(host) == nil {
+					v.add("Settings", item.ID, "PanelListen", "host must be an IP address")
+				}
+				port, portErr := strconv.ParseUint(portText, 10, 16)
+				if portErr != nil || port == 0 {
+					v.add("Settings", item.ID, "PanelListen", "port must be between 1 and 65535")
+				}
+			}
+		}
+		certFile := strings.TrimSpace(item.PanelCertFile)
+		keyFile := strings.TrimSpace(item.PanelKeyFile)
+		if (certFile == "") != (keyFile == "") {
+			v.add("Settings", item.ID, "PanelCertFile", "certificate and key must be configured together")
+		}
+		for field, value := range map[string]string{"PanelCertFile": certFile, "PanelKeyFile": keyFile} {
+			if value != "" && !strings.HasPrefix(value, "/") && !(len(value) >= 3 && value[1] == ':' && (value[2] == '\\' || value[2] == '/')) {
+				v.add("Settings", item.ID, field, "must be an absolute path")
+			}
+		}
+		if item.PanelHTTPS && (strings.TrimSpace(item.PanelCertFile) == "" || strings.TrimSpace(item.PanelKeyFile) == "") {
+			v.add("Settings", item.ID, "PanelHTTPS", "requires PanelCertFile and PanelKeyFile")
+		}
+		if item.PanelDomain != "" && strings.ContainsAny(item.PanelDomain, "/:?#@\r\n\t ") {
+			v.add("Settings", item.ID, "PanelDomain", "must be a host name without scheme, port, path, or whitespace")
+		}
+		if item.PanelBasePath != "" && (item.PanelBasePath[0] != '/' || item.PanelBasePath[len(item.PanelBasePath)-1] != '/' || strings.ContainsAny(item.PanelBasePath, "?#\r\n\t ")) {
+			v.add("Settings", item.ID, "PanelBasePath", "must start and end with '/' and contain no query, fragment, or whitespace")
+		}
+		if item.Timezone != "" {
+			if _, err := time.LoadLocation(item.Timezone); err != nil {
+				v.add("Settings", item.ID, "Timezone", "must be a valid IANA timezone")
+			}
+		}
+		if outbound := strings.TrimSpace(item.PanelOutbound); outbound != "" && outbound != "direct" {
+			connector, ok := v.connectors[outbound]
+			if !ok || !connector.Enabled {
+				v.add("Settings", item.ID, "PanelOutbound", "must reference an enabled connector or direct")
+			} else if connector.Transport != model.TransportXray {
+				v.add("Settings", item.ID, "PanelOutbound", "must reference an embedded xray connector")
+			} else if profile, ok := v.xray[connector.XrayProfileID]; !ok || !profile.Enabled || normalizeXrayRuntime(profile.Runtime) != model.XrayEmbedded {
+				v.add("Settings", item.ID, "PanelOutbound", "must reference an embedded xray connector")
+			}
 		}
 		if item.PanelAuthEnabled {
 			if strings.TrimSpace(item.AdminUsername) == "" {
@@ -342,6 +446,15 @@ func (v *validator) validateSettings() {
 		if strings.ContainsRune(item.ExternalXrayPath, 0) {
 			v.add("Settings", item.ID, "ExternalXrayPath", "must not contain NUL")
 		}
+		for field, value := range map[string]string{
+			"ExternalXrayConfigFile": item.ExternalXrayConfigFile,
+			"ExternalXrayWorkDir":    item.ExternalXrayWorkDir,
+			"ExternalXrayArgs":       item.ExternalXrayArgs,
+		} {
+			if strings.ContainsRune(value, 0) {
+				v.add("Settings", item.ID, field, "must not contain NUL")
+			}
+		}
 		v.positive("StatsIntervalSecond", "Settings", item.ID, item.StatsIntervalSecond)
 		v.positive("SessionTTLSecond", "Settings", item.ID, item.SessionTTLSecond)
 		v.jsonObject("Settings", item.ID, "AdvancedJSON", item.AdvancedJSON)
@@ -350,6 +463,20 @@ func (v *validator) validateSettings() {
 
 func (v *validator) validateRoutes() {
 	for _, item := range v.cfg.Routes {
+		if item.Priority < 0 {
+			v.add("Route", item.ID, "Priority", "must be greater than or equal to 0")
+		}
+		switch item.Action {
+		case "", model.RouteActionBindDevice, model.RouteActionAllow, model.RouteActionDrop:
+		default:
+			v.add("Route", item.ID, "Action", "must be empty, bind-device, allow, or drop")
+		}
+		if item.VKeyID == "" && item.ListenerID == "" && item.DeviceID == "" && item.ConnectorID == "" && item.ClientID == "" && item.AddressID == "" {
+			v.add("Route", item.ID, "Match", "must define at least one binding or source-address condition")
+		}
+		if (item.Action == "" || item.Action == model.RouteActionBindDevice) && item.DeviceID == "" {
+			v.add("Route", item.ID, "DeviceID", "is required for bind-device action")
+		}
 		v.bindingRefs("Route", item.ID, model.Binding{
 			VKeyID:    item.VKeyID,
 			ClientID:  item.ClientID,
@@ -367,6 +494,21 @@ func (v *validator) validateRoutes() {
 
 func (v *validator) validateListeners() {
 	for _, item := range v.cfg.Listeners {
+		if item.ExpiresAt < 0 {
+			v.add("Listener", item.ID, "ExpiresAt", "must be greater than or equal to 0")
+		}
+		v.trafficReset("Listener", item.ID, item.TrafficReset)
+		switch item.ShareAddressStrategy {
+		case "", "listen":
+		case "custom":
+			if strings.TrimSpace(item.ShareAddress) == "" {
+				v.add("Listener", item.ID, "ShareAddress", "is required when ShareAddressStrategy is custom")
+			} else if strings.ContainsAny(item.ShareAddress, "/?#@\r\n\t ") {
+				v.add("Listener", item.ID, "ShareAddress", "must be a host or IP without scheme, path, or port")
+			}
+		default:
+			v.add("Listener", item.ID, "ShareAddressStrategy", "must be empty, listen, or custom")
+		}
 		v.transport("Listener", item.ID, item.Transport)
 		if item.Transport != model.TransportXray && item.BindPort == 0 {
 			v.add("Listener", item.ID, "BindPort", "is required for raw tcp/udp")
@@ -378,6 +520,7 @@ func (v *validator) validateListeners() {
 		v.rawUDP("Listener", item.ID, item.Transport, item.RawUDP)
 		v.rawTCP("Listener", item.ID, item.Transport, item.RawTCP)
 		v.bindingRefs("Listener", item.ID, item.Binding, item.Transport)
+		v.endpointClientPolicy("Listener", item.ID, item.Binding)
 	}
 }
 
@@ -399,19 +542,129 @@ func (v *validator) validateConnectors() {
 		v.rawUDP("Connector", item.ID, item.Transport, item.RawUDP)
 		v.rawTCP("Connector", item.ID, item.Transport, item.RawTCP)
 		v.bindingRefs("Connector", item.ID, item.Binding, item.Transport)
+		v.endpointClientPolicy("Connector", item.ID, item.Binding)
 	}
 }
 
 func (v *validator) validateClients() {
 	for _, item := range v.cfg.Clients {
+		const maxUserRateLimit = uint64(1_000_000_000_000_000)
+		if item.UploadRateLimit > maxUserRateLimit {
+			v.add("Client", item.ID, "UploadRateLimit", "must not exceed 1 Pbps")
+		}
+		if item.DownloadRateLimit > maxUserRateLimit {
+			v.add("Client", item.ID, "DownloadRateLimit", "must not exceed 1 Pbps")
+		}
+		v.trafficReset("Client", item.ID, item.TrafficReset)
 		if item.ListenerID != "" {
 			ref(v, "Client", item.ID, "ListenerID", item.ListenerID, v.listeners)
+		}
+		seenListeners := map[string]bool{}
+		for index, listenerID := range item.ListenerIDs {
+			listenerID = strings.TrimSpace(listenerID)
+			if listenerID == "" || seenListeners[listenerID] {
+				continue
+			}
+			seenListeners[listenerID] = true
+			ref(v, "Client", item.ID, fmt.Sprintf("ListenerIDs[%d]", index), listenerID, v.listeners)
+		}
+		seenDevices := map[string]bool{}
+		for index, deviceID := range item.AllowedDeviceIDs {
+			deviceID = strings.TrimSpace(deviceID)
+			if deviceID == "" || seenDevices[deviceID] {
+				continue
+			}
+			seenDevices[deviceID] = true
+			ref(v, "Client", item.ID, fmt.Sprintf("AllowedDeviceIDs[%d]", index), deviceID, v.devices)
 		}
 		v.clientCredential(item)
 		if item.AddressID != "" {
 			ref(v, "Client", item.ID, "AddressID", item.AddressID, v.addresses)
 		}
 		v.bindingRefs("Client", item.ID, item.Binding, "")
+		clientBinding := runtimeIndex(v.cfg).bindingBase(item.Binding)
+		if item.AddressID != "" && clientBinding.AddressID != "" && item.AddressID != clientBinding.AddressID {
+			v.add("Client", item.ID, "AddressID", "conflicts with client binding address limit")
+		}
+		if clientBinding.DeviceID != "" && !clientAllowsDevice(item, clientBinding.DeviceID) {
+			v.add("Client", item.ID, "Binding.DeviceID", "is outside AllowedDeviceIDs")
+		}
+	}
+}
+
+func (v *validator) endpointClientPolicy(object, id string, binding model.Binding) {
+	idx := runtimeIndex(v.cfg)
+	base := idx.bindingBase(binding)
+	if base.ClientID == "" {
+		return
+	}
+	client, ok := v.clients[base.ClientID]
+	if !ok {
+		return
+	}
+	clientBinding := idx.bindingBase(client.Binding)
+	clientAddressID := first(client.AddressID, clientBinding.AddressID)
+	v.noResolvedBindingConflict(object, id, "Binding.VKeyID", base.VKeyValue, clientBinding.VKeyValue)
+	v.noResolvedBindingConflict(object, id, "Binding.DeviceID", base.DeviceID, clientBinding.DeviceID)
+	v.noResolvedBindingConflict(object, id, "Binding.ConnectorID", base.ConnectorID, clientBinding.ConnectorID)
+	v.noResolvedBindingConflict(object, id, "Binding.AddressID", base.AddressID, clientAddressID)
+
+	resolvedDeviceID := first(base.DeviceID, clientBinding.DeviceID)
+	if resolvedDeviceID != "" && !clientAllowsDevice(client, resolvedDeviceID) {
+		v.add(object, id, "Binding.DeviceID", fmt.Sprintf("is not allowed by Client[%s].AllowedDeviceIDs", client.ID))
+	}
+	if object == "Listener" && !clientAllowsListener(client, id) {
+		v.add(object, id, "Binding.ClientID", fmt.Sprintf("Client[%s] is not assigned to this listener", client.ID))
+	}
+}
+
+func (v *validator) noResolvedBindingConflict(object, id, field, endpointValue, clientValue string) {
+	if endpointValue != "" && clientValue != "" && endpointValue != clientValue {
+		v.add(object, id, field, "conflicts with referenced client binding")
+	}
+}
+
+func clientAllowsDevice(client model.Client, deviceID string) bool {
+	hasRestriction := false
+	for _, allowed := range client.AllowedDeviceIDs {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		hasRestriction = true
+		if allowed == deviceID {
+			return true
+		}
+	}
+	return !hasRestriction
+}
+
+func clientAllowsListener(client model.Client, listenerID string) bool {
+	hasRestriction := false
+	if assigned := strings.TrimSpace(client.ListenerID); assigned != "" {
+		hasRestriction = true
+		if assigned == listenerID {
+			return true
+		}
+	}
+	for _, assigned := range client.ListenerIDs {
+		assigned = strings.TrimSpace(assigned)
+		if assigned == "" {
+			continue
+		}
+		hasRestriction = true
+		if assigned == listenerID {
+			return true
+		}
+	}
+	return !hasRestriction
+}
+
+func (v *validator) trafficReset(kind, id, value string) {
+	switch value {
+	case "", "never", "hourly", "daily", "weekly", "monthly":
+	default:
+		v.add(kind, id, "TrafficReset", "must be empty, never, hourly, daily, weekly, or monthly")
 	}
 }
 
@@ -419,11 +672,14 @@ func (v *validator) clientCredential(item model.Client) {
 	credentialType := strings.TrimSpace(item.CredentialType)
 	credentialValue := strings.TrimSpace(item.CredentialValue)
 	switch credentialType {
-	case "", "uuid", "password", "vkey":
+	case "", "uuid", "password", "vkey", "vless", "vmess", "trojan", "shadowsocks", "hysteria", "wireguard", "raw-tcp", "raw-udp":
 	default:
-		v.add("Client", item.ID, "CredentialType", "must be uuid, password, vkey, or empty")
+		v.add("Client", item.ID, "CredentialType", "unsupported credential protocol")
 	}
 	if credentialType == "" {
+		return
+	}
+	if (credentialType == "raw-tcp" || credentialType == "raw-udp") && credentialValue == "" {
 		return
 	}
 	if credentialValue == "" {
@@ -433,7 +689,7 @@ func (v *validator) clientCredential(item model.Client) {
 	if strings.ContainsAny(credentialValue, "\r\n\t ") {
 		v.add("Client", item.ID, "CredentialValue", "must not contain whitespace")
 	}
-	if credentialType == "uuid" && !looksLikeUUID(credentialValue) {
+	if (credentialType == "uuid" || credentialType == "vless" || credentialType == "vmess") && !looksLikeUUID(credentialValue) {
 		v.add("Client", item.ID, "CredentialValue", "must be a UUID for uuid credentials")
 	}
 }
@@ -712,6 +968,8 @@ func (v *validator) rawUDP(object, id string, transport model.Transport, setting
 	v.positive("RawUDP.KeepAliveSecond", object, id, settings.KeepAliveSecond)
 	v.positive("RawUDP.Workers", object, id, settings.Workers)
 	v.positive("RawUDP.QueueSize", object, id, settings.QueueSize)
+	v.positive("RawUDP.ConnectTimeout", object, id, settings.ConnectTimeout)
+	v.positive("RawUDP.IdleTimeout", object, id, settings.IdleTimeout)
 	v.rawDTLS(object, id, settings.DTLS)
 }
 
@@ -738,6 +996,8 @@ func (v *validator) rawTCP(object, id string, transport model.Transport, setting
 	v.positive("RawTCP.ConnectTimeout", object, id, settings.ConnectTimeout)
 	v.positive("RawTCP.ReconnectSecond", object, id, settings.ReconnectSecond)
 	v.positive("RawTCP.Workers", object, id, settings.Workers)
+	v.positive("RawTCP.QueueSize", object, id, settings.QueueSize)
+	v.positive("RawTCP.IdleTimeout", object, id, settings.IdleTimeout)
 	v.positive("RawTCP.ReadBuffer", object, id, settings.ReadBuffer)
 	v.positive("RawTCP.WriteBuffer", object, id, settings.WriteBuffer)
 	v.rawTLS(object, id, settings.TLS)

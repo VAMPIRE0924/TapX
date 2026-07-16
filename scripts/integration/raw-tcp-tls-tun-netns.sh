@@ -74,6 +74,18 @@ wait_for_link() {
   return 1
 }
 
+wait_for_ping() {
+  local ns="$1"
+  shift
+  for _ in $(seq 1 30); do
+    if ip netns exec "$ns" ping -c 1 -W 1 "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 show_interface_evidence() {
   local ns="$1"
   local name="$2"
@@ -102,7 +114,7 @@ mkdir -p "${BUILD_DIR}/tls"
 if [[ -z "${TAPX_CORE_BIN:-}" ]]; then
   need go
   echo "build tapx-core"
-  (cd "$ROOT" && GOTOOLCHAIN=local go build -o "$CORE_BIN" ./cmd/tapx-core)
+  (cd "$ROOT" && GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go build -o "$CORE_BIN" ./cmd/tapx-core)
 else
   if [[ ! -x "$CORE_BIN" ]]; then
     echo "TAPX_CORE_BIN is not executable: $CORE_BIN" >&2
@@ -121,7 +133,7 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500}
+    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500, "LinkAutoOptimize": true}
   ],
   "VKeys": [
     {"ID": "vk-a", "Enabled": true, "Value": "${VKEY}"}
@@ -157,7 +169,7 @@ JSON
 cat >"${BUILD_DIR}/tapx-b.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500}
+    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500, "LinkAutoOptimize": true}
   ],
   "VKeys": [
     {"ID": "vk-b", "Enabled": true, "Value": "${VKEY}"}
@@ -176,6 +188,7 @@ cat >"${BUILD_DIR}/tapx-b.json" <<JSON
         "LengthMode": "uint16",
         "NoDelay": true,
         "ConnectTimeout": 5,
+        "ReconnectSecond": 1,
         "KeepAliveSecond": 30,
         "TLS": {
           "Enabled": true,
@@ -202,6 +215,8 @@ ip -n "$NS_A" link set lo up
 ip -n "$NS_B" link set lo up
 ip -n "$NS_A" addr add 172.31.254.1/30 dev "$VETH_A"
 ip -n "$NS_B" addr add 172.31.254.2/30 dev "$VETH_B"
+ip -n "$NS_A" link set "$VETH_A" mtu 1280
+ip -n "$NS_B" link set "$VETH_B" mtu 1280
 ip -n "$NS_A" link set "$VETH_A" up
 ip -n "$NS_B" link set "$VETH_B" up
 
@@ -229,7 +244,24 @@ echo "verify underlay"
 ip netns exec "$NS_B" ping -c 1 -W 1 172.31.254.1 >/dev/null || fail_with_logs
 
 echo "verify raw TCP/TLS/TUN vKey tunnel"
-ip netns exec "$NS_A" ping -c 3 -W 1 10.92.0.2 >/dev/null || fail_with_logs
-ip netns exec "$NS_B" ping -c 3 -W 1 10.92.0.1 >/dev/null || fail_with_logs
+wait_for_ping "$NS_A" 10.92.0.2 || fail_with_logs
+wait_for_ping "$NS_B" 10.92.0.1 || fail_with_logs
+wait_for_ping "$NS_A" -M do -s 1400 10.92.0.2 || fail_with_logs
+wait_for_ping "$NS_B" -M do -s 1400 10.92.0.1 || fail_with_logs
+
+echo "verify TLS connector reconnect after listener restart"
+kill "$PID_A"
+wait "$PID_A" || true
+PID_A=""
+wait_for_link "$NS_A" "$TUN_A" && fail_with_logs
+: >"${BUILD_DIR}/tapx-a.log"
+ip netns exec "$NS_A" "$CORE_BIN" -config "${BUILD_DIR}/tapx-a.json" >"${BUILD_DIR}/tapx-a.log" 2>&1 &
+PID_A="$!"
+wait_for_log "${BUILD_DIR}/tapx-a.log" "runtime started" || fail_with_logs
+wait_for_link "$NS_A" "$TUN_A" || fail_with_logs
+ip -n "$NS_A" addr add 10.92.0.1/30 dev "$TUN_A"
+ip -n "$NS_A" link set "$TUN_A" up
+wait_for_ping "$NS_A" 10.92.0.2 || fail_with_logs
+wait_for_ping "$NS_B" 10.92.0.1 || fail_with_logs
 
 echo "raw TCP/TLS/TUN netns integration: ok"

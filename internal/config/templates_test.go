@@ -32,6 +32,9 @@ func TestBuildRawPairTemplateUDP(t *testing.T) {
 	if len(template.RuntimeA.UDPPipes) != 1 || len(template.RuntimeB.UDPPipes) != 1 {
 		t.Fatalf("runtime udp pipes = %d/%d, want one each", len(template.RuntimeA.UDPPipes), len(template.RuntimeB.UDPPipes))
 	}
+	if got := template.A.Devices[0].MTU; got != 1500 {
+		t.Fatalf("default device MTU = %d, want 1500", got)
+	}
 }
 
 func TestBuildRawPairTemplateTCP(t *testing.T) {

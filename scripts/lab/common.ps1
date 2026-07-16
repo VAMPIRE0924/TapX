@@ -19,7 +19,15 @@ function New-TapXLabContext {
         User = $User
         Binary = $binary
         RemoteDir = $RemoteDir
-        SshBase = @("-i", $key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new")
+        SshBase = @(
+            "-i", $key,
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            "-o", "ConnectionAttempts=2",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=3"
+        )
     }
 }
 
@@ -75,6 +83,27 @@ function Copy-TapXToRemote {
     }
 }
 
+function Get-TapXCompressedBinary {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $source = Get-Item -LiteralPath $Path
+    $archivePath = "$($source.FullName).gz"
+    if (Test-Path -LiteralPath $archivePath) {
+        $archive = Get-Item -LiteralPath $archivePath
+        if ($archive.Length -gt 0 -and $archive.LastWriteTimeUtc -ge $source.LastWriteTimeUtc) {
+            return $archive.FullName
+        }
+    }
+    $input = [IO.File]::OpenRead($source.FullName)
+    try {
+        $output = [IO.File]::Create($archivePath)
+        try {
+            $gzip = [IO.Compression.GZipStream]::new($output, [IO.Compression.CompressionLevel]::Optimal, $true)
+            try { $input.CopyTo($gzip, 1MB) } finally { $gzip.Dispose() }
+        } finally { $output.Dispose() }
+    } finally { $input.Dispose() }
+    return $archivePath
+}
+
 function Write-TapXTextFile {
     param([string]$Path, [string]$Content)
     [IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
@@ -93,11 +122,28 @@ mkdir -p '$($Context.RemoteDir)'
 chmod 700 '$($Context.RemoteDir)'
 command -v ip >/dev/null
 command -v ping >/dev/null
+command -v gzip >/dev/null
+command -v sha256sum >/dev/null
 [ -c /dev/net/tun ]
 $iperfCheck
 "@ | Out-Host
-    Copy-TapXToRemote $Context $HostName $Context.Binary "$($Context.RemoteDir)/tapx-core"
-    Invoke-TapXSSH $Context $HostName "chmod +x '$($Context.RemoteDir)/tapx-core'" | Out-Host
+
+    $localHash = (Get-FileHash -LiteralPath $Context.Binary -Algorithm SHA256).Hash.ToLowerInvariant()
+    $remoteHashOutput = Invoke-TapXSSH $Context $HostName "if [ -x '$($Context.RemoteDir)/tapx-core' ]; then sha256sum '$($Context.RemoteDir)/tapx-core' | cut -d ' ' -f 1; fi"
+    $remoteHash = ([string]::Join("", @($remoteHashOutput))).Trim().ToLowerInvariant()
+    if ($remoteHash -eq $localHash) {
+        Write-Host "reuse matching tapx-core on $HostName ($localHash)"
+        return
+    }
+
+    $archive = Get-TapXCompressedBinary $Context.Binary
+    Copy-TapXToRemote $Context $HostName $archive "$($Context.RemoteDir)/tapx-core.gz"
+    Invoke-TapXRemoteScript $Context $HostName @"
+set -euo pipefail
+gzip -dc '$($Context.RemoteDir)/tapx-core.gz' >'$($Context.RemoteDir)/tapx-core'
+chmod +x '$($Context.RemoteDir)/tapx-core'
+rm -f '$($Context.RemoteDir)/tapx-core.gz'
+"@ | Out-Host
 }
 
 function Start-TapXRemoteRuntime {
@@ -112,7 +158,7 @@ function Start-TapXRemoteRuntime {
 set -euo pipefail
 cd '$($Context.RemoteDir)'
 rm -f '$LogName' '$PidName'
-nohup ./tapx-core -config '$ConfigName' >'$LogName' 2>&1 &
+nohup ./tapx-core -config '$ConfigName' -debug-counters >'$LogName' 2>&1 &
 echo `$! >'$PidName'
 for i in `$(seq 1 120); do
   if grep -q 'runtime started' '$LogName'; then
@@ -169,7 +215,7 @@ function New-TapXUdpConfig {
     return @"
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "tapxudp0", "MTU": 1400, "IPv4CIDR": "$LocalIP/30"}
+    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "tapxudp0", "MTU": 1500, "LinkAutoOptimize": true, "IPv4CIDR": "$LocalIP/30"}
   ],
   "Routes": [
     {"ID": "route-a", "Enabled": true, "DeviceID": "tun-a"}
@@ -198,7 +244,7 @@ function New-TapXTapUdpConfig {
     return @"
 {
   "Devices": [
-    {"ID": "tap-a", "Enabled": true, "Type": "tap", "IfName": "tapxtap0", "MTU": 1400, "IPv4CIDR": "$LocalIP/30"}
+    {"ID": "tap-a", "Enabled": true, "Type": "tap", "IfName": "tapxtap0", "MTU": 1500, "LinkAutoOptimize": true, "IPv4CIDR": "$LocalIP/30"}
   ],
   "Routes": [
     {"ID": "route-a", "Enabled": true, "DeviceID": "tap-a"}
@@ -223,7 +269,7 @@ function New-TapXTcpListenerConfig {
     return @"
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "tapxtcp0", "MTU": 1400, "IPv4CIDR": "10.78.0.1/30"}
+    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "tapxtcp0", "MTU": 1500, "LinkAutoOptimize": true, "IPv4CIDR": "10.78.0.1/30"}
   ],
   "Routes": [
     {"ID": "route-a", "Enabled": true, "DeviceID": "tun-a"}
@@ -251,7 +297,7 @@ function New-TapXTcpConnectorConfig {
     return @"
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "tapxtcp0", "MTU": 1400, "IPv4CIDR": "10.78.0.2/30"}
+    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "tapxtcp0", "MTU": 1500, "LinkAutoOptimize": true, "IPv4CIDR": "10.78.0.2/30"}
   ],
   "Routes": [
     {"ID": "route-a", "Enabled": true, "DeviceID": "tun-a"}

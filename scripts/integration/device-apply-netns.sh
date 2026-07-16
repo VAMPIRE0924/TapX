@@ -61,7 +61,7 @@ cleanup
 rm -f "${BUILD_DIR}/tapx-apply.log" "${BUILD_DIR}/tapx-apply.json"
 
 echo "build tapx-core"
-(cd "$ROOT" && GOTOOLCHAIN=local go build -o "$CORE_BIN" ./cmd/tapx-core)
+(cd "$ROOT" && GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go build -o "$CORE_BIN" ./cmd/tapx-core)
 
 cat >"${BUILD_DIR}/tapx-apply.json" <<JSON
 {

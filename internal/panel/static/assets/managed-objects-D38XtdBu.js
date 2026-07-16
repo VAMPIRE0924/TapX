@@ -1,0 +1,1 @@
+var e=`tapx:link-address-limit`,t=`tapx:user-address-limit`;function n(e){return e===`tapx:link-address-limit`||e===`链路绑定创建的源地址限制`}function r(e){return e===`tapx:user-address-limit`||e===`用户限制创建的源地址限制`}export{t as i,r as n,e as r,n as t};

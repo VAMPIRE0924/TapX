@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	qrcode "github.com/skip2/go-qrcode"
-
 	"tapx/internal/config"
 	"tapx/internal/model"
 )
@@ -21,7 +19,7 @@ type ClientShare struct {
 	ClientID string         `json:"clientId"`
 	Type     string         `json:"type"`
 	Link     string         `json:"link"`
-	QRPNG    string         `json:"qrPng"`
+	Links    []string       `json:"links,omitempty"`
 	Payload  SharePayload   `json:"payload"`
 	Warnings []string       `json:"warnings,omitempty"`
 	Objects  ShareObjectIDs `json:"objects"`
@@ -53,13 +51,18 @@ type SharePayload struct {
 }
 
 type ShareClient struct {
-	ID              string `json:"id"`
-	Name            string `json:"name,omitempty"`
-	Email           string `json:"email,omitempty"`
-	CredentialType  string `json:"credentialType,omitempty"`
-	CredentialValue string `json:"credentialValue,omitempty"`
-	ExpiresAt       int64  `json:"expiresAt,omitempty"`
-	TrafficCap      uint64 `json:"trafficCap,omitempty"`
+	ID                string `json:"id"`
+	Name              string `json:"name,omitempty"`
+	Email             string `json:"email,omitempty"`
+	CredentialType    string `json:"credentialType,omitempty"`
+	CredentialValue   string `json:"credentialValue,omitempty"`
+	UUID              string `json:"uuid,omitempty"`
+	Password          string `json:"password,omitempty"`
+	Auth              string `json:"auth,omitempty"`
+	ExpiresAt         int64  `json:"expiresAt,omitempty"`
+	TrafficCap        uint64 `json:"trafficCap,omitempty"`
+	UploadRateLimit   uint64 `json:"uploadRateLimit,omitempty"`
+	DownloadRateLimit uint64 `json:"downloadRateLimit,omitempty"`
 }
 
 type ShareListener struct {
@@ -96,21 +99,23 @@ func BuildClientShare(cfg config.RuntimeConfig, clientID string) (ClientShare, e
 	if !ok {
 		return ClientShare{}, ErrNotFound
 	}
-	if err := config.ValidateForSave(cfg); err != nil {
-		return ClientShare{}, err
-	}
 
 	resolved, objects, warnings := index.resolveClient(client)
 	payload := SharePayload{
 		Version: 1,
 		Client: ShareClient{
-			ID:              client.ID,
-			Name:            client.Name,
-			Email:           client.Email,
-			CredentialType:  client.CredentialType,
-			CredentialValue: client.CredentialValue,
-			ExpiresAt:       client.ExpiresAt,
-			TrafficCap:      client.TrafficCap,
+			ID:                client.ID,
+			Name:              client.Name,
+			Email:             client.Email,
+			CredentialType:    client.CredentialType,
+			CredentialValue:   client.CredentialValue,
+			UUID:              client.UUID,
+			Password:          client.Password,
+			Auth:              client.Auth,
+			ExpiresAt:         client.ExpiresAt,
+			TrafficCap:        client.TrafficCap,
+			UploadRateLimit:   client.UploadRateLimit,
+			DownloadRateLimit: client.DownloadRateLimit,
 		},
 		ResolvedRoute: resolved,
 	}
@@ -168,24 +173,63 @@ func BuildClientShare(cfg config.RuntimeConfig, clientID string) (ClientShare, e
 		}
 	}
 
-	link, shareType, linkWarnings, err := buildShareLink(payload)
+	links, shareType, linkWarnings, err := index.buildClientLinks(client, payload, objects)
 	if err != nil {
 		return ClientShare{}, err
 	}
 	warnings = append(warnings, linkWarnings...)
-	qr, err := qrDataURL(link)
-	if err != nil {
-		return ClientShare{}, err
-	}
 	return ClientShare{
 		ClientID: client.ID,
 		Type:     shareType,
-		Link:     link,
-		QRPNG:    qr,
+		Link:     links[0],
+		Links:    links,
 		Payload:  payload,
 		Warnings: warnings,
 		Objects:  objects,
 	}, nil
+}
+
+func (idx shareIndex) buildClientLinks(client model.Client, base SharePayload, objects ShareObjectIDs) ([]string, string, []string, error) {
+	listenerIDs := uniqueStrings(append([]string{client.ListenerID}, append(client.ListenerIDs, objects.ListenerID)...))
+	if len(listenerIDs) == 0 {
+		link, shareType, warnings, err := buildShareLink(base)
+		return []string{link}, shareType, warnings, err
+	}
+
+	links := make([]string, 0, len(listenerIDs))
+	warnings := []string{}
+	shareType := "tapx"
+	for _, listenerID := range listenerIDs {
+		listener, ok := idx.listeners[listenerID]
+		if !ok {
+			warnings = append(warnings, "listener "+listenerID+" was not found")
+			continue
+		}
+		payload := base
+		payload.Transport = listener.Transport
+		payload.Listener = shareListener(listener)
+		payload.RawUDP = &listener.RawUDP
+		payload.RawTCP = &listener.RawTCP
+		payload.XrayProfile = nil
+		if listener.XrayProfileID != "" {
+			if profile, found := idx.xray[listener.XrayProfileID]; found {
+				payload.XrayProfile = &profile
+			}
+		}
+		link, currentType, currentWarnings, err := buildShareLink(payload)
+		if err != nil {
+			return nil, "", warnings, fmt.Errorf("listener %s: %w", listenerID, err)
+		}
+		if len(links) == 0 {
+			shareType = currentType
+		}
+		links = append(links, link)
+		warnings = append(warnings, currentWarnings...)
+	}
+	if len(links) == 0 {
+		return nil, "", warnings, fmt.Errorf("client has no available listener")
+	}
+	return uniqueStrings(links), shareType, warnings, nil
 }
 
 type shareIndex struct {
@@ -247,12 +291,14 @@ func (idx shareIndex) resolveClient(client model.Client) (config.RuntimeBinding,
 		VKeyID:     client.Binding.VKeyID,
 	}
 	resolved := config.RuntimeBinding{
-		VKeyValue:   idx.vkeyValue(client.Binding.VKeyID),
-		ClientID:    client.ID,
-		RouteID:     client.Binding.RouteID,
-		DeviceID:    client.Binding.DeviceID,
-		ConnectorID: client.Binding.ConnectorID,
-		AddressID:   firstNonEmpty(client.AddressID, client.Binding.AddressID),
+		VKeyValue:         idx.vkeyValue(client.Binding.VKeyID),
+		ClientID:          client.ID,
+		RouteID:           client.Binding.RouteID,
+		DeviceID:          client.Binding.DeviceID,
+		ConnectorID:       client.Binding.ConnectorID,
+		AddressID:         firstNonEmpty(client.AddressID, client.Binding.AddressID),
+		UploadRateLimit:   client.UploadRateLimit,
+		DownloadRateLimit: client.DownloadRateLimit,
 	}
 	if client.Binding.ConnectorID != "" {
 		objects.ConnectorID = client.Binding.ConnectorID
@@ -293,10 +339,14 @@ func (idx shareIndex) vkeyValue(id string) string {
 }
 
 func shareListener(listener model.Listener) *ShareListener {
+	shareHost := listener.BindHost
+	if listener.ShareAddressStrategy == "custom" && strings.TrimSpace(listener.ShareAddress) != "" {
+		shareHost = listener.ShareAddress
+	}
 	return &ShareListener{
 		ID:            listener.ID,
 		Name:          listener.Name,
-		BindHost:      listener.BindHost,
+		BindHost:      shareHost,
 		BindPort:      listener.BindPort,
 		Transport:     listener.Transport,
 		XrayProfileID: listener.XrayProfileID,
@@ -319,10 +369,26 @@ func shareConnector(connector model.Connector) *ShareConnector {
 }
 
 func buildShareLink(payload SharePayload) (string, string, []string, error) {
+	if payload.Transport == model.TransportTCP || payload.Transport == model.TransportUDP {
+		link, warnings, err := buildRawShareLink(payload)
+		return link, "tapx", warnings, err
+	}
 	if payload.Transport == model.TransportXray && payload.XrayProfile != nil {
-		if strings.EqualFold(payload.XrayProfile.InboundProtocol, "vless") {
-			link, warnings, err := buildVLESSShareLink(payload)
+		switch strings.ToLower(payload.XrayProfile.InboundProtocol) {
+		case "vless", "trojan":
+			link, warnings, err := buildURLXrayShareLink(payload)
 			return link, "xray", warnings, err
+		case "vmess":
+			link, warnings, err := buildVMessShareLink(payload)
+			return link, "xray", warnings, err
+		case "shadowsocks":
+			link, warnings, err := buildShadowsocksShareLink(payload)
+			return link, "xray", warnings, err
+		case "hysteria", "hysteria2":
+			link, warnings, err := buildHysteriaShareLink(payload)
+			return link, "xray", warnings, err
+		case "wireguard":
+			return "", "", nil, fmt.Errorf("WireGuard peers are configured in the Xray profile, not TapX user credentials")
 		}
 	}
 	raw, err := json.Marshal(payload)
@@ -341,31 +407,212 @@ func buildShareLink(payload SharePayload) (string, string, []string, error) {
 	return link, shareType, nil, nil
 }
 
-func buildVLESSShareLink(payload SharePayload) (string, []string, error) {
+func buildURLXrayShareLink(payload SharePayload) (string, []string, error) {
 	if payload.Listener == nil {
 		return "", nil, fmt.Errorf("xray share requires a listener")
 	}
-	if strings.TrimSpace(payload.Client.CredentialValue) == "" {
-		return "", nil, fmt.Errorf("xray share requires Client.CredentialValue")
+	protocol := strings.ToLower(payload.XrayProfile.InboundProtocol)
+	credential := clientCredential(payload.Client, protocol)
+	if credential == "" {
+		return "", nil, fmt.Errorf("%s share requires a client credential", protocol)
 	}
-	host := normalizeShareHost(payload.Listener.BindHost)
-	warnings := []string{}
-	if host == "" {
-		host = "server.example"
-		warnings = append(warnings, "listener bind host is wildcard; replace server.example in the share link")
+	host, warnings := shareHost(payload.Listener)
+	values := xrayLinkValues(*payload.XrayProfile)
+	if flow := inboundClientField(payload.XrayProfile, credential, "flow"); flow != "" {
+		values.Set("flow", flow)
 	}
-	values := url.Values{}
-	values.Set("type", firstNonEmpty(payload.XrayProfile.Network, "tcp"))
-	values.Set("security", firstNonEmpty(payload.XrayProfile.Security, "none"))
 	name := firstNonEmpty(payload.Client.Name, payload.Client.Email, payload.Client.ID)
 	u := url.URL{
-		Scheme:   "vless",
-		User:     url.User(payload.Client.CredentialValue),
+		Scheme:   protocol,
+		User:     url.User(credential),
 		Host:     net.JoinHostPort(host, strconv.Itoa(int(payload.Listener.BindPort))),
 		RawQuery: values.Encode(),
 		Fragment: name,
 	}
 	return u.String(), warnings, nil
+}
+
+func buildRawShareLink(payload SharePayload) (string, []string, error) {
+	if payload.Listener == nil {
+		return "", nil, fmt.Errorf("raw share requires a listener")
+	}
+	host, warnings := shareHost(payload.Listener)
+	values := url.Values{}
+	network := "udp"
+	security := "none"
+	if payload.Transport == model.TransportTCP {
+		network = "tcp"
+		if payload.RawTCP != nil && payload.RawTCP.TLS.Enabled {
+			security = "tls"
+			values.Set("sni", payload.RawTCP.TLS.ServerName)
+		}
+	} else if payload.RawUDP != nil && payload.RawUDP.DTLS.Enabled {
+		security = "dtls"
+		values.Set("sni", payload.RawUDP.DTLS.ServerName)
+	}
+	values.Set("network", network)
+	values.Set("security", security)
+	vkey := ""
+	if payload.VKey != nil {
+		vkey = payload.VKey.Value
+	}
+	if vkey == "" && strings.EqualFold(payload.Client.CredentialType, "vkey") {
+		vkey = payload.Client.CredentialValue
+	}
+	if vkey != "" {
+		values.Set("vkey", vkey)
+	}
+	u := url.URL{Scheme: "raw", Host: net.JoinHostPort(host, strconv.Itoa(int(payload.Listener.BindPort))), RawQuery: values.Encode(), Fragment: shareName(payload.Client)}
+	return u.String(), warnings, nil
+}
+
+func buildVMessShareLink(payload SharePayload) (string, []string, error) {
+	host, warnings := shareHost(payload.Listener)
+	credential := clientCredential(payload.Client, "vmess")
+	if credential == "" {
+		return "", nil, fmt.Errorf("vmess share requires a client UUID")
+	}
+	values := xrayLinkValues(*payload.XrayProfile)
+	item := map[string]string{
+		"v": "2", "ps": shareName(payload.Client), "add": host,
+		"port": strconv.Itoa(int(payload.Listener.BindPort)), "id": credential,
+		"aid": "0", "scy": firstNonEmpty(inboundClientField(payload.XrayProfile, credential, "security"), "auto"),
+		"net": values.Get("type"), "tls": values.Get("security"),
+		"sni": values.Get("sni"), "host": values.Get("host"), "path": values.Get("path"),
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		return "", nil, err
+	}
+	return "vmess://" + base64.RawStdEncoding.EncodeToString(raw), warnings, nil
+}
+
+func buildShadowsocksShareLink(payload SharePayload) (string, []string, error) {
+	host, warnings := shareHost(payload.Listener)
+	password := clientCredential(payload.Client, "shadowsocks")
+	if password == "" {
+		return "", nil, fmt.Errorf("shadowsocks share requires a password")
+	}
+	settings := decodeJSONObject(payload.XrayProfile.InboundSettingsJSON)
+	method := firstNonEmpty(stringMapValue(settings, "method"), "aes-256-gcm")
+	credentials := base64.RawURLEncoding.EncodeToString([]byte(method + ":" + password))
+	return fmt.Sprintf("ss://%s@%s#%s", credentials, net.JoinHostPort(host, strconv.Itoa(int(payload.Listener.BindPort))), url.PathEscape(shareName(payload.Client))), warnings, nil
+}
+
+func buildHysteriaShareLink(payload SharePayload) (string, []string, error) {
+	host, warnings := shareHost(payload.Listener)
+	auth := clientCredential(payload.Client, "hysteria")
+	if auth == "" {
+		return "", nil, fmt.Errorf("hysteria share requires auth")
+	}
+	values := xrayLinkValues(*payload.XrayProfile)
+	u := url.URL{Scheme: "hysteria2", User: url.User(auth), Host: net.JoinHostPort(host, strconv.Itoa(int(payload.Listener.BindPort))), Fragment: shareName(payload.Client)}
+	if values.Get("sni") != "" {
+		u.RawQuery = url.Values{"sni": []string{values.Get("sni")}}.Encode()
+	}
+	return u.String(), warnings, nil
+}
+
+func inboundClientField(profile *model.XrayProfile, credential, field string) string {
+	if profile == nil || credential == "" {
+		return ""
+	}
+	settings := decodeJSONObject(profile.InboundSettingsJSON)
+	clients, _ := settings["clients"].([]any)
+	for _, value := range clients {
+		client, _ := value.(map[string]any)
+		if stringMapValue(client, "id") == credential {
+			return stringMapValue(client, field)
+		}
+	}
+	return ""
+}
+
+func xrayLinkValues(profile model.XrayProfile) url.Values {
+	stream := decodeJSONObject(profile.StreamSettingsJSON)
+	values := url.Values{}
+	network := firstNonEmpty(profile.Network, stringMapValue(stream, "network"), "tcp")
+	security := firstNonEmpty(profile.Security, stringMapValue(stream, "security"), "none")
+	values.Set("type", network)
+	values.Set("security", security)
+	transport := objectMapValue(stream, network+"Settings")
+	values.Set("host", stringMapValue(transport, "host"))
+	values.Set("path", stringMapValue(transport, "path"))
+	if network == "grpc" {
+		values.Set("serviceName", stringMapValue(transport, "serviceName"))
+	}
+	securitySettings := objectMapValue(stream, security+"Settings")
+	values.Set("sni", firstNonEmpty(stringMapValue(securitySettings, "serverName"), stringMapValue(securitySettings, "dest")))
+	values.Set("fp", stringMapValue(securitySettings, "fingerprint"))
+	values.Set("pbk", stringMapValue(securitySettings, "publicKey"))
+	values.Set("sid", stringMapValue(securitySettings, "shortId"))
+	for key := range values {
+		if values.Get(key) == "" {
+			values.Del(key)
+		}
+	}
+	return values
+}
+
+func shareHost(listener *ShareListener) (string, []string) {
+	if listener == nil {
+		return "", nil
+	}
+	host := normalizeShareHost(listener.BindHost)
+	if host != "" {
+		return host, nil
+	}
+	return "server.example", []string{"listener bind host is wildcard; replace server.example in the share link"}
+}
+
+func shareName(client ShareClient) string {
+	return firstNonEmpty(client.Name, client.Email, client.ID)
+}
+
+func clientCredential(client ShareClient, protocol string) string {
+	switch protocol {
+	case "vless", "vmess":
+		return firstNonEmpty(client.UUID, client.CredentialValue)
+	case "trojan", "shadowsocks":
+		return firstNonEmpty(client.Password, client.CredentialValue)
+	case "hysteria", "hysteria2":
+		return firstNonEmpty(client.Auth, client.Password, client.CredentialValue)
+	default:
+		return client.CredentialValue
+	}
+}
+
+func decodeJSONObject(value string) map[string]any {
+	out := map[string]any{}
+	_ = json.Unmarshal([]byte(value), &out)
+	return out
+}
+
+func objectMapValue(value map[string]any, key string) map[string]any {
+	item, _ := value[key].(map[string]any)
+	return item
+}
+
+func stringMapValue(value map[string]any, key string) string {
+	item, _ := value[key].(string)
+	return item
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func normalizeShareHost(host string) string {
@@ -375,14 +622,6 @@ func normalizeShareHost(host string) string {
 		return ""
 	}
 	return strings.Trim(host, "[]")
-}
-
-func qrDataURL(link string) (string, error) {
-	png, err := qrcode.Encode(link, qrcode.Low, 256)
-	if err != nil {
-		return "", err
-	}
-	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
 }
 
 func gzipPayload(raw []byte) ([]byte, error) {

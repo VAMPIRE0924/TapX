@@ -1,0 +1,52 @@
+.integration-data-table {
+  width: 100%;
+  margin: 5px 0;
+  border-collapse: collapse;
+}
+
+.integration-data-table td {
+  padding: 4px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.integration-data-table td:first-child {
+  width: 130px;
+  font-family: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.integration-data-table tr:nth-child(odd) {
+  background: var(--ant-color-fill-tertiary);
+}
+
+.integration-divider {
+  margin: 14px 0;
+}
+
+.integration-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.integration-server-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.integration-server-option > span:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.integration-server-option .ant-tag {
+  flex: none;
+  margin-inline-end: 0;
+}

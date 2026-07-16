@@ -113,7 +113,7 @@ rm -f "${BUILD_DIR}/tapx-a.log" "${BUILD_DIR}/tapx-b.log" "${BUILD_DIR}/tapx-a.j
 echo "build tapx-core"
 if [[ ! -x "$CORE_BIN" ]]; then
   CORE_BIN="$LOCAL_CORE_BIN"
-  (cd "$ROOT" && GOTOOLCHAIN=local go build -o "$CORE_BIN" ./cmd/tapx-core)
+  (cd "$ROOT" && GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go build -o "$CORE_BIN" ./cmd/tapx-core)
 fi
 
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON

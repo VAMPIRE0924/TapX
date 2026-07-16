@@ -1,0 +1,1 @@
+function e(e){let t=e.indexOf(`#`);return t>=0?e.slice(t):``}export{e as t};

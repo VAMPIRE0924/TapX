@@ -15,6 +15,7 @@ type ClientTrafficReset struct {
 	ResetAt         int64         `json:"resetAt"`
 	TrafficRXOffset uint64        `json:"trafficRxOffset"`
 	TrafficTXOffset uint64        `json:"trafficTxOffset"`
+	Generation      uint64        `json:"generation"`
 	Counters        StatsCounters `json:"counters"`
 }
 
@@ -64,6 +65,7 @@ func resetClientTraffic(ctx context.Context, store *Store, state RuntimeState, i
 		ResetAt:         now.Unix(),
 		TrafficRXOffset: raw.RXBytes,
 		TrafficTXOffset: raw.TXBytes,
+		Generation:      state.Generation,
 		Counters:        raw,
 	}
 	found := false
@@ -74,6 +76,7 @@ func resetClientTraffic(ctx context.Context, store *Store, state RuntimeState, i
 		cfg.Clients[i].TrafficResetAt = reset.ResetAt
 		cfg.Clients[i].TrafficRXOffset = reset.TrafficRXOffset
 		cfg.Clients[i].TrafficTXOffset = reset.TrafficTXOffset
+		cfg.Clients[i].TrafficResetGeneration = reset.Generation
 		found = true
 		break
 	}

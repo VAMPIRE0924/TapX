@@ -81,6 +81,38 @@ static void make_tap_ipv4_frame(unsigned char frame[34],
     make_ipv4_packet(frame + 14, s0, s1, s2, s3, d0, d1, d2, d3);
 }
 
+static void make_tap_vlan_ipv4_frame(unsigned char frame[38],
+                                     const unsigned char dst[6], const unsigned char src[6],
+                                     unsigned char source_third_octet) {
+    memcpy(frame, dst, 6);
+    memcpy(frame + 6, src, 6);
+    frame[12] = 0x81;
+    frame[13] = 0x00;
+    frame[14] = 0x00;
+    frame[15] = 0x64;
+    frame[16] = 0x08;
+    frame[17] = 0x00;
+    make_ipv4_packet(frame + 18, 10, 0, source_third_octet, 2, 10, 0, 0, 3);
+}
+
+static void make_tap_pppoe_ipv4_frame(unsigned char frame[42],
+                                      const unsigned char dst[6], const unsigned char src[6],
+                                      unsigned char source_third_octet) {
+    memcpy(frame, dst, 6);
+    memcpy(frame + 6, src, 6);
+    frame[12] = 0x88;
+    frame[13] = 0x64;
+    frame[14] = 0x11;
+    frame[15] = 0x00;
+    frame[16] = 0x00;
+    frame[17] = 0x01;
+    frame[18] = 0x00;
+    frame[19] = 0x16;
+    frame[20] = 0x00;
+    frame[21] = 0x21;
+    make_ipv4_packet(frame + 22, 10, 0, source_third_octet, 2, 10, 0, 0, 3);
+}
+
 static void make_tap_arp_frame(unsigned char frame[42],
                                const unsigned char dst[6], const unsigned char src[6],
                                const unsigned char sha[6], unsigned char spa0, unsigned char spa1,
@@ -567,6 +599,18 @@ static int test_udp_pipe_tun_ipv4_guard(void) {
         goto out;
     }
 
+    const unsigned char v6_src[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2};
+    const unsigned char v6_dst[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3};
+    unsigned char ipv6_packet[40];
+    make_ipv6_packet(ipv6_packet, v6_src, v6_dst, 59);
+    if (write(tun_pair[1], ipv6_packet, sizeof(ipv6_packet)) != (ssize_t)sizeof(ipv6_packet)) {
+        perror("write unlisted IPv6 family");
+        goto out;
+    }
+    if (expect_no_data(peer_fd, "unlisted IPv6 family should not reach udp peer")) {
+        goto out;
+    }
+
     make_ipv4_packet(packet, 10, 0, 0, 2, 10, 0, 1, 3);
     if (write(tun_pair[1], packet, sizeof(packet)) != (ssize_t)sizeof(packet)) {
         perror("write allowed tun packet");
@@ -606,8 +650,67 @@ static int test_udp_pipe_tun_ipv4_guard(void) {
         goto out;
     }
     worker = NULL;
-    if (expect(counters.drops_guard == 2 && counters.tx_packets == 1 && counters.rx_packets == 1,
+    if (expect(counters.drops_guard == 3 && counters.tx_packets == 1 && counters.rx_packets == 1,
                "udp guard counters")) {
+        goto out;
+    }
+
+    tapx_fastpath_counters_reset(&counters);
+    config.address_guard_remote = 1;
+    start_rc = tapx_udp_pipe_start(&config, &worker);
+    if (expect(start_rc == 0 && worker != NULL, "udp remote guard worker start")) {
+        goto out;
+    }
+
+    make_ipv4_packet(packet, 10, 0, 0, 2, 10, 0, 1, 3);
+    if (write(tun_pair[1], packet, sizeof(packet)) != (ssize_t)sizeof(packet)) {
+        perror("write remote disallowed destination");
+        goto out;
+    }
+    if (expect_no_data(peer_fd, "remote guard disallowed IPv4 destination should not reach peer")) {
+        goto out;
+    }
+
+    make_ipv4_packet(packet, 10, 0, 1, 2, 10, 0, 0, 3);
+    if (write(tun_pair[1], packet, sizeof(packet)) != (ssize_t)sizeof(packet)) {
+        perror("write remote allowed destination");
+        goto out;
+    }
+    n = recv(peer_fd, rx, sizeof(rx), 0);
+    if (expect(n == (ssize_t)sizeof(packet), "remote guard allowed IPv4 destination reaches peer")) {
+        goto out;
+    }
+
+    make_ipv4_packet(packet, 10, 0, 1, 3, 10, 0, 0, 2);
+    sent = sendto(peer_fd, packet, sizeof(packet), 0,
+                  (struct sockaddr *)&udp_addr, udp_len);
+    if (sent != (ssize_t)sizeof(packet)) {
+        perror("send remote disallowed source");
+        goto out;
+    }
+    if (expect_no_data(tun_pair[1], "remote guard disallowed IPv4 source should not reach tun")) {
+        goto out;
+    }
+
+    make_ipv4_packet(packet, 10, 0, 0, 3, 10, 0, 1, 2);
+    sent = sendto(peer_fd, packet, sizeof(packet), 0,
+                  (struct sockaddr *)&udp_addr, udp_len);
+    if (sent != (ssize_t)sizeof(packet)) {
+        perror("send remote allowed source");
+        goto out;
+    }
+    n = read(tun_pair[1], rx, sizeof(rx));
+    if (expect(n == (ssize_t)sizeof(packet), "remote guard allowed IPv4 source reaches tun")) {
+        goto out;
+    }
+
+    if (expect(tapx_worker_stop(worker) == 0, "udp remote guard worker stop")) {
+        worker = NULL;
+        goto out;
+    }
+    worker = NULL;
+    if (expect(counters.drops_guard == 2 && counters.tx_packets == 1 && counters.rx_packets == 1,
+               "udp remote guard counters")) {
         goto out;
     }
     rc = 0;
@@ -717,6 +820,16 @@ static int test_udp_pipe_tun_ipv6_guard(void) {
         goto out;
     }
 
+    unsigned char ipv4_packet[20];
+    make_ipv4_packet(ipv4_packet, 10, 0, 0, 2, 10, 0, 0, 3);
+    if (write(tun_pair[1], ipv4_packet, sizeof(ipv4_packet)) != (ssize_t)sizeof(ipv4_packet)) {
+        perror("write unlisted IPv4 family");
+        goto out;
+    }
+    if (expect_no_data(peer_fd, "unlisted IPv4 family should not reach udp peer")) {
+        goto out;
+    }
+
     make_ipv6_packet(packet, allowed_src, bad_dst, 59);
     if (write(tun_pair[1], packet, sizeof(packet)) != (ssize_t)sizeof(packet)) {
         perror("write allowed v6 src");
@@ -754,7 +867,7 @@ static int test_udp_pipe_tun_ipv6_guard(void) {
         goto out;
     }
     worker = NULL;
-    if (expect(counters.drops_guard == 2 && counters.tx_packets == 1 && counters.rx_packets == 1,
+    if (expect(counters.drops_guard == 3 && counters.tx_packets == 1 && counters.rx_packets == 1,
                "udp IPv6 guard counters")) {
         goto out;
     }
@@ -861,7 +974,7 @@ static int test_udp_pipe_tap_mac_arp_guard(void) {
         goto out;
     }
 
-    unsigned char frame[42];
+    unsigned char frame[64];
     make_tap_ipv4_frame(frame, peer_mac, other_mac, 10, 0, 0, 2, 10, 0, 0, 3);
     if (write(tap_pair[1], frame, 34) != 34) {
         perror("write bad src mac");
@@ -888,6 +1001,44 @@ static int test_udp_pipe_tap_mac_arp_guard(void) {
     unsigned char rx[64];
     ssize_t n = recv(peer_fd, rx, sizeof(rx), 0);
     if (expect(n == 34, "allowed TAP frame reaches udp peer")) {
+        goto out;
+    }
+
+    make_tap_vlan_ipv4_frame(frame, peer_mac, allowed_mac_bytes, 0);
+    if (write(tap_pair[1], frame, 38) != 38) {
+        perror("write allowed VLAN frame");
+        goto out;
+    }
+    n = recv(peer_fd, rx, sizeof(rx), 0);
+    if (expect(n == 38, "allowed VLAN frame reaches udp peer")) {
+        goto out;
+    }
+
+    make_tap_vlan_ipv4_frame(frame, peer_mac, allowed_mac_bytes, 1);
+    if (write(tap_pair[1], frame, 38) != 38) {
+        perror("write disallowed VLAN frame");
+        goto out;
+    }
+    if (expect_no_data(peer_fd, "VLAN IPv4 source should not bypass guard")) {
+        goto out;
+    }
+
+    make_tap_pppoe_ipv4_frame(frame, peer_mac, allowed_mac_bytes, 0);
+    if (write(tap_pair[1], frame, 42) != 42) {
+        perror("write allowed PPPoE frame");
+        goto out;
+    }
+    n = recv(peer_fd, rx, sizeof(rx), 0);
+    if (expect(n == 42, "allowed PPPoE frame reaches udp peer")) {
+        goto out;
+    }
+
+    make_tap_pppoe_ipv4_frame(frame, peer_mac, allowed_mac_bytes, 1);
+    if (write(tap_pair[1], frame, 42) != 42) {
+        perror("write disallowed PPPoE frame");
+        goto out;
+    }
+    if (expect_no_data(peer_fd, "PPPoE IPv4 source should not bypass guard")) {
         goto out;
     }
 
@@ -929,7 +1080,7 @@ static int test_udp_pipe_tap_mac_arp_guard(void) {
         goto out;
     }
     worker = NULL;
-    if (expect(counters.drops_guard == 4 && counters.tx_packets == 1 && counters.rx_packets == 1,
+    if (expect(counters.drops_guard == 6 && counters.tx_packets == 3 && counters.rx_packets == 1,
                "tap guard counters")) {
         goto out;
     }

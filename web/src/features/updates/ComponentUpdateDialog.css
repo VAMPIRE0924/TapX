@@ -1,0 +1,74 @@
+.component-update-modal .ant-modal-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.component-update-modal {
+  top: 24px;
+}
+
+.component-update-modal .ant-modal-content {
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.update-version-list {
+  width: 100%;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.update-version-row {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text-primary);
+}
+
+label.update-version-row {
+  cursor: pointer;
+}
+
+.update-version-row:last-child {
+  border-bottom: 0;
+}
+
+.update-version-tags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.update-delivery-note {
+  margin-top: 0;
+}
+
+.update-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 575px) {
+  .update-meta {
+    flex-direction: column;
+    gap: 4px;
+  }
+}

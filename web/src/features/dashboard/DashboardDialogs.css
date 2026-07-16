@@ -1,0 +1,150 @@
+.backup-dialog-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.backup-dialog-grid section {
+  display: flex;
+  min-height: 210px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.backup-dialog-grid h3,
+.backup-dialog-grid p {
+  margin: 0;
+}
+
+.backup-dialog-grid .ant-upload-wrapper {
+  width: 100%;
+}
+
+.chart-loading {
+  display: flex;
+  min-height: 300px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.metric-dialog-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.metric-range-select {
+  width: 80px;
+}
+
+.metric-tabs {
+  margin-bottom: 4px;
+}
+
+.metric-chart-panel {
+  margin: 8px 8px 16px;
+  padding: 16px 18px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ant-color-primary) 4%, var(--panel-bg));
+}
+
+.metric-chart-panel h3 {
+  margin: 0 0 12px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.chart-empty {
+  min-height: 300px;
+  display: grid;
+  place-items: center;
+}
+
+.history-chart {
+  width: 100%;
+}
+
+.history-chart svg {
+  display: block;
+  width: 100%;
+  height: 300px;
+}
+
+.chart-grid-line {
+  stroke: color-mix(in srgb, var(--text-secondary) 24%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.chart-toolbar,
+.chart-legend,
+.chart-extrema {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-secondary);
+}
+
+.chart-toolbar {
+  min-height: 26px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chart-legend i {
+  width: 18px;
+  height: 3px;
+}
+
+.chart-extrema {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chart-extrema .is-max {
+  color: var(--ant-color-error);
+}
+
+.chart-extrema .is-min {
+  color: var(--ant-color-success);
+}
+
+.chart-axis-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+@media (max-width: 700px) {
+  .backup-dialog-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .history-chart svg {
+    height: 240px;
+  }
+
+  .metric-chart-panel {
+    margin-inline: 0;
+    padding-inline: 10px;
+  }
+
+  .chart-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

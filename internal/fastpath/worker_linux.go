@@ -114,13 +114,15 @@ func (c *Counters) Snapshot() CountersSnapshot {
 	if c == nil || c.ptr == nil {
 		return CountersSnapshot{}
 	}
+	var snapshot C.struct_tapx_fastpath_counters
+	C.tapx_fastpath_counters_snapshot(c.ptr, &snapshot)
 	return CountersSnapshot{
-		RXPackets:  uint64(c.ptr.rx_packets),
-		TXPackets:  uint64(c.ptr.tx_packets),
-		RXBytes:    uint64(c.ptr.rx_bytes),
-		TXBytes:    uint64(c.ptr.tx_bytes),
-		DropsGuard: uint64(c.ptr.drops_guard),
-		DropsIO:    uint64(c.ptr.drops_io),
+		RXPackets:  uint64(snapshot.rx_packets),
+		TXPackets:  uint64(snapshot.tx_packets),
+		RXBytes:    uint64(snapshot.rx_bytes),
+		TXBytes:    uint64(snapshot.tx_bytes),
+		DropsGuard: uint64(snapshot.drops_guard),
+		DropsIO:    uint64(snapshot.drops_io),
 	}
 }
 
@@ -129,22 +131,32 @@ type UDPConfig struct {
 	UDPFD        int
 	FrameKind    FrameKind
 	MaxFrameSize uint32
-	PeerMode     UDPPeerMode
-	Peer         netip.AddrPort
-	VKey         []byte
-	AddressGuard AddressGuard
-	Counters     *Counters
+	// MaxDatagramPayload enables the TapX segment format when non-zero. It is
+	// the peer-confirmed outer UDP payload ceiling, including vKey and segment
+	// headers but excluding the outer IP/UDP headers.
+	MaxDatagramPayload     uint32
+	PeerMode               UDPPeerMode
+	AddressGuardRemote     bool
+	Peer                   netip.AddrPort
+	DeviceToNetworkRateBPS uint64
+	NetworkToDeviceRateBPS uint64
+	VKey                   []byte
+	AddressGuard           AddressGuard
+	Counters               *Counters
 }
 
 type TCPConfig struct {
-	TUNFD        int
-	TCPFD        int
-	FrameKind    FrameKind
-	MaxFrameSize uint32
-	LengthMode   TCPLengthMode
-	VKey         []byte
-	AddressGuard AddressGuard
-	Counters     *Counters
+	TUNFD                  int
+	TCPFD                  int
+	FrameKind              FrameKind
+	MaxFrameSize           uint32
+	LengthMode             TCPLengthMode
+	AddressGuardRemote     bool
+	DeviceToNetworkRateBPS uint64
+	NetworkToDeviceRateBPS uint64
+	VKey                   []byte
+	AddressGuard           AddressGuard
+	Counters               *Counters
 }
 
 type Worker struct {
@@ -204,7 +216,13 @@ func StartUDPPipe(cfg UDPConfig) (*Worker, error) {
 	c.udp_fd = C.int(cfg.UDPFD)
 	c.frame_kind = C.uint32_t(cfg.FrameKind)
 	c.max_frame_size = C.uint32_t(cfg.MaxFrameSize)
+	c.max_datagram_payload = C.uint32_t(cfg.MaxDatagramPayload)
 	c.peer_mode = C.uint32_t(cfg.PeerMode)
+	if cfg.AddressGuardRemote {
+		c.address_guard_remote = 1
+	}
+	c.device_to_network_rate_bps = C.uint64_t(cfg.DeviceToNetworkRateBPS)
+	c.network_to_device_rate_bps = C.uint64_t(cfg.NetworkToDeviceRateBPS)
 	c.counters = cfg.Counters.ptr
 	if cfg.Peer.IsValid() {
 		if err := fillSockaddr(&c, cfg.Peer); err != nil {
@@ -244,6 +262,11 @@ func StartTCPPipe(cfg TCPConfig) (*Worker, error) {
 	c.frame_kind = C.uint32_t(cfg.FrameKind)
 	c.max_frame_size = C.uint32_t(cfg.MaxFrameSize)
 	c.length_mode = C.uint32_t(cfg.LengthMode)
+	if cfg.AddressGuardRemote {
+		c.address_guard_remote = 1
+	}
+	c.device_to_network_rate_bps = C.uint64_t(cfg.DeviceToNetworkRateBPS)
+	c.network_to_device_rate_bps = C.uint64_t(cfg.NetworkToDeviceRateBPS)
 	c.counters = cfg.Counters.ptr
 	freeGuard, err := fillAddressGuard(&c.guard, cfg.AddressGuard)
 	if err != nil {

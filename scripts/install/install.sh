@@ -4,86 +4,122 @@ set -euo pipefail
 repo="${TAPX_REPO:-VAMPIRE0924/TapX}"
 version="${TAPX_VERSION:-latest}"
 
-usage() {
-  cat <<'EOF'
-用法：install.sh [install|menu|status|start|stop|restart|settings|set-panel|logs|uninstall]
-
-这个脚本会下载最新的 TapX Linux amd64 安装包，然后启动交互式
-TapX 管理器。安装完成后，可以再次运行 `tapx` 打开管理菜单。
-
-环境变量：
-  TAPX_VERSION=latest|v0.1.0|0.1.0
-  TAPX_REPO=VAMPIRE0924/TapX
-EOF
+read_tty() {
+  local __name="$1" __prompt="$2" __value=""
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$__prompt" __value </dev/tty
+  else
+    read -r -p "$__prompt" __value
+  fi
+  printf -v "$__name" '%s' "$__value"
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
-  usage
-  exit 0
-fi
+choose_language() {
+  if [[ "${TAPX_LANG:-}" == "en" || "${TAPX_LANG:-}" == "zh" ]]; then
+    return
+  fi
+  printf '1,English (default)\n2,中文\n\n'
+  local choice=""
+  read_tty choice '> '
+  case "$choice" in
+    2|zh|ZH) TAPX_LANG=zh ;;
+    *) TAPX_LANG=en ;;
+  esac
+  export TAPX_LANG
+}
 
-if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "TapX 安装脚本必须在 Linux 上运行" >&2
-  exit 1
-fi
-
-if [[ "$(id -u)" != "0" ]]; then
-  echo "TapX 安装脚本必须使用 root 权限运行" >&2
-  exit 1
-fi
-
-case "$(uname -m)" in
-  x86_64|amd64)
-    asset="tapx-linux-amd64.tar.gz"
-    package_dir="tapx-linux-amd64"
-    ;;
-  *)
-    echo "不支持的架构：$(uname -m)" >&2
-    echo "当前公开 Linux 版本仅支持 amd64" >&2
-    exit 1
-    ;;
-esac
-
-download() {
-  local url="$1" out="$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --connect-timeout 15 -o "$out" "$url"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -O "$out" "$url"
+message() {
+  if [[ "$TAPX_LANG" == "zh" ]]; then
+    printf '%s' "$2"
   else
-    echo "缺少必要命令：curl 或 wget" >&2
-    exit 1
+    printf '%s' "$1"
   fi
 }
 
+detect_architecture() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    armv7l|armv7) printf 'armv7' ;;
+    i386|i486|i586|i686) printf '386' ;;
+    riscv64) printf 'riscv64' ;;
+    *) return 1 ;;
+  esac
+}
+
+download() {
+  local url="$1" output="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --connect-timeout 15 -o "$output" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$output" "$url"
+  else
+    printf '%s\n' "$(message 'curl or wget is required.' '需要安装 curl 或 wget。')" >&2
+    return 1
+  fi
+}
+
+choose_language
+
+if [[ "$(uname -s)" != "Linux" ]]; then
+  printf '%s\n' "$(message 'TapX supports Linux installation only.' 'TapX 一键安装仅支持 Linux。')" >&2
+  exit 1
+fi
+if [[ "$(id -u)" != "0" ]]; then
+  printf '%s\n' "$(message 'Run this installer as root.' '请使用 root 权限运行安装脚本。')" >&2
+  exit 1
+fi
+
+arch="$(detect_architecture)" || {
+  printf '%s %s\n' "$(message 'Unsupported architecture:' '不支持的系统架构：')" "$(uname -m)" >&2
+  exit 1
+}
+asset="tapx-linux-${arch}.tar.gz"
+package_dir="tapx-linux-${arch}"
+
 if [[ -x /usr/local/bin/tapx && "${1:-}" != "install" && "${1:-}" != "reinstall" ]]; then
-  exec /usr/local/bin/tapx "$@"
+  exec env TAPX_LANG="$TAPX_LANG" /usr/local/bin/tapx "$@"
 fi
 
-if [[ "$version" == "latest" ]]; then
-  url="https://github.com/${repo}/releases/latest/download/${asset}"
+if [[ -n "${TAPX_RELEASE_BASE_URL:-}" ]]; then
+  base_url="${TAPX_RELEASE_BASE_URL%/}"
+elif [[ "$version" == "latest" ]]; then
+  base_url="https://github.com/${repo}/releases/latest/download"
 else
-  tag="${version#v}"
-  url="https://github.com/${repo}/releases/download/v${tag}/${asset}"
+  base_url="https://github.com/${repo}/releases/download/v${version#v}"
 fi
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+tmp="$(mktemp -d /tmp/tapx-installer.XXXXXX)"
+trap 'rm -rf "$tmp"' EXIT INT TERM
 
-echo "正在下载：$url"
-download "$url" "$tmp/$asset"
+printf '%s %s (%s)\n' "$(message 'Downloading TapX for' '正在下载 TapX：')" "$arch" "$asset"
+if ! download "$base_url/$asset" "$tmp/$asset"; then
+  printf '%s\n' "$(message "No TapX release is available for ${arch}." "当前 Release 没有 ${arch} 架构的 TapX 安装包。")" >&2
+  exit 1
+fi
+download "$base_url/SHA256SUMS" "$tmp/SHA256SUMS"
+expected="$(awk -v file="$asset" '$2 == file || $2 == "*" file { print $1; exit }' "$tmp/SHA256SUMS")"
+if [[ ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  printf '%s\n' "$(message 'The release checksum is missing.' 'Release 缺少有效的校验值。')" >&2
+  exit 1
+fi
+actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+if [[ "${actual,,}" != "${expected,,}" ]]; then
+  printf '%s\n' "$(message 'Release checksum verification failed.' 'Release 文件校验失败。')" >&2
+  exit 1
+fi
+
 tar -xzf "$tmp/$asset" -C "$tmp"
-
 bundle_dir="$tmp/$package_dir"
 if [[ ! -d "$bundle_dir" ]]; then
   bundle_dir="$(find "$tmp" -type f -name tapx-core -exec dirname {} \; | head -n 1)"
 fi
 if [[ -z "$bundle_dir" || ! -x "$bundle_dir/tapx-core" || ! -x "$bundle_dir/tapx-panel" || ! -x "$bundle_dir/tapx" ]]; then
-  echo "TapX Linux 安装包无效：缺少 tapx-core、tapx-panel 或 tapx 管理器" >&2
+  printf '%s\n' "$(message 'The TapX release package is incomplete.' 'TapX Release 安装包不完整。')" >&2
   exit 1
 fi
 
 export TAPX_BUILD_DIR="$bundle_dir"
-cmd="${1:-install}"
+command="${1:-install}"
 shift || true
-exec "$bundle_dir/tapx" "$cmd" "$@"
+env TAPX_LANG="$TAPX_LANG" TAPX_BUILD_DIR="$bundle_dir" "$bundle_dir/tapx" "$command" "$@"

@@ -33,7 +33,7 @@ function Build-WithWsl {
     $repoWsl = Convert-ToWslPath $Repo
     $outputWsl = Convert-ToWslPath $OutputHost
     $outputDirWsl = ($outputWsl -replace '/[^/]+$', '')
-    wsl -d $Distro -- bash -lc "set -euo pipefail; cd '$repoWsl'; mkdir -p '$outputDirWsl'; GOTOOLCHAIN=local CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o '$outputWsl' ./cmd/tapx-core; file '$outputWsl'"
+    wsl -d $Distro -- bash -lc "set -euo pipefail; cd '$repoWsl'; mkdir -p '$outputDirWsl'; GOTOOLCHAIN=auto CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o '$outputWsl' ./cmd/tapx-core; file '$outputWsl'"
 }
 
 function Build-WithDocker {
@@ -48,7 +48,7 @@ function Build-WithDocker {
 set -euo pipefail
 mkdir -p '$outDir' build/gocache-linux build/gomodcache
 go version
-GOTOOLCHAIN=local GOCACHE=/src/build/gocache-linux GOMODCACHE=/src/build/gomodcache CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o '$outFile' ./cmd/tapx-core
+GOTOOLCHAIN=auto GOCACHE=/src/build/gocache-linux GOMODCACHE=/src/build/gomodcache CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o '$outFile' ./cmd/tapx-core
 file '$outFile'
 "@
     & docker run --rm -v "${repoMount}:/src" -w /src $DockerImage bash -lc $script
@@ -62,18 +62,6 @@ $outputHost = Join-Path $repo $OutputPath
 Initialize-Output $outputHost
 
 $errors = @()
-if ($Builder -eq "docker" -or $Builder -eq "auto") {
-    try {
-        Build-WithDocker -Repo $repo -OutputPath $OutputPath
-        $resolved = Resolve-Path (Join-Path $repo $OutputPath)
-        Write-Host "built $resolved"
-        return
-    } catch {
-        if ($Builder -eq "docker") { throw }
-        $errors += "docker: $($_.Exception.Message)"
-    }
-}
-
 if ($Builder -eq "wsl" -or $Builder -eq "auto") {
     try {
         Build-WithWsl -Repo $repo -OutputHost $outputHost
@@ -83,6 +71,18 @@ if ($Builder -eq "wsl" -or $Builder -eq "auto") {
     } catch {
         if ($Builder -eq "wsl") { throw }
         $errors += "wsl: $($_.Exception.Message)"
+    }
+}
+
+if ($Builder -eq "docker" -or $Builder -eq "auto") {
+    try {
+        Build-WithDocker -Repo $repo -OutputPath $OutputPath
+        $resolved = Resolve-Path (Join-Path $repo $OutputPath)
+        Write-Host "built $resolved"
+        return
+    } catch {
+        if ($Builder -eq "docker") { throw }
+        $errors += "docker: $($_.Exception.Message)"
     }
 }
 

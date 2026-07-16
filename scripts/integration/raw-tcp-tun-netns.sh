@@ -12,6 +12,28 @@ TUN_A="tapxitcpa0"
 TUN_B="tapxitcpb0"
 PID_A=""
 PID_B=""
+UNDERLAY_FAMILY="${UNDERLAY_FAMILY:-ipv4}"
+
+case "$UNDERLAY_FAMILY" in
+  ipv4)
+    UNDERLAY_A="172.31.252.1"
+    UNDERLAY_B="172.31.252.2"
+    UNDERLAY_PREFIX="30"
+    UNDERLAY_PING_ARGS=()
+    UNDERLAY_ADDR_FLAGS=()
+    ;;
+  ipv6)
+    UNDERLAY_A="fd31:252::1"
+    UNDERLAY_B="fd31:252::2"
+    UNDERLAY_PREFIX="64"
+    UNDERLAY_PING_ARGS=(-6)
+    UNDERLAY_ADDR_FLAGS=(nodad)
+    ;;
+  *)
+    echo "UNDERLAY_FAMILY must be ipv4 or ipv6" >&2
+    exit 1
+    ;;
+esac
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -73,6 +95,18 @@ wait_for_link() {
   return 1
 }
 
+wait_for_ping() {
+  local ns="$1"
+  shift
+  for _ in $(seq 1 30); do
+    if ip netns exec "$ns" ping -c 1 -W 1 "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 show_interface_evidence() {
   local ns="$1"
   local name="$2"
@@ -97,12 +131,16 @@ cleanup
 rm -f "${BUILD_DIR}/tapx-a.log" "${BUILD_DIR}/tapx-b.log" "${BUILD_DIR}/tapx-a.json" "${BUILD_DIR}/tapx-b.json"
 
 echo "build tapx-core"
-(cd "$ROOT" && GOTOOLCHAIN=local go build -o "$CORE_BIN" ./cmd/tapx-core)
+if [[ "${SKIP_BUILD:-0}" != "1" || ! -x "$CORE_BIN" ]]; then
+  (cd "$ROOT" && GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go build -o "$CORE_BIN" ./cmd/tapx-core)
+else
+  echo "reuse existing tapx-core"
+fi
 
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500}
+    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500, "LinkAutoOptimize": true}
   ],
   "Routes": [
     {"ID": "route-a", "Enabled": true, "DeviceID": "tun-a"}
@@ -111,7 +149,7 @@ cat >"${BUILD_DIR}/tapx-a.json" <<JSON
     {
       "ID": "tcp-a",
       "Enabled": true,
-      "BindHost": "172.31.252.1",
+      "BindHost": "${UNDERLAY_A}",
       "BindPort": 44200,
       "Transport": "tcp",
       "RawTCP": {"LengthMode": "uint16", "NoDelay": true, "KeepAliveSecond": 30},
@@ -124,7 +162,7 @@ JSON
 cat >"${BUILD_DIR}/tapx-b.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500}
+    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500, "LinkAutoOptimize": true}
   ],
   "Routes": [
     {"ID": "route-b", "Enabled": true, "DeviceID": "tun-b"}
@@ -133,10 +171,10 @@ cat >"${BUILD_DIR}/tapx-b.json" <<JSON
     {
       "ID": "tcp-b",
       "Enabled": true,
-      "Remote": "172.31.252.1",
+      "Remote": "${UNDERLAY_A}",
       "Port": 44200,
       "Transport": "tcp",
-      "RawTCP": {"LengthMode": "uint16", "NoDelay": true, "ConnectTimeout": 3, "KeepAliveSecond": 30},
+      "RawTCP": {"LengthMode": "uint16", "NoDelay": true, "ConnectTimeout": 3, "ReconnectSecond": 1, "KeepAliveSecond": 30},
       "Binding": {"RouteID": "route-b"}
     }
   ]
@@ -152,8 +190,10 @@ ip link set "$VETH_B" netns "$NS_B"
 
 ip -n "$NS_A" link set lo up
 ip -n "$NS_B" link set lo up
-ip -n "$NS_A" addr add 172.31.252.1/30 dev "$VETH_A"
-ip -n "$NS_B" addr add 172.31.252.2/30 dev "$VETH_B"
+ip -n "$NS_A" addr add "${UNDERLAY_A}/${UNDERLAY_PREFIX}" dev "$VETH_A" "${UNDERLAY_ADDR_FLAGS[@]}"
+ip -n "$NS_B" addr add "${UNDERLAY_B}/${UNDERLAY_PREFIX}" dev "$VETH_B" "${UNDERLAY_ADDR_FLAGS[@]}"
+ip -n "$NS_A" link set "$VETH_A" mtu 1280
+ip -n "$NS_B" link set "$VETH_B" mtu 1280
 ip -n "$NS_A" link set "$VETH_A" up
 ip -n "$NS_B" link set "$VETH_B" up
 
@@ -174,14 +214,37 @@ show_interface_evidence "$NS_B" "$TUN_B"
 echo "configure tunnel interfaces"
 ip -n "$NS_A" addr add 10.90.0.1/30 dev "$TUN_A"
 ip -n "$NS_B" addr add 10.90.0.2/30 dev "$TUN_B"
+ip -n "$NS_A" addr add fd90::1/126 dev "$TUN_A" nodad
+ip -n "$NS_B" addr add fd90::2/126 dev "$TUN_B" nodad
 ip -n "$NS_A" link set "$TUN_A" up
 ip -n "$NS_B" link set "$TUN_B" up
 
 echo "verify underlay"
-ip netns exec "$NS_B" ping -c 1 -W 1 172.31.252.1 >/dev/null || fail_with_logs
+ip netns exec "$NS_B" ping "${UNDERLAY_PING_ARGS[@]}" -c 1 -W 1 "$UNDERLAY_A" >/dev/null || fail_with_logs
 
 echo "verify raw TCP/TUN tunnel"
-ip netns exec "$NS_A" ping -c 3 -W 1 10.90.0.2 >/dev/null || fail_with_logs
-ip netns exec "$NS_B" ping -c 3 -W 1 10.90.0.1 >/dev/null || fail_with_logs
+wait_for_ping "$NS_A" 10.90.0.2 || fail_with_logs
+wait_for_ping "$NS_B" 10.90.0.1 || fail_with_logs
+wait_for_ping "$NS_A" -6 fd90::2 || fail_with_logs
+wait_for_ping "$NS_B" -6 fd90::1 || fail_with_logs
+wait_for_ping "$NS_A" -M do -s 1400 10.90.0.2 || fail_with_logs
+wait_for_ping "$NS_B" -M do -s 1400 10.90.0.1 || fail_with_logs
+wait_for_ping "$NS_A" -6 -M do -s 1352 fd90::2 || fail_with_logs
+wait_for_ping "$NS_B" -6 -M do -s 1352 fd90::1 || fail_with_logs
 
-echo "raw TCP/TUN netns integration: ok"
+echo "verify connector reconnect after listener restart"
+kill "$PID_A"
+wait "$PID_A" || true
+PID_A=""
+wait_for_link "$NS_A" "$TUN_A" && fail_with_logs
+: >"${BUILD_DIR}/tapx-a.log"
+ip netns exec "$NS_A" "$CORE_BIN" -config "${BUILD_DIR}/tapx-a.json" >"${BUILD_DIR}/tapx-a.log" 2>&1 &
+PID_A="$!"
+wait_for_log "${BUILD_DIR}/tapx-a.log" "runtime started" || fail_with_logs
+wait_for_link "$NS_A" "$TUN_A" || fail_with_logs
+ip -n "$NS_A" addr add 10.90.0.1/30 dev "$TUN_A"
+ip -n "$NS_A" addr add fd90::1/126 dev "$TUN_A" nodad
+ip -n "$NS_A" link set "$TUN_A" up
+wait_for_ping "$NS_B" 10.90.0.1 || fail_with_logs
+
+echo "raw TCP/TUN over ${UNDERLAY_FAMILY} underlay integration: ok"

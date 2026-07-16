@@ -74,6 +74,18 @@ wait_for_link() {
   return 1
 }
 
+wait_for_ping() {
+  local ns="$1"
+  shift
+  for _ in $(seq 1 30); do
+    if ip netns exec "$ns" ping -c 1 -W 1 "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 show_interface_evidence() {
   local ns="$1"
   local name="$2"
@@ -98,12 +110,12 @@ cleanup
 rm -f "${BUILD_DIR}/tapx-a.log" "${BUILD_DIR}/tapx-b.log" "${BUILD_DIR}/tapx-a.json" "${BUILD_DIR}/tapx-b.json"
 
 echo "build tapx-core"
-(cd "$ROOT" && GOTOOLCHAIN=local go build -o "$CORE_BIN" ./cmd/tapx-core)
+(cd "$ROOT" && GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go build -o "$CORE_BIN" ./cmd/tapx-core)
 
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON
 {
   "Devices": [
-    {"ID": "tap-a", "Enabled": true, "Type": "tap", "IfName": "${TAP_A}", "MTU": 1500}
+    {"ID": "tap-a", "Enabled": true, "Type": "tap", "IfName": "${TAP_A}", "MTU": 1500, "LinkAutoOptimize": true}
   ],
   "Routes": [
     {"ID": "route-a", "Enabled": true, "DeviceID": "tap-a"}
@@ -125,7 +137,7 @@ JSON
 cat >"${BUILD_DIR}/tapx-b.json" <<JSON
 {
   "Devices": [
-    {"ID": "tap-b", "Enabled": true, "Type": "tap", "IfName": "${TAP_B}", "MTU": 1500}
+    {"ID": "tap-b", "Enabled": true, "Type": "tap", "IfName": "${TAP_B}", "MTU": 1500, "LinkAutoOptimize": true}
   ],
   "Routes": [
     {"ID": "route-b", "Enabled": true, "DeviceID": "tap-b"}
@@ -155,6 +167,8 @@ ip -n "$NS_A" link set lo up
 ip -n "$NS_B" link set lo up
 ip -n "$NS_A" addr add 172.31.251.1/30 dev "$VETH_A"
 ip -n "$NS_B" addr add 172.31.251.2/30 dev "$VETH_B"
+ip -n "$NS_A" link set "$VETH_A" mtu 1280
+ip -n "$NS_B" link set "$VETH_B" mtu 1280
 ip -n "$NS_A" link set "$VETH_A" up
 ip -n "$NS_B" link set "$VETH_B" up
 
@@ -183,8 +197,10 @@ echo "verify underlay"
 ip netns exec "$NS_A" ping -c 1 -W 1 172.31.251.2 >/dev/null || fail_with_logs
 
 echo "verify raw UDP/TAP ethernet tunnel"
-ip netns exec "$NS_A" ping -c 3 -W 1 10.89.0.2 >/dev/null || fail_with_logs
-ip netns exec "$NS_B" ping -c 3 -W 1 10.89.0.1 >/dev/null || fail_with_logs
+wait_for_ping "$NS_A" 10.89.0.2 || fail_with_logs
+wait_for_ping "$NS_B" 10.89.0.1 || fail_with_logs
+wait_for_ping "$NS_A" -M do -s 1400 10.89.0.2 || fail_with_logs
+wait_for_ping "$NS_B" -M do -s 1400 10.89.0.1 || fail_with_logs
 
 ip -n "$NS_A" neigh show dev "$TAP_A" | grep -q "10.89.0.2" || fail_with_logs
 ip -n "$NS_B" neigh show dev "$TAP_B" | grep -q "10.89.0.1" || fail_with_logs

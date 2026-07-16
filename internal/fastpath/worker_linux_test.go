@@ -5,6 +5,7 @@ package fastpath
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/netip"
 	"syscall"
@@ -167,6 +168,124 @@ func TestStartUDPPipeVKey(t *testing.T) {
 	}
 }
 
+func TestStartUDPPipeSegmentsAndReassemblesOutOfOrder(t *testing.T) {
+	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	defer syscall.Close(tun[0])
+	defer syscall.Close(tun[1])
+
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer udp.Close()
+	udpFile, err := udp.File()
+	if err != nil {
+		t.Fatalf("udp file: %v", err)
+	}
+	defer udpFile.Close()
+
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen peer: %v", err)
+	}
+	defer peer.Close()
+	peerAddr := peer.LocalAddr().(*net.UDPAddr)
+	key := []byte("vk-demo")
+	vkeyHeaderSize := 8 + len(key)
+
+	const maxDatagramPayload = 128
+	worker, err := StartUDPPipe(UDPConfig{
+		TUNFD:              tun[0],
+		UDPFD:              int(udpFile.Fd()),
+		FrameKind:          FrameTUN,
+		MaxFrameSize:       2048,
+		MaxDatagramPayload: maxDatagramPayload,
+		PeerMode:           UDPPeerFixed,
+		Peer:               netip.MustParseAddrPort(peerAddr.String()),
+		VKey:               key,
+	})
+	if err != nil {
+		t.Fatalf("StartUDPPipe: %v", err)
+	}
+
+	outgoing := make([]byte, 300)
+	for i := range outgoing {
+		outgoing[i] = byte(i)
+	}
+	outgoing[0] = 0x45
+	if _, err := syscall.Write(tun[1], outgoing); err != nil {
+		t.Fatalf("write tun: %v", err)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reassembled := make([]byte, len(outgoing))
+	const fragmentPayload = maxDatagramPayload - 20 - 15
+	const fragmentCount = 4
+	for wantIndex := 0; wantIndex < fragmentCount; wantIndex++ {
+		wire := make([]byte, maxDatagramPayload)
+		n, _, err := peer.ReadFromUDP(wire)
+		if err != nil {
+			t.Fatalf("read segment %d: %v", wantIndex, err)
+		}
+		wire = wire[:n]
+		if !bytes.Equal(wire[:vkeyHeaderSize], vkeyPayload(key, nil)) {
+			t.Fatalf("segment %d vKey header = %x", wantIndex, wire[:vkeyHeaderSize])
+		}
+		header := wire[vkeyHeaderSize:]
+		if string(header[:4]) != "TXS1" || int(binary.BigEndian.Uint16(header[10:12])) != wantIndex ||
+			binary.BigEndian.Uint16(header[12:14]) != fragmentCount ||
+			binary.BigEndian.Uint16(header[14:16]) != fragmentPayload {
+			t.Fatalf("segment %d header = %x", wantIndex, header[:20])
+		}
+		fragmentLen := int(binary.BigEndian.Uint16(header[16:18]))
+		copy(reassembled[wantIndex*fragmentPayload:], header[20:20+fragmentLen])
+	}
+	if !bytes.Equal(reassembled, outgoing) {
+		t.Fatal("outgoing segments did not reconstruct the original frame")
+	}
+
+	incoming := make([]byte, 300)
+	for i := range incoming {
+		incoming[i] = byte(255 - i)
+	}
+	incoming[0] = 0x60
+	// The reverse path may have a larger confirmed datagram ceiling. Receiving
+	// must not be truncated to this worker's independent send ceiling.
+	segments := testSegmentPayloads(77, incoming, 200-vkeyHeaderSize)
+	udpAddr := udp.LocalAddr().(*net.UDPAddr)
+	for _, index := range []int{1, 0, 0} {
+		if _, err := peer.WriteToUDP(vkeyPayload(key, segments[index]), udpAddr); err != nil {
+			t.Fatalf("write segment %d: %v", index, err)
+		}
+	}
+	pollFDs := []unix.PollFd{{Fd: int32(tun[1]), Events: unix.POLLIN}}
+	if n, err := unix.Poll(pollFDs, 1000); err != nil || n != 1 {
+		t.Fatalf("poll reassembled frame = %d, %v", n, err)
+	}
+	buf := make([]byte, 2048)
+	n, err := syscall.Read(tun[1], buf)
+	if err != nil {
+		t.Fatalf("read reassembled frame: %v", err)
+	}
+	if !bytes.Equal(buf[:n], incoming) {
+		t.Fatal("reassembled incoming frame does not match")
+	}
+	expectNoUnixData(t, tun[1])
+
+	if err := worker.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	snap := worker.Counters()
+	if snap.TXPackets != 1 || snap.TXBytes != uint64(len(outgoing)) ||
+		snap.RXPackets != 1 || snap.RXBytes != uint64(len(incoming)) {
+		t.Fatalf("counters = %+v, want original-frame accounting", snap)
+	}
+}
+
 func TestStartUDPPipeTUNIPv4AddressGuard(t *testing.T) {
 	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -244,13 +363,17 @@ func TestStartUDPPipeTUNIPv4AddressGuard(t *testing.T) {
 	if !bytes.Equal(buf[:n], allowedIn) {
 		t.Fatalf("allowed tun payload = %v, want %v", buf[:n], allowedIn)
 	}
+	if _, err := syscall.Write(tun[1], ipv6Packet("2001:db8::2", "2001:db8::3")); err != nil {
+		t.Fatalf("write unlisted IPv6 family: %v", err)
+	}
+	expectNoUDPData(t, peer)
 
 	if err := worker.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	snap := worker.Counters()
-	if snap.DropsGuard != 2 || snap.TXPackets != 1 || snap.RXPackets != 1 {
-		t.Fatalf("counters = %+v, want two guard drops and one packet each direction", snap)
+	if snap.DropsGuard != 3 || snap.TXPackets != 1 || snap.RXPackets != 1 {
+		t.Fatalf("counters = %+v, want three guard drops and one packet each direction", snap)
 	}
 }
 
@@ -331,13 +454,17 @@ func TestStartUDPPipeTUNIPv6AddressGuard(t *testing.T) {
 	if !bytes.Equal(buf[:n], allowedIn) {
 		t.Fatalf("allowed tun payload = %v, want %v", buf[:n], allowedIn)
 	}
+	if _, err := syscall.Write(tun[1], ipv4Packet(10, 0, 0, 2, 10, 0, 0, 3)); err != nil {
+		t.Fatalf("write unlisted IPv4 family: %v", err)
+	}
+	expectNoUDPData(t, peer)
 
 	if err := worker.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	snap := worker.Counters()
-	if snap.DropsGuard != 2 || snap.TXPackets != 1 || snap.RXPackets != 1 {
-		t.Fatalf("counters = %+v, want two guard drops and one packet each direction", snap)
+	if snap.DropsGuard != 3 || snap.TXPackets != 1 || snap.RXPackets != 1 {
+		t.Fatalf("counters = %+v, want three guard drops and one packet each direction", snap)
 	}
 }
 
@@ -502,6 +629,90 @@ func TestStartTCPPipeBidirectional(t *testing.T) {
 	}
 }
 
+func TestStartTCPPipeBackpressurePreservesFrames(t *testing.T) {
+	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair tun: %v", err)
+	}
+	defer syscall.Close(tun[0])
+	defer syscall.Close(tun[1])
+	tcp, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair tcp: %v", err)
+	}
+	defer syscall.Close(tcp[0])
+	defer syscall.Close(tcp[1])
+	if err := syscall.SetsockoptInt(tcp[0], syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4096); err != nil {
+		t.Fatalf("set tcp send buffer: %v", err)
+	}
+
+	worker, err := StartTCPPipe(TCPConfig{
+		TUNFD: tun[0], TCPFD: tcp[0], FrameKind: FrameTUN,
+		MaxFrameSize: 2048, LengthMode: TCPLength16,
+	})
+	if err != nil {
+		t.Fatalf("StartTCPPipe: %v", err)
+	}
+	defer worker.Stop()
+
+	const frameCount = 1024
+	sendDone := make(chan error, 1)
+	go func() {
+		payload := make([]byte, 1024)
+		payload[0] = 0x45
+		for sequence := 0; sequence < frameCount; sequence++ {
+			binary.BigEndian.PutUint32(payload[4:8], uint32(sequence))
+			if _, err := syscall.Write(tun[1], payload); err != nil {
+				sendDone <- err
+				return
+			}
+		}
+		sendDone <- nil
+	}()
+
+	// Let the small TCP send buffer fill before the receiver starts draining it.
+	time.Sleep(50 * time.Millisecond)
+	receiveDone := make(chan error, 1)
+	go func() {
+		stream := make([]byte, 0, 128*1024)
+		buffer := make([]byte, 32*1024)
+		next := 0
+		for next < frameCount {
+			n, err := syscall.Read(tcp[1], buffer)
+			if err != nil {
+				receiveDone <- err
+				return
+			}
+			stream = append(stream, buffer[:n]...)
+			for len(stream) >= 2 {
+				frameSize := int(binary.BigEndian.Uint16(stream[:2]))
+				if len(stream) < 2+frameSize {
+					break
+				}
+				frame := stream[2 : 2+frameSize]
+				if frameSize != 1024 || frame[0] != 0x45 || binary.BigEndian.Uint32(frame[4:8]) != uint32(next) {
+					receiveDone <- fmt.Errorf("frame %d corrupted: size=%d prefix=%x sequence=%d", next, frameSize, frame[:8], binary.BigEndian.Uint32(frame[4:8]))
+					return
+				}
+				next++
+				stream = stream[2+frameSize:]
+			}
+		}
+		receiveDone <- nil
+	}()
+
+	for name, done := range map[string]<-chan error{"sender": sendDone, "receiver": receiveDone} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s failed: %v", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s timed out", name)
+		}
+	}
+}
+
 func TestStartTCPPipeVKey(t *testing.T) {
 	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -641,6 +852,31 @@ func expectNoUDPData(t *testing.T, conn *net.UDPConn) {
 	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
 		t.Fatalf("ReadFromUDP() error = %v, want timeout", err)
 	}
+}
+
+func testSegmentPayloads(sequence uint32, frame []byte, maxDatagramPayload int) [][]byte {
+	const headerSize = 20
+	fragmentPayload := maxDatagramPayload - headerSize
+	fragmentCount := (len(frame) + fragmentPayload - 1) / fragmentPayload
+	segments := make([][]byte, 0, fragmentCount)
+	for index := 0; index < fragmentCount; index++ {
+		offset := index * fragmentPayload
+		fragmentLen := len(frame) - offset
+		if fragmentLen > fragmentPayload {
+			fragmentLen = fragmentPayload
+		}
+		segment := make([]byte, headerSize+fragmentLen)
+		copy(segment[:4], "TXS1")
+		binary.BigEndian.PutUint32(segment[4:8], sequence)
+		binary.BigEndian.PutUint16(segment[8:10], uint16(len(frame)))
+		binary.BigEndian.PutUint16(segment[10:12], uint16(index))
+		binary.BigEndian.PutUint16(segment[12:14], uint16(fragmentCount))
+		binary.BigEndian.PutUint16(segment[14:16], uint16(fragmentPayload))
+		binary.BigEndian.PutUint16(segment[16:18], uint16(fragmentLen))
+		copy(segment[headerSize:], frame[offset:offset+fragmentLen])
+		segments = append(segments, segment)
+	}
+	return segments
 }
 
 func expectNoUnixData(t *testing.T, fd int) {

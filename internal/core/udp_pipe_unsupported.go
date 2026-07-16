@@ -3,11 +3,14 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"net/netip"
+	"time"
 
 	"tapx/internal/config"
 	"tapx/internal/fastpath"
+	"tapx/internal/pathmtu"
 	"tapx/internal/xrayruntime"
 )
 
@@ -24,14 +27,42 @@ type TCPPipeHandle struct {
 	LocalAddr  netip.AddrPort
 	RemoteAddr netip.AddrPort
 	DeviceName string
+	shared     *tcpSharedDevice
+	owner      bool
 }
+
+type tcpSharedDevice struct{}
 
 type XrayPipeHandle struct {
 	Pipe       config.RuntimeXrayPipe
 	DeviceName string
+	shared     *xraySharedDevice
+	owner      bool
 }
 
-func startUDPPipe(config.RuntimeUDPPipe, config.RuntimeDevice) (*UDPPipeHandle, error) {
+type xraySharedDevice struct{}
+
+type udpReuseportGroup struct {
+	Dispatch config.RuntimeUDPDispatch
+}
+
+type DTLSDispatchHandle struct {
+	Dispatch config.RuntimeUDPDispatch
+}
+
+func (g *udpReuseportGroup) Close() error { return nil }
+
+func startUDPReuseportGroup(config.RuntimeUDPDispatch, config.RuntimeUDPPipe) (*udpReuseportGroup, error) {
+	return nil, errors.New("core: UDP reuseport dispatch requires linux")
+}
+
+func startDTLSDispatch(config.RuntimeUDPDispatch, []config.RuntimeUDPPipe, []config.RuntimeDevice, *pathmtu.Cache) (*DTLSDispatchHandle, []*UDPPipeHandle, error) {
+	return nil, nil, errors.New("core: DTLS dispatch requires linux")
+}
+
+func (h *DTLSDispatchHandle) Close() error { return nil }
+
+func startUDPPipeWithCache(config.RuntimeUDPPipe, config.RuntimeDevice, *pathmtu.Cache) (*UDPPipeHandle, error) {
 	return nil, errors.New("core: udp pipe supervisor requires linux")
 }
 
@@ -51,7 +82,15 @@ func (h *UDPPipeHandle) AcceptedRemoteAddr() netip.AddrPort {
 	return netip.AddrPort{}
 }
 
+func (h *UDPPipeHandle) Diagnose(context.Context, string, time.Duration) (ConnectorDiagnostic, error) {
+	return ConnectorDiagnostic{}, errors.New("core: UDP connector diagnostics require linux")
+}
+
 func startTCPPipe(config.RuntimeTCPPipe, config.RuntimeDevice) (*TCPPipeHandle, error) {
+	return nil, errors.New("core: tcp pipe supervisor requires linux")
+}
+
+func startTCPPipeShared(config.RuntimeTCPPipe, config.RuntimeDevice, *tcpSharedDevice) (*TCPPipeHandle, error) {
 	return nil, errors.New("core: tcp pipe supervisor requires linux")
 }
 
@@ -71,7 +110,11 @@ func (h *TCPPipeHandle) AcceptedRemoteAddr() netip.AddrPort {
 	return netip.AddrPort{}
 }
 
-func startXrayPipe(config.RuntimeXrayPipe, config.RuntimeDevice, *xrayruntime.Manager) (*XrayPipeHandle, error) {
+func (h *TCPPipeHandle) Diagnose(context.Context, string, time.Duration) (ConnectorDiagnostic, error) {
+	return ConnectorDiagnostic{}, errors.New("core: connector diagnostics require linux")
+}
+
+func startXrayPipeShared(config.RuntimeXrayPipe, config.RuntimeDevice, *xrayruntime.Manager, *xraySharedDevice) (*XrayPipeHandle, error) {
 	return nil, errors.New("core: xray pipe supervisor requires linux")
 }
 
@@ -85,4 +128,8 @@ func (h *XrayPipeHandle) Counters() fastpath.CountersSnapshot {
 
 func (h *XrayPipeHandle) Err() error {
 	return nil
+}
+
+func (h *XrayPipeHandle) Diagnose(context.Context, string, time.Duration) (ConnectorDiagnostic, error) {
+	return ConnectorDiagnostic{}, errors.New("core: xray connector diagnostics require linux")
 }

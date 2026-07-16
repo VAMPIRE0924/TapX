@@ -1,7 +1,9 @@
 package panel
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -16,71 +18,94 @@ type RuntimeController interface {
 	Start(*config.GeneratedRuntime) error
 	Stop() error
 	CloseClientPipes(clientID string) (int, error)
+	CloseEndpointPipes(kind, endpointID string) (int, error)
 	UDPPipes() []*core.UDPPipeHandle
 	TCPPipes() []*core.TCPPipeHandle
 	XrayPipes() []*core.XrayPipeHandle
 	XrayStates() []xrayruntime.State
 }
 
+type runtimeXrayDialer interface {
+	DialXrayTCP(context.Context, string, string, uint16) (net.Conn, error)
+}
+
+type runtimeConnectorDiagnoser interface {
+	DiagnoseConnector(context.Context, string, string, time.Duration) (core.ConnectorDiagnostic, error)
+}
+
+type runtimeComponentController interface {
+	RestartComponent(string, *config.GeneratedRuntime) error
+	StopComponent(string) error
+}
+
 type RuntimeManager struct {
-	mu                sync.Mutex
-	newController     func() RuntimeController
-	controller        RuntimeController
-	activeRuntime     *config.GeneratedRuntime
-	activeConfig      *config.RuntimeConfig
-	generation        uint64
-	startedAt         time.Time
-	stoppedAt         time.Time
-	lastAppliedAt     time.Time
-	lastRollbackAt    time.Time
-	lastEnforcedAt    time.Time
-	lastRollbackError string
-	lastReloadMode    string
-	lastError         string
-	enforcementStop   chan struct{}
-	enforcementDone   chan struct{}
-	enforcementEvents []ClientEnforcementEvent
+	mu                   sync.Mutex
+	newController        func() RuntimeController
+	controller           RuntimeController
+	activeRuntime        *config.GeneratedRuntime
+	activeConfig         *config.RuntimeConfig
+	generation           uint64
+	startedAt            time.Time
+	stoppedAt            time.Time
+	lastAppliedAt        time.Time
+	lastRollbackAt       time.Time
+	lastEnforcedAt       time.Time
+	lastRollbackError    string
+	lastReloadMode       string
+	lastError            string
+	enforcementStop      chan struct{}
+	enforcementDone      chan struct{}
+	enforcementEvents    []EnforcementEvent
+	limitConfigRefresher func(RuntimeState, time.Time) (config.RuntimeConfig, error)
 }
 
 type RuntimeState struct {
-	Running           bool                     `json:"running"`
-	Generation        uint64                   `json:"generation"`
-	StartedAt         string                   `json:"startedAt,omitempty"`
-	StoppedAt         string                   `json:"stoppedAt,omitempty"`
-	LastAppliedAt     string                   `json:"lastAppliedAt,omitempty"`
-	LastRollbackAt    string                   `json:"lastRollbackAt,omitempty"`
-	LastEnforcedAt    string                   `json:"lastEnforcedAt,omitempty"`
-	LastRollbackError string                   `json:"lastRollbackError,omitempty"`
-	LastReloadMode    string                   `json:"lastReloadMode,omitempty"`
-	LastError         string                   `json:"lastError,omitempty"`
-	EnforcementEvents []ClientEnforcementEvent `json:"enforcementEvents,omitempty"`
-	UDPPipes          []RuntimePipeState       `json:"udpPipes"`
-	TCPPipes          []RuntimePipeState       `json:"tcpPipes"`
-	XrayPipes         []RuntimePipeState       `json:"xrayPipes"`
-	XrayRuntimes      []xrayruntime.State      `json:"xrayRuntimes,omitempty"`
+	Running           bool                `json:"running"`
+	Generation        uint64              `json:"generation"`
+	StartedAt         string              `json:"startedAt,omitempty"`
+	StoppedAt         string              `json:"stoppedAt,omitempty"`
+	LastAppliedAt     string              `json:"lastAppliedAt,omitempty"`
+	LastRollbackAt    string              `json:"lastRollbackAt,omitempty"`
+	LastEnforcedAt    string              `json:"lastEnforcedAt,omitempty"`
+	LastRollbackError string              `json:"lastRollbackError,omitempty"`
+	LastReloadMode    string              `json:"lastReloadMode,omitempty"`
+	LastError         string              `json:"lastError,omitempty"`
+	EnforcementEvents []EnforcementEvent  `json:"enforcementEvents,omitempty"`
+	UDPPipes          []RuntimePipeState  `json:"udpPipes"`
+	TCPPipes          []RuntimePipeState  `json:"tcpPipes"`
+	XrayPipes         []RuntimePipeState  `json:"xrayPipes"`
+	XrayRuntimes      []xrayruntime.State `json:"xrayRuntimes,omitempty"`
 }
 
 type RuntimePipeState struct {
-	EndpointID   string                    `json:"endpointId"`
-	EndpointKind string                    `json:"endpointKind"`
-	Transport    string                    `json:"transport"`
-	RouteID      string                    `json:"routeId,omitempty"`
-	DeviceID     string                    `json:"deviceId"`
-	DeviceName   string                    `json:"deviceName,omitempty"`
-	ClientID     string                    `json:"clientId,omitempty"`
-	AddressID    string                    `json:"addressId,omitempty"`
-	LocalAddr    string                    `json:"localAddr,omitempty"`
-	RemoteAddr   string                    `json:"remoteAddr,omitempty"`
-	Counters     fastpath.CountersSnapshot `json:"counters"`
-	LastError    string                    `json:"lastError,omitempty"`
+	EndpointID          string                    `json:"endpointId"`
+	EndpointKind        string                    `json:"endpointKind"`
+	Transport           string                    `json:"transport"`
+	XrayRuntime         string                    `json:"xrayRuntime,omitempty"`
+	RouteID             string                    `json:"routeId,omitempty"`
+	DeviceID            string                    `json:"deviceId"`
+	DeviceName          string                    `json:"deviceName,omitempty"`
+	ClientID            string                    `json:"clientId,omitempty"`
+	AddressID           string                    `json:"addressId,omitempty"`
+	LocalAddr           string                    `json:"localAddr,omitempty"`
+	RemoteAddr          string                    `json:"remoteAddr,omitempty"`
+	ConfirmedPathMTU    int                       `json:"confirmedPathMtu,omitempty"`
+	EffectiveNetworkMTU int                       `json:"effectiveNetworkMtu,omitempty"`
+	MaxDatagramPayload  int                       `json:"maxDatagramPayload,omitempty"`
+	TCPMSSIPv4          int                       `json:"tcpMssIpv4,omitempty"`
+	TCPMSSIPv6          int                       `json:"tcpMssIpv6,omitempty"`
+	Counters            fastpath.CountersSnapshot `json:"counters"`
+	LastError           string                    `json:"lastError,omitempty"`
 }
 
-type ClientEnforcementEvent struct {
-	At          string `json:"at"`
-	ClientID    string `json:"clientId"`
-	Reason      string `json:"reason"`
-	ClosedPipes int    `json:"closedPipes"`
-	Error       string `json:"error,omitempty"`
+type EnforcementEvent struct {
+	At           string `json:"at"`
+	ClientID     string `json:"clientId,omitempty"`
+	EndpointKind string `json:"endpointKind,omitempty"`
+	EndpointID   string `json:"endpointId,omitempty"`
+	Reason       string `json:"reason"`
+	ClosedPipes  int    `json:"closedPipes"`
+	Error        string `json:"error,omitempty"`
 }
 
 func NewRuntimeManager() *RuntimeManager {
@@ -94,6 +119,12 @@ func NewRuntimeManagerWithFactory(factory func() RuntimeController) *RuntimeMana
 		factory = func() RuntimeController { return core.NewSupervisor() }
 	}
 	return &RuntimeManager{newController: factory}
+}
+
+func (m *RuntimeManager) SetLimitConfigRefresher(refresher func(RuntimeState, time.Time) (config.RuntimeConfig, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.limitConfigRefresher = refresher
 }
 
 func (m *RuntimeManager) Apply(runtime *config.GeneratedRuntime, cfg ...config.RuntimeConfig) (RuntimeState, error) {
@@ -157,16 +188,83 @@ func (m *RuntimeManager) Stop() (RuntimeState, error) {
 	return m.stateLocked(), nil
 }
 
+func (m *RuntimeManager) RestartComponent(component string) (RuntimeState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.controller == nil || m.activeRuntime == nil {
+		return m.stateLocked(), fmt.Errorf("runtime is not running")
+	}
+	controller, ok := m.controller.(runtimeComponentController)
+	if !ok {
+		return m.stateLocked(), fmt.Errorf("runtime does not support component lifecycle actions")
+	}
+	if err := controller.RestartComponent(component, m.activeRuntime); err != nil {
+		m.lastError = err.Error()
+		return m.stateLocked(), err
+	}
+	m.lastReloadMode = "component-restart:" + component
+	m.lastAppliedAt = time.Now()
+	m.lastError = ""
+	return m.stateLocked(), nil
+}
+
+func (m *RuntimeManager) StopComponent(component string) (RuntimeState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.controller == nil {
+		return m.stateLocked(), nil
+	}
+	controller, ok := m.controller.(runtimeComponentController)
+	if !ok {
+		return m.stateLocked(), fmt.Errorf("runtime does not support component lifecycle actions")
+	}
+	if err := controller.StopComponent(component); err != nil {
+		m.lastError = err.Error()
+		return m.stateLocked(), err
+	}
+	m.lastReloadMode = "component-stop:" + component
+	m.lastError = ""
+	return m.stateLocked(), nil
+}
+
 func (m *RuntimeManager) State() RuntimeState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.stateLocked()
 }
 
-func (m *RuntimeManager) EnforceClientLimits(cfg config.RuntimeConfig, now time.Time) (RuntimeState, []ClientEnforcementEvent, error) {
+func (m *RuntimeManager) DialXrayTCP(ctx context.Context, outboundTag, host string, port uint16) (net.Conn, error) {
+	m.mu.Lock()
+	controller := m.controller
+	m.mu.Unlock()
+	if controller == nil {
+		return nil, fmt.Errorf("runtime is not running")
+	}
+	dialer, ok := controller.(runtimeXrayDialer)
+	if !ok {
+		return nil, fmt.Errorf("runtime does not provide embedded xray dialing")
+	}
+	return dialer.DialXrayTCP(ctx, outboundTag, host, port)
+}
+
+func (m *RuntimeManager) DiagnoseConnector(ctx context.Context, endpointID, kind string, duration time.Duration) (core.ConnectorDiagnostic, error) {
+	m.mu.Lock()
+	controller := m.controller
+	m.mu.Unlock()
+	if controller == nil {
+		return core.ConnectorDiagnostic{}, fmt.Errorf("runtime is not running")
+	}
+	diagnoser, ok := controller.(runtimeConnectorDiagnoser)
+	if !ok {
+		return core.ConnectorDiagnostic{}, fmt.Errorf("runtime does not provide connector diagnostics")
+	}
+	return diagnoser.DiagnoseConnector(ctx, endpointID, kind, duration)
+}
+
+func (m *RuntimeManager) EnforceLimits(cfg config.RuntimeConfig, now time.Time) (RuntimeState, []EnforcementEvent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	events, err := m.enforceClientLimitsLocked(cfg, now)
+	events, err := m.enforceLimitsLocked(cfg, now)
 	return m.stateLocked(), events, err
 }
 
@@ -175,7 +273,7 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 		Running:           m.controller != nil,
 		Generation:        m.generation,
 		LastError:         m.lastError,
-		EnforcementEvents: append([]ClientEnforcementEvent(nil), m.enforcementEvents...),
+		EnforcementEvents: append([]EnforcementEvent(nil), m.enforcementEvents...),
 	}
 	if !m.startedAt.IsZero() {
 		state.StartedAt = m.startedAt.UTC().Format(time.RFC3339Nano)
@@ -211,18 +309,23 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 			remote = accepted
 		}
 		state.UDPPipes = append(state.UDPPipes, RuntimePipeState{
-			EndpointID:   pipe.Pipe.EndpointID,
-			EndpointKind: pipe.Pipe.EndpointKind,
-			Transport:    "udp",
-			RouteID:      pipe.Pipe.RouteID,
-			DeviceID:     pipe.Pipe.DeviceID,
-			DeviceName:   pipe.DeviceName,
-			ClientID:     pipe.Pipe.Binding.ClientID,
-			AddressID:    pipe.Pipe.Binding.AddressID,
-			LocalAddr:    addrString(pipe.LocalAddr),
-			RemoteAddr:   addrString(remote),
-			LastError:    lastErr,
-			Counters:     pipe.Counters(),
+			EndpointID:          pipe.Pipe.EndpointID,
+			EndpointKind:        pipe.Pipe.EndpointKind,
+			Transport:           "udp",
+			RouteID:             pipe.Pipe.RouteID,
+			DeviceID:            pipe.Pipe.DeviceID,
+			DeviceName:          pipe.DeviceName,
+			ClientID:            pipe.Pipe.Binding.ClientID,
+			AddressID:           pipe.Pipe.Binding.AddressID,
+			LocalAddr:           addrString(pipe.LocalAddr),
+			RemoteAddr:          addrString(remote),
+			ConfirmedPathMTU:    pipe.Pipe.ConfirmedPathMTU,
+			EffectiveNetworkMTU: pipe.Pipe.EffectiveNetworkMTU,
+			MaxDatagramPayload:  pipe.Pipe.MaxDatagramPayload,
+			TCPMSSIPv4:          pipe.Pipe.TCPMSSIPv4,
+			TCPMSSIPv6:          pipe.Pipe.TCPMSSIPv6,
+			LastError:           lastErr,
+			Counters:            pipe.Counters(),
 		})
 	}
 	for _, pipe := range m.controller.TCPPipes() {
@@ -234,17 +337,28 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 		if accepted := pipe.AcceptedRemoteAddr(); accepted.IsValid() {
 			remote = accepted
 		}
+		transport := "tcp"
+		xrayRuntime := ""
+		remoteAddress := addrString(remote)
+		if pipe.Pipe.ExternalXrayBridge {
+			transport = "xray"
+			xrayRuntime = "external"
+			remoteAddress = net.JoinHostPort(pipe.Pipe.XrayRemote, fmt.Sprint(pipe.Pipe.XrayPort))
+		}
 		state.TCPPipes = append(state.TCPPipes, RuntimePipeState{
 			EndpointID:   pipe.Pipe.EndpointID,
 			EndpointKind: pipe.Pipe.EndpointKind,
-			Transport:    "tcp",
+			Transport:    transport,
+			XrayRuntime:  xrayRuntime,
 			RouteID:      pipe.Pipe.RouteID,
 			DeviceID:     pipe.Pipe.DeviceID,
 			DeviceName:   pipe.DeviceName,
 			ClientID:     pipe.Pipe.Binding.ClientID,
 			AddressID:    pipe.Pipe.Binding.AddressID,
 			LocalAddr:    addrString(pipe.LocalAddr),
-			RemoteAddr:   addrString(remote),
+			RemoteAddr:   remoteAddress,
+			TCPMSSIPv4:   pipe.Pipe.TCPMaxSeg,
+			TCPMSSIPv6:   pipe.Pipe.TCPMaxSeg,
 			Counters:     pipe.Counters(),
 			LastError:    lastErr,
 		})
@@ -258,6 +372,7 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 			EndpointID:   pipe.Pipe.EndpointID,
 			EndpointKind: pipe.Pipe.EndpointKind,
 			Transport:    "xray",
+			XrayRuntime:  "embedded",
 			RouteID:      pipe.Pipe.RouteID,
 			DeviceID:     pipe.Pipe.DeviceID,
 			DeviceName:   pipe.DeviceName,
@@ -370,13 +485,30 @@ func (m *RuntimeManager) startEnforcementLocked(cfg config.RuntimeConfig) {
 		for {
 			select {
 			case <-ticker.C:
-				_, _, _ = m.EnforceClientLimits(cfg, time.Now())
+				now := time.Now()
+				m.mu.Lock()
+				refresher := m.limitConfigRefresher
+				m.mu.Unlock()
+				if refresher != nil {
+					if refreshed, err := refresher(m.State(), now); err == nil {
+						cfg = refreshed
+						cloned := cloneRuntimeConfigForEnforcement(refreshed)
+						m.mu.Lock()
+						m.activeConfig = &cloned
+						m.mu.Unlock()
+					} else {
+						m.mu.Lock()
+						m.lastError = err.Error()
+						m.mu.Unlock()
+					}
+				}
+				_, _, _ = m.EnforceLimits(cfg, now)
 			case <-stop:
 				return
 			}
 		}
 	}()
-	_, _ = m.enforceClientLimitsLocked(cfg, time.Now())
+	_, _ = m.enforceLimitsLocked(cfg, time.Now())
 }
 
 func (m *RuntimeManager) stopEnforcementLocked() {
@@ -392,20 +524,21 @@ func (m *RuntimeManager) stopEnforcementLocked() {
 	m.mu.Lock()
 }
 
-func (m *RuntimeManager) enforceClientLimitsLocked(cfg config.RuntimeConfig, now time.Time) ([]ClientEnforcementEvent, error) {
+func (m *RuntimeManager) enforceLimitsLocked(cfg config.RuntimeConfig, now time.Time) ([]EnforcementEvent, error) {
 	if m.controller == nil {
 		return nil, nil
 	}
 	plans := BuildClientEnforcementPlan(cfg, m.stateLocked(), now)
-	if len(plans) == 0 {
+	listenerPlans := BuildListenerEnforcementPlan(cfg, m.stateLocked(), now)
+	if len(plans) == 0 && len(listenerPlans) == 0 {
 		return nil, nil
 	}
-	events := make([]ClientEnforcementEvent, 0, len(plans))
+	events := make([]EnforcementEvent, 0, len(plans)+len(listenerPlans))
 	var firstErr error
 	at := now.UTC().Format(time.RFC3339Nano)
 	for _, plan := range plans {
 		closed, err := m.controller.CloseClientPipes(plan.ClientID)
-		event := ClientEnforcementEvent{
+		event := EnforcementEvent{
 			At:          at,
 			ClientID:    plan.ClientID,
 			Reason:      plan.Reason,
@@ -421,11 +554,30 @@ func (m *RuntimeManager) enforceClientLimitsLocked(cfg config.RuntimeConfig, now
 			events = append(events, event)
 		}
 	}
+	for _, plan := range listenerPlans {
+		closed, err := m.controller.CloseEndpointPipes(plan.EndpointKind, plan.EndpointID)
+		event := EnforcementEvent{
+			At:           at,
+			EndpointKind: plan.EndpointKind,
+			EndpointID:   plan.EndpointID,
+			Reason:       plan.Reason,
+			ClosedPipes:  closed,
+		}
+		if err != nil {
+			event.Error = err.Error()
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		if closed > 0 || err != nil {
+			events = append(events, event)
+		}
+	}
 	if len(events) > 0 {
 		m.lastEnforcedAt = now
 		m.enforcementEvents = append(m.enforcementEvents, events...)
 		if len(m.enforcementEvents) > 50 {
-			m.enforcementEvents = append([]ClientEnforcementEvent(nil), m.enforcementEvents[len(m.enforcementEvents)-50:]...)
+			m.enforcementEvents = append([]EnforcementEvent(nil), m.enforcementEvents[len(m.enforcementEvents)-50:]...)
 		}
 	}
 	if firstErr != nil {
@@ -452,6 +604,7 @@ func cloneGeneratedRuntime(in *config.GeneratedRuntime) *config.GeneratedRuntime
 		Listeners:    append([]config.RuntimeEndpoint(nil), in.Listeners...),
 		Connectors:   append([]config.RuntimeEndpoint(nil), in.Connectors...),
 		Routes:       append([]config.RuntimeRoute(nil), in.Routes...),
+		Clients:      append([]model.Client(nil), in.Clients...),
 		XrayProfiles: append([]config.RuntimeXrayProfile(nil), in.XrayProfiles...),
 		Settings:     append([]config.RuntimeSettings(nil), in.Settings...),
 		UDPPipes:     append([]config.RuntimeUDPPipe(nil), in.UDPPipes...),

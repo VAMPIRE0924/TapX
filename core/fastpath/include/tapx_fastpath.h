@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define TAPX_FASTPATH_ABI_VERSION 5u
+#define TAPX_FASTPATH_ABI_VERSION 8u
 
 enum tapx_frame_kind {
     TAPX_FRAME_TUN = 1,
@@ -69,7 +69,11 @@ struct tapx_udp_pipe_config {
     int udp_fd;
     uint32_t frame_kind;
     uint32_t max_frame_size;
+    uint32_t max_datagram_payload;
     uint32_t peer_mode;
+    uint32_t address_guard_remote;
+    uint64_t device_to_network_rate_bps;
+    uint64_t network_to_device_rate_bps;
     struct sockaddr_storage peer_addr;
     socklen_t peer_addr_len;
     struct tapx_address_guard guard;
@@ -83,6 +87,9 @@ struct tapx_tcp_pipe_config {
     uint32_t frame_kind;
     uint32_t max_frame_size;
     uint32_t length_mode;
+    uint32_t address_guard_remote;
+    uint64_t device_to_network_rate_bps;
+    uint64_t network_to_device_rate_bps;
     struct tapx_address_guard guard;
     struct tapx_vkey_guard vkey;
     struct tapx_fastpath_counters *counters;
@@ -92,6 +99,8 @@ struct tapx_worker;
 
 uint32_t tapx_fastpath_abi_version(void);
 void tapx_fastpath_counters_reset(struct tapx_fastpath_counters *counters);
+void tapx_fastpath_counters_snapshot(const struct tapx_fastpath_counters *counters,
+                                     struct tapx_fastpath_counters *snapshot);
 int tapx_udp_pipe_start(const struct tapx_udp_pipe_config *config, struct tapx_worker **worker);
 int tapx_tcp_pipe_start(const struct tapx_tcp_pipe_config *config, struct tapx_worker **worker);
 int tapx_worker_stop(struct tapx_worker *worker);

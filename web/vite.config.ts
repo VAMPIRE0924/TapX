@@ -1,37 +1,47 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const rootDir = fileURLToPath(new URL('.', import.meta.url));
+
+const backendTarget = process.env.TAPX_BACKEND_TARGET || 'http://127.0.0.1:8080';
+
+function sharedVendorChunk(id: string): string | undefined {
+  const normalized = id.replace(/\\/g, '/');
+  if (!normalized.includes('/node_modules/')) return undefined;
+  if (/\/node_modules\/(react|react-dom|scheduler)\//.test(normalized)) return 'vendor-react';
+  if (normalized.includes('/node_modules/@ant-design/icons/')) return 'vendor-icons';
+  if (
+    normalized.includes('/node_modules/@ant-design/cssinjs/')
+    || normalized.includes('/node_modules/@ant-design/fast-color/')
+    || normalized.includes('/node_modules/antd/es/theme/')
+  ) return 'vendor-theme';
+  return undefined;
+}
 
 export default defineConfig({
   base: './',
   plugins: [react()],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, 'src'),
-    },
-  },
-  build: {
-    outDir: '../internal/panel/static',
-    emptyOutDir: true,
-    sourcemap: false,
-    target: 'es2020',
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (!id.includes('node_modules')) return undefined;
-          if (id.includes('/antd/') || id.includes('/@ant-design/')) return 'vendor-antd';
-          if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/scheduler/')) return 'vendor-react';
-          if (id.includes('/codemirror/') || id.includes('/@codemirror/')) return 'vendor-codemirror';
-          return 'vendor';
-        },
+  server: {
+    strictPort: false,
+    proxy: {
+      '^/api(?:/|$)': {
+        target: backendTarget,
+        changeOrigin: true,
       },
     },
   },
-  server: {
-    port: 5173,
-    strictPort: true,
-    proxy: {
-      '/api': 'http://127.0.0.1:8080',
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
+    rollupOptions: {
+      input: {
+        panel: `${rootDir}index.html`,
+        login: `${rootDir}login.html`,
+      },
+      output: {
+        manualChunks: sharedVendorChunk,
+      },
     },
   },
 });

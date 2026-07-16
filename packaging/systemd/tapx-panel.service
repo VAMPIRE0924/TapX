@@ -6,7 +6,7 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/tapx/tapx.env
-ExecStart=/usr/local/bin/tapx-panel -db=${TAPX_DB_PATH} -listen=${TAPX_PANEL_LISTEN} -base-path=${TAPX_PANEL_BASE_PATH}
+ExecStart=/usr/local/bin/tapx-panel -listen=${TAPX_PANEL_LISTEN} -base-path=${TAPX_PANEL_BASE_PATH}
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576

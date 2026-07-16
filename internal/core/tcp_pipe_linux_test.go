@@ -23,6 +23,7 @@ func TestListenTCPAppliesAdvancedSocketSettings(t *testing.T) {
 		BindAddress:   "127.0.0.1",
 		ReceiveBuffer: 8192,
 		SendBuffer:    16384,
+		TCPMaxSeg:     1200,
 	}
 
 	listener, local, err := listenTCP(pipe)
@@ -43,6 +44,11 @@ func TestListenTCPAppliesAdvancedSocketSettings(t *testing.T) {
 	fd := int(file.Fd())
 	assertSockoptAtLeast(t, fd, unix.SO_RCVBUF, pipe.ReceiveBuffer)
 	assertSockoptAtLeast(t, fd, unix.SO_SNDBUF, pipe.SendBuffer)
+	if got, err := unix.GetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_MAXSEG); err != nil {
+		t.Fatalf("getsockopt TCP_MAXSEG: %v", err)
+	} else if got != pipe.TCPMaxSeg {
+		t.Fatalf("TCP_MAXSEG = %d, want %d", got, pipe.TCPMaxSeg)
+	}
 }
 
 func TestDialTCPUsesBindAddress(t *testing.T) {

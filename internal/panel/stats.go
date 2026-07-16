@@ -60,6 +60,12 @@ type ClientEnforcementPlanItem struct {
 	Reason   string
 }
 
+type EndpointEnforcementPlanItem struct {
+	EndpointKind string
+	EndpointID   string
+	Reason       string
+}
+
 func BuildStatsReport(cfg config.RuntimeConfig, state RuntimeState, now time.Time) StatsReport {
 	acc := &statsAccumulator{
 		transport: map[string]*StatsBucket{},
@@ -79,8 +85,9 @@ func BuildStatsReport(cfg config.RuntimeConfig, state RuntimeState, now time.Tim
 		acc.addPipe(pipe, names)
 	}
 
-	clients := clientQuotaStates(cfg.Clients, acc.clients, now)
-	adjustClientBuckets(acc.clients, cfg.Clients)
+	adjustEndpointBuckets(acc.endpoints, cfg, state.Generation)
+	clients := clientQuotaStates(cfg.Clients, acc.clients, now, state.Generation)
+	adjustClientBuckets(acc.clients, cfg.Clients, state.Generation)
 	return StatsReport{
 		GeneratedAt: now.UTC().Format(time.RFC3339Nano),
 		Runtime:     state,
@@ -115,6 +122,35 @@ func BuildClientEnforcementPlan(cfg config.RuntimeConfig, state RuntimeState, no
 				ClientID: client.ID,
 				Reason:   reason,
 			})
+		}
+	}
+	return out
+}
+
+func BuildListenerEnforcementPlan(cfg config.RuntimeConfig, state RuntimeState, now time.Time) []EndpointEnforcementPlanItem {
+	report := BuildStatsReport(cfg, state, now)
+	buckets := make(map[string]StatsBucket, len(report.ByEndpoint))
+	for _, bucket := range report.ByEndpoint {
+		buckets[bucket.ID] = bucket
+	}
+	out := make([]EndpointEnforcementPlanItem, 0)
+	unixNow := now.Unix()
+	for _, listener := range cfg.Listeners {
+		bucket, active := buckets["listener:"+listener.ID]
+		if !active || bucket.Pipes == 0 {
+			continue
+		}
+		reason := ""
+		switch {
+		case !listener.Enabled:
+			reason = "disabled"
+		case listener.ExpiresAt > 0 && listener.ExpiresAt <= unixNow:
+			reason = "expired"
+		case listener.TrafficCap > 0 && bucket.Counters.RXBytes+bucket.Counters.TXBytes >= listener.TrafficCap:
+			reason = "quota"
+		}
+		if reason != "" {
+			out = append(out, EndpointEnforcementPlanItem{EndpointKind: "listener", EndpointID: listener.ID, Reason: reason})
 		}
 	}
 	return out
@@ -213,7 +249,7 @@ func sortedBuckets(index map[string]*StatsBucket) []StatsBucket {
 	return out
 }
 
-func clientQuotaStates(clients []model.Client, buckets map[string]*StatsBucket, now time.Time) []ClientQuotaState {
+func clientQuotaStates(clients []model.Client, buckets map[string]*StatsBucket, now time.Time, generation uint64) []ClientQuotaState {
 	out := make([]ClientQuotaState, 0, len(clients))
 	unixNow := now.Unix()
 	for _, client := range clients {
@@ -223,7 +259,7 @@ func clientQuotaStates(clients []model.Client, buckets map[string]*StatsBucket, 
 			counters = bucket.Counters
 			activePipes = bucket.Pipes
 		}
-		counters = adjustClientCounters(client, counters)
+		counters = adjustClientCounters(client, counters, generation)
 		used := counters.RXBytes + counters.TXBytes
 		state := ClientQuotaState{
 			ID:             client.ID,
@@ -253,19 +289,43 @@ func clientQuotaStates(clients []model.Client, buckets map[string]*StatsBucket, 
 	return out
 }
 
-func adjustClientBuckets(buckets map[string]*StatsBucket, clients []model.Client) {
+func adjustClientBuckets(buckets map[string]*StatsBucket, clients []model.Client, generation uint64) {
 	for _, client := range clients {
 		bucket := buckets[client.ID]
 		if bucket == nil {
 			continue
 		}
-		bucket.Counters = adjustClientCounters(client, bucket.Counters)
+		bucket.Counters = adjustClientCounters(client, bucket.Counters, generation)
 	}
 }
 
-func adjustClientCounters(client model.Client, counters StatsCounters) StatsCounters {
-	counters.RXBytes = subtractCounterOffset(counters.RXBytes, client.TrafficRXOffset)
-	counters.TXBytes = subtractCounterOffset(counters.TXBytes, client.TrafficTXOffset)
+func adjustClientCounters(client model.Client, counters StatsCounters, generation uint64) StatsCounters {
+	return adjustTrafficCounters(counters, client.TrafficRXOffset, client.TrafficTXOffset, client.TrafficResetGeneration, generation)
+}
+
+func adjustEndpointBuckets(buckets map[string]*StatsBucket, cfg config.RuntimeConfig, generation uint64) {
+	for _, listener := range cfg.Listeners {
+		adjustEndpointBucket(buckets, "listener:"+listener.ID, listener.TrafficRXOffset, listener.TrafficTXOffset, listener.TrafficResetGeneration, generation)
+	}
+	for _, connector := range cfg.Connectors {
+		adjustEndpointBucket(buckets, "connector:"+connector.ID, connector.TrafficRXOffset, connector.TrafficTXOffset, connector.TrafficResetGeneration, generation)
+	}
+}
+
+func adjustEndpointBucket(buckets map[string]*StatsBucket, key string, rxOffset, txOffset, resetGeneration, generation uint64) {
+	bucket := buckets[key]
+	if bucket == nil {
+		return
+	}
+	bucket.Counters = adjustTrafficCounters(bucket.Counters, rxOffset, txOffset, resetGeneration, generation)
+}
+
+func adjustTrafficCounters(counters StatsCounters, rxOffset, txOffset, resetGeneration, generation uint64) StatsCounters {
+	if resetGeneration != 0 && resetGeneration != generation {
+		return counters
+	}
+	counters.RXBytes = subtractCounterOffset(counters.RXBytes, rxOffset)
+	counters.TXBytes = subtractCounterOffset(counters.TXBytes, txOffset)
 	return counters
 }
 

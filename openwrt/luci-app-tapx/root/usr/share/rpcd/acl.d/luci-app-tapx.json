@@ -4,17 +4,21 @@
     "read": {
       "uci": [ "tapx" ],
       "file": {
-        "/etc/tapx/runtime.json": [ "read" ],
-        "/etc/tapx/runtime.json.example": [ "read" ],
         "/usr/bin/tapx-core": [ "exec" ],
-        "/etc/init.d/tapx": [ "exec" ]
+        "/usr/bin/tapx-panel": [ "exec" ],
+        "/etc/init.d/tapx": [ "exec" ],
+        "/etc/init.d/tapx-panel": [ "exec" ],
+        "/usr/libexec/tapx-openwrt-config": [ "exec" ],
+        "/sbin/logread": [ "exec" ]
       }
     },
     "write": {
       "uci": [ "tapx" ],
       "file": {
-        "/etc/tapx/runtime.json": [ "write" ],
-        "/etc/init.d/tapx": [ "exec" ]
+        "/etc/init.d/tapx": [ "exec" ],
+        "/etc/init.d/tapx-panel": [ "exec" ],
+        "/usr/libexec/tapx-openwrt-config": [ "exec" ],
+        "/tmp/tapx-openwrt-restore.tar.gz": [ "write" ]
       }
     }
   }

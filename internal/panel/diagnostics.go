@@ -13,6 +13,7 @@ import (
 type DiagnosticReport struct {
 	Product      string             `json:"product"`
 	Version      string             `json:"version"`
+	Components   ComponentVersions  `json:"components"`
 	GeneratedAt  string             `json:"generatedAt"`
 	Process      ProcessDiagnostic  `json:"process"`
 	Fastpath     FastpathDiagnostic `json:"fastpath"`
@@ -21,15 +22,24 @@ type DiagnosticReport struct {
 	Runtime      RuntimeState       `json:"runtime"`
 }
 
+type ComponentVersions struct {
+	Panel        string `json:"panel"`
+	TapX         string `json:"tapx"`
+	EmbeddedXray string `json:"embeddedXray"`
+}
+
 type ProcessDiagnostic struct {
-	StartedAt    string `json:"startedAt"`
-	UptimeSecond int64  `json:"uptimeSecond"`
-	GOOS         string `json:"goos"`
-	GOARCH       string `json:"goarch"`
-	GoVersion    string `json:"goVersion"`
-	Goroutines   int    `json:"goroutines"`
-	HeapAlloc    uint64 `json:"heapAlloc"`
-	HeapSys      uint64 `json:"heapSys"`
+	StartedAt     string `json:"startedAt"`
+	UptimeSecond  int64  `json:"uptimeSecond"`
+	GOOS          string `json:"goos"`
+	GOARCH        string `json:"goarch"`
+	GoVersion     string `json:"goVersion"`
+	Goroutines    int    `json:"goroutines"`
+	HeapAlloc     uint64 `json:"heapAlloc"`
+	HeapSys       uint64 `json:"heapSys"`
+	HeapObjects   uint64 `json:"heapObjects"`
+	NumGC         uint32 `json:"numGC"`
+	LastGCPauseNs uint64 `json:"lastGCPauseNs"`
 }
 
 type FastpathDiagnostic struct {
@@ -54,19 +64,31 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buildDiagnosticReport(cfg config.RuntimeConfig, now time.Time) DiagnosticReport {
 	var mem goruntime.MemStats
 	goruntime.ReadMemStats(&mem)
+	var lastGCPause uint64
+	if mem.NumGC > 0 {
+		lastGCPause = mem.PauseNs[(mem.NumGC+255)%256]
+	}
 	return DiagnosticReport{
-		Product:     "TapX",
-		Version:     buildinfo.Version,
+		Product: "TapX",
+		Version: buildinfo.Version,
+		Components: ComponentVersions{
+			Panel:        buildinfo.Version,
+			TapX:         buildinfo.Version,
+			EmbeddedXray: buildinfo.XrayVersion(),
+		},
 		GeneratedAt: now.Format(time.RFC3339Nano),
 		Process: ProcessDiagnostic{
-			StartedAt:    s.started.UTC().Format(time.RFC3339Nano),
-			UptimeSecond: int64(time.Since(s.started).Seconds()),
-			GOOS:         goruntime.GOOS,
-			GOARCH:       goruntime.GOARCH,
-			GoVersion:    goruntime.Version(),
-			Goroutines:   goruntime.NumGoroutine(),
-			HeapAlloc:    mem.HeapAlloc,
-			HeapSys:      mem.HeapSys,
+			StartedAt:     s.started.UTC().Format(time.RFC3339Nano),
+			UptimeSecond:  int64(time.Since(s.started).Seconds()),
+			GOOS:          goruntime.GOOS,
+			GOARCH:        goruntime.GOARCH,
+			GoVersion:     goruntime.Version(),
+			Goroutines:    goruntime.NumGoroutine(),
+			HeapAlloc:     mem.HeapAlloc,
+			HeapSys:       mem.HeapSys,
+			HeapObjects:   mem.HeapObjects,
+			NumGC:         mem.NumGC,
+			LastGCPauseNs: lastGCPause,
 		},
 		Fastpath: FastpathDiagnostic{
 			ABI: fastpath.ABI(),

@@ -21,17 +21,18 @@ import (
 )
 
 type verifier struct {
-	root       string
-	requireIPK bool
-	failures   []string
+	root                   string
+	requireOpenWrtPackages bool
+	failures               []string
 }
 
 func main() {
 	root := flag.String("repo", ".", "repository root")
-	requireIPK := flag.Bool("require-openwrt-ipk", false, "fail when OpenWrt ipk files are missing")
+	requirePackages := flag.Bool("require-openwrt-package", false, "fail when native OpenWrt package files are missing")
+	requireIPK := flag.Bool("require-openwrt-ipk", false, "deprecated alias for -require-openwrt-package")
 	flag.Parse()
 
-	v := verifier{root: cleanRoot(*root), requireIPK: *requireIPK}
+	v := verifier{root: cleanRoot(*root), requireOpenWrtPackages: *requirePackages || *requireIPK}
 	v.checkRequiredFiles()
 	v.checkJSONFiles()
 	v.checkRuntimeExamples()
@@ -90,8 +91,22 @@ func (v *verifier) checkRuntimeReload() {
 			"TestRuntimeManagerPrepareFirstFailureKeepsOldRuntime",
 		},
 		"web/src/pages/DashboardPage.tsx": {
-			"Reload Mode",
-			"lastReloadMode",
+			"restartRuntimeComponent",
+			"stopRuntimeComponent",
+			"dashboard.reload",
+		},
+		"web/src/shared/api.ts": {
+			"/api/runtime/components/",
+			"restartRuntimeComponent",
+			"stopRuntimeComponent",
+		},
+		"internal/core/supervisor.go": {
+			"RuntimeComponentTapX",
+			"RestartComponent",
+			"StopComponent",
+		},
+		"internal/core/supervisor_test.go": {
+			"TestSupervisorComponentStopsAreIsolated",
 		},
 	}
 	for rel, markers := range checks {
@@ -127,9 +142,14 @@ func (v *verifier) checkRequiredFiles() {
 		".github/workflows/ci.yml",
 		".github/workflows/release.yml",
 		"web/package.json",
-		"web/src/App.tsx",
-		"web/src/schema.ts",
-		"web/src/pages/XrayPage.tsx",
+		"web/src/app/App.tsx",
+		"web/src/app/runtime-path.ts",
+		"web/src/shared/api.ts",
+		"web/src/pages/KernelPage.tsx",
+		"scripts/build/sync-panel-web.mjs",
+		"scripts/build/linux.sh",
+		"scripts/build/linux-amd64.sh",
+		"scripts/build/linux-arm64.sh",
 		"scripts/install/install.sh",
 		"scripts/build/release-archives.sh",
 		"scripts/lab/common.ps1",
@@ -144,9 +164,12 @@ func (v *verifier) checkRequiredFiles() {
 		"scripts/integration/raw-udp-dtls-tun-netns.sh",
 		"scripts/integration/address-guard-netns.sh",
 		"scripts/build/openwrt-x86-64-ipk.sh",
-		"scripts/build/mkipk.go",
+		"scripts/build/openwrt-x86-64-packages.sh",
+		"scripts/install/openwrt-install.sh",
+		"openwrt/Makefile",
 		"openwrt/tapx-core/files/etc/config/tapx",
 		"openwrt/tapx-core/files/etc/init.d/tapx",
+		"openwrt/tapx-panel/files/etc/init.d/tapx-panel",
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js",
 	}
 	if v.exists("AGENTS.md") {
@@ -242,13 +265,16 @@ func (v *verifier) checkDashboard() {
 			"/api/dashboard",
 			"handleDashboard",
 		},
-		"web/src/api.ts": {
+		"web/src/shared/api.ts": {
 			"/api/dashboard",
 		},
 		"web/src/pages/DashboardPage.tsx": {
-			"loadDashboard",
-			"RX Rate",
-			"Recent Logs",
+			"getDashboard",
+			"dashboard.management",
+			"dashboard.realtimeTransport",
+			"dashboard.dataPlane",
+			"dashboard.endpointStatus",
+			"dashboard.policyProtection",
 		},
 	}
 	if v.exists("docs/panel-api.md") {
@@ -294,22 +320,24 @@ func (v *verifier) checkClientTrafficReset() {
 			"/api/clients/",
 			"handleClientTraffic",
 		},
-		"web/src/pages/ObjectListPage.tsx": {
-			"reset-traffic",
-			"Reset Traffic",
+		"web/src/pages/UserPage.tsx": {
+			"resetClientTraffic",
+			"user.resetTraffic",
 		},
-		"web/src/schema.ts": {
+		"web/src/shared/api.ts": {
 			"TrafficResetAt",
 			"TrafficRXOffset",
+			"resetClientTraffic",
+			"managedTrafficResetPath",
+			"'clients'",
 		},
-		"web/src/api.ts": {
-			"/api/clients/",
-		},
-		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js": {
+	}
+	if v.exists("docs/panel-api.md") {
+		checks["docs/panel-api.md"] = []string{
+			"POST   /api/clients/{id}/traffic/reset",
 			"TrafficResetAt",
 			"TrafficRXOffset",
-			"TrafficTXOffset",
-		},
+		}
 	}
 	if v.exists("docs/panel-api.md") {
 		checks["docs/panel-api.md"] = []string{
@@ -393,11 +421,11 @@ func (v *verifier) checkExternalXrayBinaryManagement() {
 			"/api/xray/external/upload",
 			"/api/xray/external/download",
 		},
-		"web/src/pages/XrayPage.tsx": {
-			"Xray Binary",
-			"Official latest Linux x86_64",
+		"web/src/pages/KernelPage.tsx": {
+			"downloadExternalXray",
+			"uploadExternalXray",
 		},
-		"web/src/api.ts": {
+		"web/src/shared/api.ts": {
 			"/api/xray/external/status",
 			"/api/xray/external/upload",
 			"/api/xray/external/download",
@@ -429,43 +457,59 @@ func (v *verifier) checkLinuxInstall() {
 	checks := map[string][]string{
 		"cmd/tapx-panel/main.go": {
 			"base-path",
+			"db-driver",
 			"init-admin",
+			"panel-cert-file",
+			"disable-panel-https",
 			"PanelAuthEnabled",
 			"PanelHTTPS",
-			"ListenAndServeTLS",
+			"ServeTLS",
 			"HashPanelPassword",
 		},
 		"scripts/install/linux-install.sh": {
 			"TAPX_PANEL_BASE_PATH",
-			"TapX Linux 安装向导",
-			"TapX 管理菜单",
+			"TAPX_DB_DRIVER",
+			"TAPX_DB_SOURCE",
+			"1,English (default)",
+			"数据库选择",
+			"0.0.0.0:$PANEL_PORT",
 			"set-panel",
-			"core-apply",
+			"set-database",
 			"-init-admin",
-			"管理员密码仅保存一次",
+			"随机生成的密码只显示这一次",
 		},
 		"scripts/install/install.sh": {
 			"releases/latest/download",
-			"tapx-linux-amd64.tar.gz",
+			"detect_architecture",
+			"tapx-linux-${arch}.tar.gz",
+			"SHA256SUMS",
 			"TAPX_BUILD_DIR",
 		},
 		"scripts/build/release-archives.sh": {
 			"tapx-linux-amd64.tar.gz",
+			"tapx-linux-arm64.tar.gz",
 			"tapx-openwrt-x86-64.tar.gz",
 			"SHA256SUMS",
+			"tapx-update-manifest.json",
+			"embeddedXray",
 		},
 		"packaging/systemd/tapx.env": {
 			"TAPX_PANEL_BASE_PATH",
+			"TAPX_DB_DRIVER",
+			"TAPX_DB_SOURCE",
 		},
 		"packaging/systemd/tapx-panel.service": {
 			"-base-path=${TAPX_PANEL_BASE_PATH}",
+			"EnvironmentFile=-/etc/tapx/tapx.env",
 		},
 		"internal/panel/static/index.html": {
 			`<div id="root">`,
 			`./assets/`,
 		},
-		"web/src/api.ts": {
-			"apiURL",
+		"web/src/app/runtime-path.ts": {
+			"panelFetch",
+			"panelPath",
+			"tapx-base-path",
 		},
 	}
 	for rel, markers := range checks {
@@ -485,9 +529,6 @@ func (v *verifier) checkLinuxInstall() {
 
 func (v *verifier) checkClientSharing() {
 	checks := map[string][]string{
-		"go.mod": {
-			"github.com/skip2/go-qrcode",
-		},
 		"internal/model/model.go": {
 			"CredentialType",
 			"CredentialValue",
@@ -497,30 +538,25 @@ func (v *verifier) checkClientSharing() {
 		},
 		"internal/panel/share.go": {
 			"tapx://client/gzip/",
-			`Scheme:   "vless"`,
-			"qrcode.Encode",
+			`Scheme: "raw"`,
+			"buildClientLinks",
 			"BuildClientShare",
 		},
 		"internal/panel/server.go": {
 			"/api/share/clients/",
 			"handleClientShare",
 		},
-		"web/src/pages/ObjectListPage.tsx": {
-			"Client Share",
-			"loadClientShare",
+		"web/src/pages/UserPage.tsx": {
+			"getClientShare",
+			"copyShareLinks",
 		},
-		"web/src/api.ts": {
+		"web/src/shared/api.ts": {
 			"/api/share/clients",
 		},
 		"web/src/schema.ts": {
 			"CredentialType",
-			"Binding.ConnectorID",
+			"ConnectorID",
 			"IPv4Gateway",
-			"AllowDefaultRoute",
-		},
-		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js": {
-			"IPv4Gateway",
-			"IPv6Gateway",
 			"AllowDefaultRoute",
 		},
 	}
@@ -584,7 +620,7 @@ func (v *verifier) checkRawSecurityConfigSurface() {
 		},
 		"internal/core/udp_dtls_pipe_linux.go": {
 			"startDTLSConnector",
-			"rawUDPServerDTLSConfig",
+			"rawUDPServerDTLSOptions",
 			"acceptFirstDTLSPacket",
 		},
 		"scripts/lab/raw-protected-smoke.ps1": {
@@ -592,19 +628,12 @@ func (v *verifier) checkRawSecurityConfigSurface() {
 			"Raw UDP/DTLS/TUN",
 			"ip a show dev",
 		},
-		"web/src/schema.ts": {
-			"RawTCP.TLS.CertFile",
-			"RawUDP.DTLS.CertFile",
-			"RawUDP.DTLS.ReplayWindow",
-			"RawTCP.TLS.AllowInsecure",
-			"RawUDP.DTLS.AllowInsecure",
-		},
-		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js": {
-			"RawTCP.TLS.CertFile",
-			"RawUDP.DTLS.CertFile",
-			"RawUDP.DTLS.ReplayWindow",
-			"RawTCP.TLS.AllowInsecure",
-			"RawUDP.DTLS.AllowInsecure",
+		"web/src/shared/api.ts": {
+			"RawTCP?:",
+			"RawUDP?:",
+			"CertFile?:",
+			"ReplayWindow?:",
+			"AllowInsecure?:",
 		},
 	}
 	if v.exists("docs/requirements-map.md") {
@@ -663,30 +692,53 @@ func (v *verifier) checkOpenWrtLuCI() {
 	}
 	viewText := string(view)
 	for _, want := range []string{
-		"tapx-core",
-		"-check",
 		"/etc/init.d/tapx",
-		"Service status",
-		"Reload TapX",
+		"/etc/init.d/tapx-panel",
+		"/sbin/logread",
+		"监听网卡",
+		"初始化并保存",
+		"开机启动",
+		"PBKDF2",
+		"端口不可用",
 		"fs.exec",
-		"Object field editor",
-		"Append / Replace Object",
-		"Binding.ConnectorID",
-		"CredentialType",
-		"TrafficResetAt",
-		"RawUDP.ReceiveBuffer",
-		"RawTCP.FastOpen",
-		"RawTCP.TLS.CertFile",
-		"RawUDP.DTLS.CertFile",
-		"RawUDP.DTLS.ReplayWindow",
-		"Xray Profile",
-		"OpenWrt Build Target",
-		"IPv4Gateway",
-		"AllowDefaultRoute",
+		"不包含证书",
 	} {
 		if !strings.Contains(viewText, want) {
 			v.fail("LuCI view missing %q", want)
 		}
+	}
+	helper, err := os.ReadFile(v.path("openwrt/luci-app-tapx/root/usr/libexec/tapx-openwrt-config"))
+	if err != nil {
+		v.fail("read OpenWrt config helper: %v", err)
+	} else {
+		helperText := string(helper)
+		for _, want := range []string{
+			"etc/config/tapx etc/tapx/tapx.db",
+			"backup must contain only TapX UCI and database files",
+			"/rom/etc/config/tapx",
+			"/rom/etc/tapx/tapx.db",
+		} {
+			if !strings.Contains(helperText, want) {
+				v.fail("OpenWrt config helper missing %q", want)
+			}
+		}
+		for _, forbidden := range []string{"etc/tapx/cert", "etc/tapx/key", "runtime.json"} {
+			if strings.Contains(helperText, forbidden) {
+				v.fail("OpenWrt config helper must not archive %q", forbidden)
+			}
+		}
+	}
+	keep, err := os.ReadFile(v.path("openwrt/tapx-panel/files/lib/upgrade/keep.d/tapx"))
+	if err != nil {
+		v.fail("read OpenWrt sysupgrade keep list: %v", err)
+	} else if got, want := strings.TrimSpace(string(keep)), "/etc/config/tapx\n/etc/tapx/tapx.db"; got != want {
+		v.fail("OpenWrt sysupgrade keep list = %q, want only UCI and DB", got)
+	}
+	initScript, err := os.ReadFile(v.path("openwrt/tapx-core/files/etc/init.d/tapx"))
+	if err != nil {
+		v.fail("read OpenWrt core init: %v", err)
+	} else if !strings.Contains(string(initScript), "-export-runtime-config") {
+		v.fail("OpenWrt core init must regenerate runtime config from the database")
 	}
 	acl, err := os.ReadFile(v.path("openwrt/luci-app-tapx/root/usr/share/rpcd/acl.d/luci-app-tapx.json"))
 	if err != nil {
@@ -696,7 +748,10 @@ func (v *verifier) checkOpenWrtLuCI() {
 	aclText := string(acl)
 	for _, want := range []string{
 		"/usr/bin/tapx-core",
+		"/usr/bin/tapx-panel",
 		"/etc/init.d/tapx",
+		"/etc/init.d/tapx-panel",
+		"/sbin/logread",
 		"exec",
 	} {
 		if !strings.Contains(aclText, want) {
@@ -715,12 +770,17 @@ func freeTCPPort() (int, error) {
 }
 
 func (v *verifier) checkOpenWrtPackages() {
-	version := os.Getenv("TAPX_VERSION")
-	if version == "" {
-		version = "0.0.0-dev"
+	if !v.requireOpenWrtPackages {
+		return
 	}
-	packages := map[string]ipkExpectation{
-		fmt.Sprintf("build/openwrt-x86-64/packages/tapx-core_%s_x86_64.ipk", version): {
+	packageDir := v.path("build/openwrt-x86-64/packages")
+	patterns := []struct {
+		name   string
+		ipk    string
+		apk    string
+		expect ipkExpectation
+	}{
+		{name: "tapx-core", ipk: "tapx-core_*.ipk", apk: "tapx-core-*.apk", expect: ipkExpectation{
 			ControlContains: []string{
 				"Package: tapx-core",
 				"Architecture: x86_64",
@@ -733,53 +793,96 @@ func (v *verifier) checkOpenWrtPackages() {
 				"./etc/tapx/runtime.json.example",
 			},
 			Conffiles: []string{"/etc/config/tapx"},
-		},
-		fmt.Sprintf("build/openwrt-x86-64/packages/luci-app-tapx_%s_all.ipk", version): {
+		}},
+		{name: "luci-app-tapx", ipk: "luci-app-tapx_*.ipk", apk: "luci-app-tapx-*.apk", expect: ipkExpectation{
 			ControlContains: []string{
 				"Package: luci-app-tapx",
 				"Architecture: all",
-				"Depends: luci-base, tapx-core",
+				"luci-base",
+				"tapx-core",
+				"tapx-panel",
 			},
 			DataFiles: []string{
 				"./usr/share/luci/menu.d/luci-app-tapx.json",
 				"./usr/share/rpcd/acl.d/luci-app-tapx.json",
+				"./usr/libexec/tapx-openwrt-config",
 				"./www/luci-static/resources/view/tapx/config.js",
 			},
 			DataContains: map[string][]string{
 				"./usr/share/rpcd/acl.d/luci-app-tapx.json": {
 					"/usr/bin/tapx-core",
+					"/usr/bin/tapx-panel",
 					"/etc/init.d/tapx",
+					"/etc/init.d/tapx-panel",
+					"/sbin/logread",
 					"exec",
 				},
 				"./www/luci-static/resources/view/tapx/config.js": {
-					"Check saved runtime",
-					"Service status",
-					"Reload TapX",
+					"监听网卡",
+					"初始化并保存",
+					"PBKDF2",
 					"fs.exec",
-					"Object field editor",
-					"Append / Replace Object",
-					"Binding.ConnectorID",
-					"CredentialType",
-					"TrafficResetAt",
-					"RawUDP.ReceiveBuffer",
-					"RawUDP.DTLS.CertFile",
-					"RawUDP.DTLS.ReplayWindow",
-					"IPv4Gateway",
-					"AllowDefaultRoute",
+				},
+				"./usr/libexec/tapx-openwrt-config": {
+					"etc/config/tapx etc/tapx/tapx.db",
+					"/rom/etc/config/tapx",
+					"/rom/etc/tapx/tapx.db",
 				},
 			},
-		},
+		}},
+		{name: "tapx-panel", ipk: "tapx-panel_*.ipk", apk: "tapx-panel-*.apk", expect: ipkExpectation{
+			ControlContains: []string{
+				"Package: tapx-panel",
+				"Architecture: x86_64",
+				"libc",
+				"tapx-core",
+			},
+			DataFiles: []string{
+				"./usr/bin/tapx-panel",
+				"./etc/init.d/tapx-panel",
+				"./lib/upgrade/keep.d/tapx",
+			},
+			DataContains: map[string][]string{
+				"./lib/upgrade/keep.d/tapx": {
+					"/etc/config/tapx",
+					"/etc/tapx/tapx.db",
+				},
+			},
+		}},
 	}
-	for rel, expect := range packages {
-		if _, err := os.Stat(v.path(rel)); err != nil {
-			if v.requireIPK {
-				v.fail("missing OpenWrt package %s: %v", rel, err)
+	foundAny := false
+	format := ""
+	for _, item := range patterns {
+		ipks, _ := filepath.Glob(filepath.Join(packageDir, item.ipk))
+		apks, _ := filepath.Glob(filepath.Join(packageDir, item.apk))
+		matches := append(ipks, apks...)
+		if len(matches) == 0 {
+			if v.requireOpenWrtPackages {
+				v.fail("missing OpenWrt package %s", item.name)
 			}
 			continue
 		}
-		if err := verifyIPK(v.path(rel), expect); err != nil {
-			v.fail("verify ipk %s: %v", rel, err)
+		foundAny = true
+		if len(matches) != 1 {
+			v.fail("expected one OpenWrt package for %s, found %d", item.name, len(matches))
+			continue
 		}
+		ext := filepath.Ext(matches[0])
+		if format == "" {
+			format = ext
+		} else if format != ext {
+			v.fail("OpenWrt package formats are mixed: %s and %s", format, ext)
+		}
+		if ext == ".ipk" {
+			if err := verifyIPK(matches[0], item.expect); err != nil {
+				v.fail("verify ipk %s: %v", v.rel(matches[0]), err)
+			}
+		} else if info, err := os.Stat(matches[0]); err != nil || info.Size() < 512 {
+			v.fail("invalid apk %s", v.rel(matches[0]))
+		}
+	}
+	if foundAny && format != ".ipk" && format != ".apk" {
+		v.fail("unsupported OpenWrt package format %s", format)
 	}
 }
 

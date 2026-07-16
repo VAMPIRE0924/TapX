@@ -55,12 +55,51 @@ func TestManagerStartsExternalRuntimeAndCleansConfig(t *testing.T) {
 	}
 }
 
+func TestManagerAppliesExternalRuntimeConfigPathWorkDirAndArgs(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config", "xray.json")
+	var command *exec.Cmd
+	manager := NewManagerWithCommandFactory(func(_, generatedPath string) *exec.Cmd {
+		command = exec.Command(os.Args[0], "-test.run=TestXrayRuntimeHelperProcess", "--", generatedPath)
+		command.Env = append(os.Environ(), "TAPX_XRAY_HELPER=1")
+		return command
+	})
+	runtime := externalRuntimeForTest(root)
+	runtime.Settings[0].ExternalXrayConfigFile = configPath
+	runtime.Settings[0].ExternalXrayWorkDir = workDir
+	runtime.Settings[0].ExternalXrayArgs = "-test.run=TestXrayRuntimeHelperProcess\n--\n{config}"
+	if err := manager.Start(runtime); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if command.Dir != workDir {
+		t.Fatalf("command dir = %q, want %q", command.Dir, workDir)
+	}
+	if got := command.Args[len(command.Args)-1]; got != configPath {
+		t.Fatalf("last command arg = %q, want config path %q", got, configPath)
+	}
+	if state := manager.State(); state.ConfigPath != configPath {
+		t.Fatalf("state config path = %q, want %q", state.ConfigPath, configPath)
+	}
+	if err := manager.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("generated explicit config still exists or stat failed: %v", err)
+	}
+}
+
 func TestManagerStartsEmbeddedRuntimePrototype(t *testing.T) {
 	manager := NewManagerWithAdapters(func(binaryPath, configPath string) *exec.Cmd {
 		t.Fatal("command factory should not be called for embedded runtime")
 		return nil
 	}, NewPrototypeEmbeddedAdapter())
 	runtime := embeddedRuntimeForTest(t)
+	runtime.Devices = []config.RuntimeDevice{{ID: "tun0", MTU: 1500, LinkAutoOptimize: true}}
+	runtime.Listeners[0].Binding.DeviceID = "tun0"
 	if err := manager.Start(runtime); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -86,6 +125,8 @@ func TestManagerStartsEmbeddedXrayCoreRuntime(t *testing.T) {
 		return nil
 	})
 	runtime := embeddedRuntimeForTest(t)
+	runtime.Devices = []config.RuntimeDevice{{ID: "tun0", MTU: 1500, LinkAutoOptimize: true}}
+	runtime.Listeners[0].Binding.DeviceID = "tun0"
 	if err := manager.Start(runtime); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -102,6 +143,46 @@ func TestManagerStartsEmbeddedXrayCoreRuntime(t *testing.T) {
 	stopped := manager.State()
 	if stopped.Running || stopped.EndpointCount != 0 {
 		t.Fatalf("state after stop = %+v, want stopped", stopped)
+	}
+}
+
+func TestManagerReportsEmbeddedAndExternalStatesSeparately(t *testing.T) {
+	manager := NewManagerWithAdapters(func(_, configPath string) *exec.Cmd {
+		cmd := exec.Command(os.Args[0], "-test.run=TestXrayRuntimeHelperProcess", "--", configPath)
+		cmd.Env = append(os.Environ(), "TAPX_XRAY_HELPER=1")
+		return cmd
+	}, NewPrototypeEmbeddedAdapter())
+	runtime := externalRuntimeForTest(t.TempDir())
+	runtime.XrayProfiles = append(runtime.XrayProfiles, config.RuntimeXrayProfile{
+		ID:                  "xr-embedded",
+		Runtime:             model.XrayEmbedded,
+		InboundProtocol:     "dokodemo-door",
+		InboundSettingsJSON: `{"address":"127.0.0.1","port":80,"network":"tcp"}`,
+	})
+	runtime.Listeners = append(runtime.Listeners, config.RuntimeEndpoint{
+		ID:            "listener-embedded",
+		Transport:     model.TransportXray,
+		BindHost:      "127.0.0.1",
+		BindPort:      uint16(freeTCPPort(t)),
+		XrayProfileID: "xr-embedded",
+	})
+	if err := manager.Start(runtime); err != nil {
+		t.Fatalf("start mixed runtime: %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	states := manager.States()
+	if len(states) != 2 {
+		t.Fatalf("states = %+v, want embedded and external", states)
+	}
+	if states[0].Runtime != "embedded" || !states[0].Running || states[0].EndpointCount != 1 {
+		t.Fatalf("embedded state = %+v", states[0])
+	}
+	if states[1].Runtime != "external" || !states[1].Running || states[1].EndpointCount != 1 {
+		t.Fatalf("external state = %+v", states[1])
+	}
+	if aggregate := manager.State(); aggregate.Runtime != "mixed" || aggregate.EndpointCount != 2 {
+		t.Fatalf("aggregate state = %+v, want mixed compatibility state", aggregate)
 	}
 }
 

@@ -3,6 +3,8 @@
 package core
 
 import (
+	"errors"
+	"net"
 	"net/netip"
 	"testing"
 
@@ -75,6 +77,141 @@ func TestOpenUDPSocketRejectsInvalidBindAddress(t *testing.T) {
 	}, netip.AddrPort{})
 	if err == nil {
 		t.Fatal("openUDPSocket() error = nil, want invalid bind address error")
+	}
+}
+
+func TestOpenUDPSocketAutoOptimizeEnablesIPv4PathMTUDiscovery(t *testing.T) {
+	fd, _, err := openUDPSocket(config.RuntimeUDPPipe{
+		EndpointID:       "udp-auto-mtu",
+		EndpointKind:     "connector",
+		BindAddress:      "127.0.0.1",
+		LinkAutoOptimize: true,
+	}, netip.MustParseAddrPort("127.0.0.1:45000"))
+	if err != nil {
+		t.Fatalf("openUDPSocket() error = %v", err)
+	}
+	defer unix.Close(fd)
+
+	got, err := unix.GetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_MTU_DISCOVER)
+	if err != nil {
+		t.Fatalf("getsockopt IP_MTU_DISCOVER: %v", err)
+	}
+	if got != unix.IP_PMTUDISC_DO {
+		t.Fatalf("IP_MTU_DISCOVER = %d, want %d", got, unix.IP_PMTUDISC_DO)
+	}
+}
+
+func TestConfigureUDPSocketAutoOptimizeEnablesIPv6PathMTUDiscovery(t *testing.T) {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("IPv6 UDP socket unavailable: %v", err)
+	}
+	defer unix.Close(fd)
+	if err := configureUDPSocket(fd, config.RuntimeUDPPipe{LinkAutoOptimize: true}, unix.AF_INET6); err != nil {
+		t.Fatalf("configureUDPSocket() error = %v", err)
+	}
+	got, err := unix.GetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_MTU_DISCOVER)
+	if err != nil {
+		t.Fatalf("getsockopt IPV6_MTU_DISCOVER: %v", err)
+	}
+	if got != unix.IPV6_PMTUDISC_DO {
+		t.Fatalf("IPV6_MTU_DISCOVER = %d, want %d", got, unix.IPV6_PMTUDISC_DO)
+	}
+}
+
+func TestEnableUDPPathErrorQueueIPv4(t *testing.T) {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := enableUDPPathErrorQueue(fd, false); err != nil {
+		t.Fatalf("enableUDPPathErrorQueue() error = %v", err)
+	}
+	got, err := unix.GetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_RECVERR)
+	if err != nil {
+		t.Fatalf("getsockopt IP_RECVERR: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("IP_RECVERR = %d, want 1", got)
+	}
+}
+
+func TestConnectUDPSocketPinsConfirmedPeer(t *testing.T) {
+	peer := listenCoreUDP4(t)
+	defer peer.Close()
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	peerAddr := peer.LocalAddr().(*net.UDPAddr).AddrPort()
+	if err := connectUDPSocket(fd, peerAddr); err != nil {
+		t.Fatalf("connectUDPSocket() error = %v", err)
+	}
+	remote, err := unix.Getpeername(fd)
+	if err != nil {
+		t.Fatalf("getpeername: %v", err)
+	}
+	got, ok := remote.(*unix.SockaddrInet4)
+	if !ok || got.Port != int(peerAddr.Port()) || netip.AddrFrom4(got.Addr) != peerAddr.Addr() {
+		t.Fatalf("connected peer = %#v, want %s", remote, peerAddr)
+	}
+}
+
+func TestPrepareRawUDPWorkerSocketKeepsDispatchSocketUnconnected(t *testing.T) {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+
+	peer := netip.MustParseAddrPort("127.0.0.1:45000")
+	pipe := config.RuntimeUDPPipe{
+		EndpointID: "dispatch-listener", LinkAutoOptimize: true,
+		DispatchGroup: "raw-udp-listener",
+	}
+	if err := prepareRawUDPWorkerSocket(fd, pipe, peer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.Getpeername(fd); !errors.Is(err, unix.ENOTCONN) {
+		t.Fatalf("dispatch socket peer error = %v, want ENOTCONN", err)
+	}
+}
+
+func TestEnableUDPPathErrorQueueIPv6(t *testing.T) {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("IPv6 UDP socket unavailable: %v", err)
+	}
+	defer unix.Close(fd)
+	if err := enableUDPPathErrorQueue(fd, true); err != nil {
+		t.Fatalf("enableUDPPathErrorQueue() error = %v", err)
+	}
+	got, err := unix.GetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_RECVERR)
+	if err != nil {
+		t.Fatalf("getsockopt IPV6_RECVERR: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("IPV6_RECVERR = %d, want 1", got)
+	}
+}
+
+func TestStartUDPPipeRejectsUnconfirmedAutomaticOptimization(t *testing.T) {
+	_, err := startUDPPipe(config.RuntimeUDPPipe{
+		EndpointID: "udp-unconfirmed", LinkAutoOptimize: true,
+	}, config.RuntimeDevice{})
+	if err == nil {
+		t.Fatal("startUDPPipe() accepted automatic optimization without a confirmed plan")
+	}
+}
+
+func TestStartUDPPipeRejectsPlanWhenOptimizationIsDisabled(t *testing.T) {
+	_, err := startUDPPipe(config.RuntimeUDPPipe{
+		EndpointID: "udp-disabled", MaxDatagramPayload: 1400,
+	}, config.RuntimeDevice{})
+	if err == nil {
+		t.Fatal("startUDPPipe() accepted a path plan while optimization is disabled")
 	}
 }
 

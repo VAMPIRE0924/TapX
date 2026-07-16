@@ -76,7 +76,7 @@ mkdir -p "$BUILD_DIR"
 rm -f "${BUILD_DIR}/tapx-dns.log" "${BUILD_DIR}/tapx-dns.json"
 
 echo "build tapx-core"
-(cd "$ROOT" && GOTOOLCHAIN=local go build -o "$CORE_BIN" ./cmd/tapx-core)
+(cd "$ROOT" && GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go build -o "$CORE_BIN" ./cmd/tapx-core)
 
 cat >"${BUILD_DIR}/tapx-dns.json" <<JSON
 {

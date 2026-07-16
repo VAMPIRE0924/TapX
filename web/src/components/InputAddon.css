@@ -1,0 +1,31 @@
+.input-addon {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 11px;
+  color: var(--ant-color-text);
+  font-size: 14px;
+  line-height: 30px;
+  white-space: nowrap;
+  background-color: var(--ant-color-fill-tertiary);
+  border: 1px solid var(--ant-color-border);
+  border-radius: 6px;
+}
+
+.ant-space-compact > .input-addon:not(:first-child) {
+  margin-inline-start: -1px;
+}
+
+.ant-space-compact > .input-addon:first-child {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.ant-space-compact > .input-addon:last-child {
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+}
+
+.ant-space-compact > .input-addon:not(:first-child):not(:last-child) {
+  border-radius: 0;
+}

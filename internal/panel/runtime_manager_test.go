@@ -53,6 +53,36 @@ func TestRuntimeManagerRejectsNilRuntime(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerControlsComponentsWithoutReplacingController(t *testing.T) {
+	controller := &fakeRuntimeController{}
+	manager := newFakeRuntimeManager(controller)
+	if _, err := manager.Apply(&config.GeneratedRuntime{}); err != nil {
+		t.Fatalf("apply runtime: %v", err)
+	}
+
+	state, err := manager.RestartComponent(core.RuntimeComponentEmbeddedXray)
+	if err != nil {
+		t.Fatalf("restart embedded xray: %v", err)
+	}
+	if len(controller.componentRestarts) != 1 || controller.componentRestarts[0] != core.RuntimeComponentEmbeddedXray {
+		t.Fatalf("component restarts = %+v", controller.componentRestarts)
+	}
+	if controller.stopCalls != 0 || state.Generation != 1 || state.LastReloadMode != "component-restart:embedded-xray" {
+		t.Fatalf("state after component restart = %+v stopCalls=%d", state, controller.stopCalls)
+	}
+
+	state, err = manager.StopComponent(core.RuntimeComponentTapX)
+	if err != nil {
+		t.Fatalf("stop tapx: %v", err)
+	}
+	if len(controller.componentStops) != 1 || controller.componentStops[0] != core.RuntimeComponentTapX {
+		t.Fatalf("component stops = %+v", controller.componentStops)
+	}
+	if !state.Running || state.LastReloadMode != "component-stop:tapx" {
+		t.Fatalf("state after component stop = %+v", state)
+	}
+}
+
 func TestRuntimeManagerRollsBackWhenReplacementStartFails(t *testing.T) {
 	startErr := errors.New("bind failed")
 	old := &fakeRuntimeController{}
@@ -247,7 +277,7 @@ func TestRuntimeManagerEnforcesExpiredClient(t *testing.T) {
 		t.Fatalf("apply runtime: %v", err)
 	}
 
-	state, events, err := manager.EnforceClientLimits(cfg, time.Unix(2000, 0))
+	state, events, err := manager.EnforceLimits(cfg, time.Unix(2000, 0))
 	if err != nil {
 		t.Fatalf("enforce client limits: %v", err)
 	}
@@ -298,6 +328,34 @@ func TestRuntimeManagerReportsXrayPipeState(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerReportsExternalXrayBridgeAsXray(t *testing.T) {
+	controller := &fakeRuntimeController{
+		tcpPipes: []*core.TCPPipeHandle{{
+			Pipe: config.RuntimeTCPPipe{
+				EndpointID:         "xray-external",
+				EndpointKind:       "connector",
+				DeviceID:           "tun-a",
+				ExternalXrayBridge: true,
+				XrayRemote:         "example.com",
+				XrayPort:           443,
+			},
+			DeviceName: "tapxxray1",
+		}},
+	}
+	manager := newFakeRuntimeManager(controller)
+	state, err := manager.Apply(&config.GeneratedRuntime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.TCPPipes) != 1 {
+		t.Fatalf("tcp pipes = %+v, want one external bridge", state.TCPPipes)
+	}
+	pipe := state.TCPPipes[0]
+	if pipe.Transport != "xray" || pipe.XrayRuntime != "external" || pipe.RemoteAddr != "example.com:443" {
+		t.Fatalf("external xray bridge state = %+v", pipe)
+	}
+}
+
 func newFakeRuntimeManager(controllers ...*fakeRuntimeController) *RuntimeManager {
 	next := 0
 	return NewRuntimeManagerWithFactory(func() RuntimeController {
@@ -311,18 +369,21 @@ func newFakeRuntimeManager(controllers ...*fakeRuntimeController) *RuntimeManage
 }
 
 type fakeRuntimeController struct {
-	name       string
-	events     *[]string
-	startErr   error
-	stopErr    error
-	closeErr   error
-	startCalls int
-	stopCalls  int
-	closeCalls []string
-	runtime    *config.GeneratedRuntime
-	udpPipes   []*core.UDPPipeHandle
-	tcpPipes   []*core.TCPPipeHandle
-	xrayPipes  []*core.XrayPipeHandle
+	name               string
+	events             *[]string
+	startErr           error
+	stopErr            error
+	closeErr           error
+	startCalls         int
+	stopCalls          int
+	closeCalls         []string
+	endpointCloseCalls []string
+	runtime            *config.GeneratedRuntime
+	udpPipes           []*core.UDPPipeHandle
+	tcpPipes           []*core.TCPPipeHandle
+	xrayPipes          []*core.XrayPipeHandle
+	componentRestarts  []string
+	componentStops     []string
 }
 
 func (c *fakeRuntimeController) Start(runtime *config.GeneratedRuntime) error {
@@ -353,6 +414,14 @@ func (c *fakeRuntimeController) CloseClientPipes(clientID string) (int, error) {
 	return 1, nil
 }
 
+func (c *fakeRuntimeController) CloseEndpointPipes(kind, endpointID string) (int, error) {
+	c.endpointCloseCalls = append(c.endpointCloseCalls, kind+":"+endpointID)
+	if c.closeErr != nil {
+		return 0, c.closeErr
+	}
+	return 1, nil
+}
+
 func (c *fakeRuntimeController) UDPPipes() []*core.UDPPipeHandle {
 	return c.udpPipes
 }
@@ -366,5 +435,16 @@ func (c *fakeRuntimeController) XrayPipes() []*core.XrayPipeHandle {
 }
 
 func (c *fakeRuntimeController) XrayStates() []xrayruntime.State {
+	return nil
+}
+
+func (c *fakeRuntimeController) RestartComponent(component string, runtime *config.GeneratedRuntime) error {
+	c.componentRestarts = append(c.componentRestarts, component)
+	c.runtime = runtime
+	return nil
+}
+
+func (c *fakeRuntimeController) StopComponent(component string) error {
+	c.componentStops = append(c.componentStops, component)
 	return nil
 }

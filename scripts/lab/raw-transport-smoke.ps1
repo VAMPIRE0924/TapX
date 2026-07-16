@@ -17,6 +17,7 @@ param(
     [ValidateSet("udp", "tcp", "tap", "all", "both")]
     [string]$Mode = "both",
     [switch]$Build,
+    [switch]$UseInstalledBinary,
     [switch]$KeepRemote
 )
 
@@ -58,8 +59,19 @@ Write-TapXTextFile $tapB (New-TapXTapUdpConfig -LocalIP "10.80.0.2" -PeerHost $H
 
 try {
     Write-Host "prepare remote hosts in $RemoteDir"
-    Prepare-TapXHost -Context $ctx -HostName $HostA
-    Prepare-TapXHost -Context $ctx -HostName $HostB
+    if ($UseInstalledBinary) {
+        foreach ($hostName in @($HostA, $HostB)) {
+            Invoke-TapXRemoteScript -Context $ctx -HostName $hostName -Script @"
+set -euo pipefail
+mkdir -p '$RemoteDir'
+cp /usr/local/bin/tapx-core '$RemoteDir/tapx-core'
+chmod 700 '$RemoteDir/tapx-core'
+"@ | Out-Null
+        }
+    } else {
+        Prepare-TapXHost -Context $ctx -HostName $HostA
+        Prepare-TapXHost -Context $ctx -HostName $HostB
+    }
 
     if ($Mode -eq "udp" -or $Mode -eq "both" -or $Mode -eq "all") {
         Write-Host "run raw UDP/TUN smoke"
@@ -73,6 +85,10 @@ try {
         Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "ip -d addr show dev tapxudp0" | Out-Host
         Invoke-TapXSSH -Context $ctx -HostName $HostA -Command "ping -c 3 -W 2 10.77.0.2" | Out-Host
         Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "ping -c 3 -W 2 10.77.0.1" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostA -Command "grep 'udp counters:' '$RemoteDir/udp.log' | tail -n 1" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "grep 'udp counters:' '$RemoteDir/udp.log' | tail -n 1" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostA -Command "iptables-save -t mangle | grep -- '-o tapxudp0' | grep -- '--set-mss'; ip6tables-save -t mangle | grep -- '-o tapxudp0' | grep -- '--set-mss'" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "iptables-save -t mangle | grep -- '-o tapxudp0' | grep -- '--set-mss'; ip6tables-save -t mangle | grep -- '-o tapxudp0' | grep -- '--set-mss'" | Out-Host
         Stop-TapXRemoteRuntime -Context $ctx -HostName $HostA
         Stop-TapXRemoteRuntime -Context $ctx -HostName $HostB
         Write-Host "raw UDP/TUN smoke: ok"
@@ -90,6 +106,8 @@ try {
         Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "ip -d addr show dev tapxtcp0" | Out-Host
         Invoke-TapXSSH -Context $ctx -HostName $HostA -Command "ping -c 3 -W 2 10.78.0.2" | Out-Host
         Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "ping -c 3 -W 2 10.78.0.1" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostA -Command "grep 'tcp counters:' '$RemoteDir/tcp.log' | tail -n 1" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "grep 'tcp counters:' '$RemoteDir/tcp.log' | tail -n 1" | Out-Host
         Stop-TapXRemoteRuntime -Context $ctx -HostName $HostA
         Stop-TapXRemoteRuntime -Context $ctx -HostName $HostB
         Write-Host "raw TCP/TUN smoke: ok"
@@ -107,6 +125,10 @@ try {
         Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "ip -d addr show dev tapxtap0" | Out-Host
         Invoke-TapXSSH -Context $ctx -HostName $HostA -Command "ping -c 3 -W 2 10.80.0.2" | Out-Host
         Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "ping -c 3 -W 2 10.80.0.1" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostA -Command "grep 'udp counters:' '$RemoteDir/tap.log' | tail -n 1" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "grep 'udp counters:' '$RemoteDir/tap.log' | tail -n 1" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostA -Command "iptables-save -t mangle | grep -- '-o tapxtap0' | grep -- '--set-mss'; ip6tables-save -t mangle | grep -- '-o tapxtap0' | grep -- '--set-mss'" | Out-Host
+        Invoke-TapXSSH -Context $ctx -HostName $HostB -Command "iptables-save -t mangle | grep -- '-o tapxtap0' | grep -- '--set-mss'; ip6tables-save -t mangle | grep -- '-o tapxtap0' | grep -- '--set-mss'" | Out-Host
         Stop-TapXRemoteRuntime -Context $ctx -HostName $HostA
         Stop-TapXRemoteRuntime -Context $ctx -HostName $HostB
         Write-Host "raw UDP/TAP smoke: ok"

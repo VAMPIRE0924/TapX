@@ -3,6 +3,7 @@ package xrayruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"tapx/internal/config"
@@ -174,12 +176,18 @@ func (m *Manager) startExternal(runtime *config.GeneratedRuntime, document map[s
 	if binaryPath == "" {
 		return nil, nil, "", "", fmt.Errorf("xray: Settings.ExternalXrayPath is required for external runtime")
 	}
-	configPath, tempDir, err := writeConfig(settings.DataDir, document)
+	configPath, tempDir, err := writeConfig(settings.DataDir, settings.ExternalXrayConfigFile, document)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
 
 	cmd := m.commandFactory(binaryPath, configPath)
+	if workDir := strings.TrimSpace(settings.ExternalXrayWorkDir); workDir != "" {
+		cmd.Dir = workDir
+	}
+	if args := externalXrayArgs(settings.ExternalXrayArgs, configPath); len(args) > 0 {
+		cmd.Args = append([]string{cmd.Path}, args...)
+	}
 	if cmd.Stdout == nil {
 		cmd.Stdout = os.Stdout
 	}
@@ -196,16 +204,84 @@ func (m *Manager) startExternal(runtime *config.GeneratedRuntime, document map[s
 		done <- cmd.Wait()
 	}()
 
-	select {
-	case err := <-done:
-		cleanupConfig(configPath, tempDir)
-		if err == nil {
-			return nil, nil, "", "", fmt.Errorf("xray: external runtime exited during startup")
+	if err := waitForExternalBridgeListeners(done, externalConnectorBridgePorts(runtime), 5*time.Second); err != nil {
+		if cmd.ProcessState == nil {
+			_ = stopProcess(cmd, done)
 		}
-		return nil, nil, "", "", fmt.Errorf("xray: external runtime exited during startup: %w", err)
-	case <-time.After(150 * time.Millisecond):
+		cleanupConfig(configPath, tempDir)
+		return nil, nil, "", "", err
 	}
 	return cmd, done, configPath, tempDir, nil
+}
+
+func externalConnectorBridgePorts(runtime *config.GeneratedRuntime) []uint16 {
+	ports := make([]uint16, 0)
+	for _, endpoint := range runtime.Connectors {
+		if endpoint.ExternalBridgePort != 0 {
+			ports = append(ports, endpoint.ExternalBridgePort)
+		}
+	}
+	return ports
+}
+
+func waitForExternalBridgeListeners(done <-chan error, ports []uint16, timeout time.Duration) error {
+	if len(ports) == 0 {
+		select {
+		case err := <-done:
+			if err == nil {
+				return fmt.Errorf("xray: external runtime exited during startup")
+			}
+			return fmt.Errorf("xray: external runtime exited during startup: %w", err)
+		case <-time.After(150 * time.Millisecond):
+			return nil
+		}
+	}
+	deadline := time.Now().Add(timeout)
+	pending := make(map[uint16]struct{}, len(ports))
+	for _, port := range ports {
+		pending[port] = struct{}{}
+	}
+	for {
+		select {
+		case err := <-done:
+			if err == nil {
+				return fmt.Errorf("xray: external runtime exited during startup")
+			}
+			return fmt.Errorf("xray: external runtime exited during startup: %w", err)
+		default:
+		}
+
+		for port := range pending {
+			if externalBridgePortIsBound(port) {
+				delete(pending, port)
+			}
+		}
+		if len(pending) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("xray: external runtime did not open local frame bridge ports %v within %s", sortedBridgePorts(pending), timeout)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func externalBridgePortIsBound(port uint16) bool {
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if err == nil {
+		_ = listener.Close()
+		return false
+	}
+	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+func sortedBridgePorts(pending map[uint16]struct{}) []uint16 {
+	ports := make([]uint16, 0, len(pending))
+	for port := range pending {
+		ports = append(ports, port)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return ports
 }
 
 func (m *Manager) Stop() error {
@@ -252,6 +328,15 @@ func (m *Manager) State() State {
 	return m.stateLocked()
 }
 
+// States reports embedded and external runtimes independently. State remains
+// the compatibility aggregate for callers that only need one health record.
+func (m *Manager) States() []State {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refreshLocked()
+	return m.statesLocked()
+}
+
 func (m *Manager) refreshLocked() {
 	if m.cmd == nil || m.done == nil {
 		return
@@ -291,6 +376,50 @@ func (m *Manager) stateLocked() State {
 		state.ExitedAt = m.exitedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return state
+}
+
+func (m *Manager) statesLocked() []State {
+	embedded := m.embeddedAdapter.State()
+	states := make([]State, 0, 2)
+	if len(m.embeddedRefs) > 0 || embedded.Running || embedded.LastError != "" {
+		state := State{
+			Running:       embedded.Running,
+			Runtime:       "embedded",
+			Adapter:       embedded.Adapter,
+			LastError:     embedded.LastError,
+			EndpointCount: len(m.embeddedRefs),
+			Endpoints:     append([]EndpointRef(nil), m.embeddedRefs...),
+		}
+		if !embedded.StartedAt.IsZero() {
+			state.StartedAt = embedded.StartedAt.UTC().Format(time.RFC3339Nano)
+		}
+		if !embedded.ExitedAt.IsZero() {
+			state.ExitedAt = embedded.ExitedAt.UTC().Format(time.RFC3339Nano)
+		}
+		states = append(states, state)
+	}
+	if len(m.externalRefs) > 0 || m.cmd != nil || m.lastError != "" {
+		state := State{
+			Running:       m.cmd != nil,
+			Runtime:       "external",
+			Adapter:       "external",
+			ConfigPath:    m.configPath,
+			LastError:     m.lastError,
+			EndpointCount: len(m.externalRefs),
+			Endpoints:     append([]EndpointRef(nil), m.externalRefs...),
+		}
+		if m.cmd != nil && m.cmd.Process != nil {
+			state.PID = m.cmd.Process.Pid
+		}
+		if !m.startedAt.IsZero() {
+			state.StartedAt = m.startedAt.UTC().Format(time.RFC3339Nano)
+		}
+		if !m.exitedAt.IsZero() {
+			state.ExitedAt = m.exitedAt.UTC().Format(time.RFC3339Nano)
+		}
+		states = append(states, state)
+	}
+	return states
 }
 
 func runtimeLabel(externalRunning bool, embeddedRunning bool) string {
@@ -352,11 +481,17 @@ func stopProcess(cmd *exec.Cmd, done <-chan error) error {
 	}
 }
 
-func writeConfig(dataDir string, document map[string]any) (string, string, error) {
+func writeConfig(dataDir string, explicitPath string, document map[string]any) (string, string, error) {
 	var dir string
 	var tempDir string
 	var err error
-	if strings.TrimSpace(dataDir) == "" {
+	explicitPath = strings.TrimSpace(explicitPath)
+	if explicitPath != "" {
+		dir = filepath.Dir(explicitPath)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return "", "", fmt.Errorf("xray: create config dir: %w", err)
+		}
+	} else if strings.TrimSpace(dataDir) == "" {
 		tempDir, err = os.MkdirTemp("", "tapx-xray-")
 		if err != nil {
 			return "", "", fmt.Errorf("xray: create temp dir: %w", err)
@@ -364,7 +499,7 @@ func writeConfig(dataDir string, document map[string]any) (string, string, error
 		dir = tempDir
 	} else {
 		dir = filepath.Join(dataDir, "xray")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return "", "", fmt.Errorf("xray: create config dir: %w", err)
 		}
 	}
@@ -374,12 +509,36 @@ func writeConfig(dataDir string, document map[string]any) (string, string, error
 		cleanupConfig("", tempDir)
 		return "", "", fmt.Errorf("xray: marshal config: %w", err)
 	}
-	path := filepath.Join(dir, fmt.Sprintf("tapx-xray-%d.json", time.Now().UnixNano()))
+	path := explicitPath
+	if path == "" {
+		path = filepath.Join(dir, fmt.Sprintf("tapx-xray-%d.json", time.Now().UnixNano()))
+	}
 	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
 		cleanupConfig("", tempDir)
 		return "", "", fmt.Errorf("xray: write config: %w", err)
 	}
 	return path, tempDir, nil
+}
+
+func externalXrayArgs(raw string, configPath string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var parts []string
+	if strings.ContainsAny(raw, "\r\n") {
+		for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				parts = append(parts, line)
+			}
+		}
+	} else {
+		parts = strings.Fields(raw)
+	}
+	for i := range parts {
+		parts[i] = strings.ReplaceAll(parts[i], "{config}", configPath)
+	}
+	return parts
 }
 
 func cleanupConfig(path, tempDir string) {
@@ -396,15 +555,6 @@ func firstSettings(settings []config.RuntimeSettings) config.RuntimeSettings {
 		return item
 	}
 	return config.RuntimeSettings{}
-}
-
-func endpointList(endpoints []EndpointRef) string {
-	parts := make([]string, 0, len(endpoints))
-	for _, item := range endpoints {
-		parts = append(parts, item.Kind+"/"+item.ID)
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, ", ")
 }
 
 func cloneStreamHandlers(in map[string]StreamHandler) map[string]StreamHandler {

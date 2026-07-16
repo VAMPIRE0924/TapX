@@ -1,0 +1,167 @@
+#!/bin/sh
+set -eu
+
+. /lib/functions.sh
+
+PANEL=/usr/bin/tapx-panel
+PANEL_INIT=/etc/init.d/tapx-panel
+CORE_INIT=/etc/init.d/tapx
+RESTORE_UPLOAD=/tmp/tapx-openwrt-restore.tar.gz
+MAX_BACKUP_SIZE=$((70 * 1024 * 1024))
+WORKDIR=''
+REMOVE_UPLOAD=0
+
+cleanup() {
+	[ -n "$WORKDIR" ] && rm -rf "$WORKDIR"
+	[ "$REMOVE_UPLOAD" = '1' ] && rm -f "$RESTORE_UPLOAD"
+}
+
+trap cleanup EXIT INT TERM
+
+database_path() {
+	config_load tapx
+	config_get db_path panel db_path '/etc/tapx/tapx.db'
+	[ "$db_path" = '/etc/tapx/tapx.db' ] || {
+		echo "unsupported OpenWrt database path: $db_path" >&2
+		return 1
+	}
+	printf '%s\n' "$db_path"
+}
+
+temporary_dir() {
+	mktemp -d /tmp/tapx-openwrt-config.XXXXXX
+}
+
+export_config() {
+	local tmp db
+	tmp="$(temporary_dir)"
+	WORKDIR="$tmp"
+	db="$(database_path)"
+	[ -s /etc/config/tapx ] || {
+		echo "missing /etc/config/tapx" >&2
+		exit 1
+	}
+	[ -s "$db" ] || {
+		echo "TapX database is not initialized" >&2
+		exit 1
+	}
+	mkdir -p "$tmp/etc/config" "$tmp/etc/tapx"
+	cp /etc/config/tapx "$tmp/etc/config/tapx"
+	"$PANEL" -db "$db" -export-backup "$tmp/etc/tapx/tapx.db" >/dev/null
+	tar -C "$tmp" -czf - etc/config/tapx etc/tapx/tapx.db
+}
+
+validate_archive() {
+	local archive="$1" entries expected size
+	[ -f "$archive" ] || {
+		echo "backup upload is missing" >&2
+		return 1
+	}
+	size="$(wc -c < "$archive")"
+	[ "$size" -gt 0 ] && [ "$size" -le "$MAX_BACKUP_SIZE" ] || {
+		echo "backup size is invalid" >&2
+		return 1
+	}
+	entries="$(tar -tzf "$archive" | sed '/\/$/d' | sort)"
+	expected="$(printf '%s\n' etc/config/tapx etc/tapx/tapx.db | sort)"
+	[ "$entries" = "$expected" ] || {
+		echo "backup must contain only TapX UCI and database files" >&2
+		return 1
+	}
+}
+
+restore_config() {
+	local archive="${1:-$RESTORE_UPLOAD}" tmp db rollback_db had_db=0
+	local panel_autostart panel_enabled core_enabled core_autostart
+	[ "$archive" = "$RESTORE_UPLOAD" ] || {
+		echo "invalid restore upload path" >&2
+		exit 1
+	}
+	validate_archive "$archive"
+	tmp="$(temporary_dir)"
+	WORKDIR="$tmp"
+	REMOVE_UPLOAD=1
+	mkdir -p "$tmp/etc/config" "$tmp/etc/tapx"
+	tar -xOzf "$archive" etc/config/tapx > "$tmp/etc/config/tapx"
+	tar -xOzf "$archive" etc/tapx/tapx.db > "$tmp/etc/tapx/tapx.db"
+	chmod 600 "$tmp/etc/config/tapx" "$tmp/etc/tapx/tapx.db"
+	uci -c "$tmp/etc/config" show tapx >/dev/null
+	new_db_path="$(uci -c "$tmp/etc/config" -q get tapx.panel.db_path || true)"
+	[ "${new_db_path:-/etc/tapx/tapx.db}" = '/etc/tapx/tapx.db' ] || {
+		echo "backup uses an unsupported database path" >&2
+		exit 1
+	}
+
+	db="$(database_path)"
+	rollback_db="$tmp/rollback.db"
+	cp /etc/config/tapx "$tmp/tapx.uci"
+	if [ -s "$db" ]; then
+		"$PANEL" -db "$db" -export-backup "$rollback_db" >/dev/null
+		had_db=1
+	fi
+
+	"$PANEL_INIT" stop || true
+	"$CORE_INIT" stop || true
+	if ! "$PANEL" -db "$db" -restore-backup "$tmp/etc/tapx/tapx.db" >/dev/null || \
+	   ! cp "$tmp/etc/config/tapx" /etc/config/tapx; then
+		cp "$tmp/tapx.uci" /etc/config/tapx
+		if [ "$had_db" = '1' ]; then
+			"$PANEL" -db "$db" -restore-backup "$rollback_db" >/dev/null || true
+		else
+			rm -f "$db" "$db-wal" "$db-shm"
+		fi
+		echo "restore failed; previous TapX configuration was restored" >&2
+		exit 1
+	fi
+
+	config_load tapx
+	config_get_bool panel_autostart panel autostart 0
+	config_get_bool panel_enabled panel enabled 0
+	config_get_bool core_enabled core enabled 0
+	config_get_bool core_autostart core autostart 0
+	if [ "$panel_autostart" = '1' ]; then "$PANEL_INIT" enable; else "$PANEL_INIT" disable; fi
+	if [ "$core_autostart" = '1' ]; then "$CORE_INIT" enable; else "$CORE_INIT" disable; fi
+	if [ "$panel_enabled" = '1' ]; then "$PANEL_INIT" start; fi
+	if [ "$core_enabled" = '1' ]; then "$CORE_INIT" start; fi
+	sync
+	echo "TapX configuration restored"
+}
+
+reset_config() {
+	local db panel_autostart panel_enabled core_enabled core_autostart
+	local rom_config=/rom/etc/config/tapx rom_db=/rom/etc/tapx/tapx.db
+	[ -s "$rom_config" ] || {
+		echo "firmware does not contain a TapX panel configuration" >&2
+		exit 1
+	}
+	db="$(database_path)"
+	"$PANEL_INIT" stop || true
+	"$CORE_INIT" stop || true
+	cp "$rom_config" /etc/config/tapx
+	if [ -s "$rom_db" ]; then
+		"$PANEL" -db "$db" -restore-backup "$rom_db" >/dev/null
+	else
+		rm -f "$db" "$db-wal" "$db-shm"
+	fi
+	config_load tapx
+	config_get_bool panel_autostart panel autostart 0
+	config_get_bool panel_enabled panel enabled 0
+	config_get_bool core_enabled core enabled 0
+	config_get_bool core_autostart core autostart 0
+	if [ "$panel_autostart" = '1' ]; then "$PANEL_INIT" enable; else "$PANEL_INIT" disable; fi
+	if [ "$core_autostart" = '1' ]; then "$CORE_INIT" enable; else "$CORE_INIT" disable; fi
+	if [ "$panel_enabled" = '1' ]; then "$PANEL_INIT" start; fi
+	if [ "$core_enabled" = '1' ]; then "$CORE_INIT" start; fi
+	sync
+	echo "TapX configuration reset to the firmware image"
+}
+
+case "${1:-}" in
+	export) export_config ;;
+	restore) restore_config "${2:-$RESTORE_UPLOAD}" ;;
+	reset) reset_config ;;
+	*)
+		echo "usage: $0 export | restore $RESTORE_UPLOAD | reset" >&2
+		exit 2
+		;;
+esac

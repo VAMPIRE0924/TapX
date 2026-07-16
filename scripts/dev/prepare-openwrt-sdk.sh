@@ -5,6 +5,10 @@ version="${OPENWRT_VERSION:-25.12.5}"
 mirror="${OPENWRT_MIRROR:-https://downloads.openwrt.org}"
 root="${TAPX_OPENWRT_SDK_ROOT:-$HOME/tapx-openwrt-sdk}"
 
+if command -v cygpath >/dev/null 2>&1; then
+  root="$(cygpath -u "$root")"
+fi
+
 targets=("$@")
 if ((${#targets[@]} == 0)); then
   targets=(x86-64)
@@ -71,10 +75,16 @@ download_sdk() {
   file="${file#\*}"
   archive="${root}/downloads/${file}"
 
+  if [[ -f "$archive" ]] && ! (cd "${root}/downloads" && printf '%s  %s\n' "$sum" "$file" | sha256sum -c - >/dev/null 2>&1); then
+    echo "remove corrupt cached SDK archive: ${archive}" >&2
+    rm -f "$archive"
+  fi
+
   if [[ ! -f "$archive" ]]; then
-    echo "download sdk: ${base}/${file}"
-    curl -4 -fL --retry 5 --connect-timeout 20 --max-time 0 \
-      -o "$archive" "${base}/${file}"
+		echo "download sdk: ${base}/${file}"
+		curl -4 -fL --retry 5 --connect-timeout 20 --max-time 0 \
+		  -o "$archive.tmp" "${base}/${file}"
+		mv "$archive.tmp" "$archive"
   else
     echo "reuse archive: ${archive}"
   fi

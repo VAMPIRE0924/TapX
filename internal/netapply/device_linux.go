@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"tapx/internal/model"
 )
@@ -25,16 +26,18 @@ var runCommand commandRunner = func(name string, args ...string) error {
 }
 
 type appliedDevice struct {
-	runner        commandRunner
-	ifName        string
-	addrs         []string
-	bridgeName    string
-	bridgeCreated bool
-	tapEnslaved   bool
-	memberIfName  string
-	routes        [][]string
-	mssRules      []firewallRule
-	dns           dnsRollback
+	mu                 sync.Mutex
+	runner             commandRunner
+	ifName             string
+	addrs              []string
+	bridgeName         string
+	bridgeCreated      bool
+	tapEnslaved        bool
+	memberIfName       string
+	bridgeControlRules []firewallRule
+	routes             [][]string
+	mssRules           []firewallRule
+	dns                dnsRollback
 }
 
 type firewallRule struct {
@@ -80,7 +83,7 @@ func applyDevice(cfg DeviceConfig, runner commandRunner) (Handle, error) {
 		}
 		handle.addrs = append(handle.addrs, cidr)
 	}
-	if cfg.MTU > 0 || cfg.MSSClamp > 0 || cfg.IPv4CIDR != "" || cfg.IPv6CIDR != "" || hasEnabledRoutes(cfg.Routes) {
+	if cfg.MTU > 0 || cfg.MSSClamp > 0 || cfg.LinkAutoOptimize || cfg.IPv4CIDR != "" || cfg.IPv6CIDR != "" || hasEnabledRoutes(cfg.Routes) {
 		if err := runner("ip", "link", "set", "dev", cfg.IfName, "up"); err != nil {
 			_ = handle.Rollback()
 			return nil, err
@@ -100,7 +103,7 @@ func applyDevice(cfg DeviceConfig, runner commandRunner) (Handle, error) {
 		_ = handle.Rollback()
 		return nil, err
 	}
-	if err := handle.applyMSSClamp(cfg.MSSClamp); err != nil {
+	if err := handle.applyMSSClamp(cfg.MSSClamp, cfg.LinkAutoOptimize); err != nil {
 		_ = handle.Rollback()
 		return nil, err
 	}
@@ -115,6 +118,8 @@ func (h *appliedDevice) Rollback() error {
 	if h == nil || h.runner == nil {
 		return nil
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	var firstErr error
 	if h.dns.path != "" {
 		if err := h.rollbackDNS(); err != nil && firstErr == nil {
@@ -135,6 +140,13 @@ func (h *appliedDevice) Rollback() error {
 		}
 	}
 	h.routes = nil
+	for i := len(h.bridgeControlRules) - 1; i >= 0; i-- {
+		rule := h.bridgeControlRules[i]
+		if err := h.runner(rule.command, rule.args...); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	h.bridgeControlRules = nil
 	if h.tapEnslaved {
 		if err := h.runner("ip", "link", "set", "dev", h.ifName, "nomaster"); err != nil && firstErr == nil {
 			firstErr = err
@@ -179,6 +191,11 @@ func (h *appliedDevice) applyBridge(cfg BridgeConfig) error {
 			return err
 		}
 	}
+	// Linux bridges consume IEEE 802.1D link-local multicast by default.
+	// Bits 3-15 can be forwarded natively; bits 0-2 need the tc bypass below.
+	if err := h.runner("ip", "link", "set", "dev", cfg.Name, "type", "bridge", "group_fwd_mask", "65528"); err != nil {
+		return err
+	}
 	if err := h.runner("ip", "link", "set", "dev", cfg.Name, "up"); err != nil {
 		return err
 	}
@@ -193,6 +210,53 @@ func (h *appliedDevice) applyBridge(cfg BridgeConfig) error {
 		h.memberIfName = cfg.IfName
 		if err := h.runner("ip", "link", "set", "dev", cfg.IfName, "up"); err != nil {
 			return err
+		}
+		if err := h.applyRestrictedBridgeControls(h.ifName, cfg.IfName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *appliedDevice) applyRestrictedBridgeControls(tapIfName, memberIfName string) error {
+	const preference = "62000"
+	restricted := []struct {
+		handle string
+		mac    string
+	}{
+		{handle: "0x54580001", mac: "01:80:c2:00:00:00"}, // STP
+		{handle: "0x54580002", mac: "01:80:c2:00:00:01"}, // MAC control / PAUSE
+		{handle: "0x54580003", mac: "01:80:c2:00:00:02"}, // LACP
+	}
+
+	for _, direction := range []struct {
+		source string
+		target string
+	}{
+		{source: tapIfName, target: memberIfName},
+		{source: memberIfName, target: tapIfName},
+	} {
+		// replace preserves an existing clsact qdisc and its unrelated filters.
+		if err := h.runner("tc", "qdisc", "replace", "dev", direction.source, "clsact"); err != nil {
+			return err
+		}
+		for _, control := range restricted {
+			args := []string{
+				"filter", "replace", "dev", direction.source, "ingress",
+				"protocol", "all", "pref", preference, "handle", control.handle,
+				"flower", "skip_hw", "dst_mac", control.mac,
+				"action", "mirred", "egress", "redirect", "dev", direction.target,
+			}
+			if err := h.runner("tc", args...); err != nil {
+				return err
+			}
+			h.bridgeControlRules = append(h.bridgeControlRules, firewallRule{
+				command: "tc",
+				args: []string{
+					"filter", "delete", "dev", direction.source, "ingress",
+					"protocol", "all", "pref", preference, "handle", control.handle, "flower",
+				},
+			})
 		}
 	}
 	return nil
@@ -301,14 +365,14 @@ func dnsContent(cfg DNSConfig) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-func (h *appliedDevice) applyMSSClamp(mss int) error {
-	if mss == 0 {
+func (h *appliedDevice) applyMSSClamp(mss int, automatic bool) error {
+	if !automatic && mss == 0 {
 		return nil
 	}
-	if mss < 536 || mss > 65535 {
+	if !automatic && (mss < 536 || mss > 65535) {
 		return errors.New("netapply: MSS clamp must be between 536 and 65535")
 	}
-	rules := mssClampRules(h.ifName, mss)
+	rules := mssClampRules(h.ifName, mss, automatic)
 	for _, rule := range rules {
 		if err := h.runner(rule.command, rule.args...); err != nil {
 			return err
@@ -318,8 +382,51 @@ func (h *appliedDevice) applyMSSClamp(mss int) error {
 	return nil
 }
 
-func mssClampRules(ifName string, mss int) []firewallRule {
+func (h *appliedDevice) SetMSSClamp(ipv4MSS, ipv6MSS int) error {
+	if h == nil || h.runner == nil {
+		return errors.New("netapply: device handle is unavailable")
+	}
+	if ipv4MSS <= 0 || ipv4MSS > 65535 || ipv6MSS <= 0 || ipv6MSS > 65535 {
+		return errors.New("netapply: discovered MSS values must be between 1 and 65535")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.replaceMSSRules(fixedMSSClampRules(h.ifName, ipv4MSS, ipv6MSS))
+}
+
+func (h *appliedDevice) replaceMSSRules(rules []firewallRule) error {
+	old := append([]firewallRule(nil), h.mssRules...)
+	for i := len(old) - 1; i >= 0; i-- {
+		if err := h.runner(old[i].command, deleteRuleArgs(old[i].args)...); err != nil {
+			for j := i + 1; j < len(old); j++ {
+				_ = h.runner(old[j].command, old[j].args...)
+			}
+			return fmt.Errorf("netapply: remove previous MSS clamp: %w", err)
+		}
+	}
+	added := 0
+	for _, rule := range rules {
+		if err := h.runner(rule.command, rule.args...); err != nil {
+			for i := added - 1; i >= 0; i-- {
+				_ = h.runner(rules[i].command, deleteRuleArgs(rules[i].args)...)
+			}
+			for _, previous := range old {
+				_ = h.runner(previous.command, previous.args...)
+			}
+			return fmt.Errorf("netapply: install discovered MSS clamp: %w", err)
+		}
+		added++
+	}
+	h.mssRules = rules
+	return nil
+}
+
+func mssClampRules(ifName string, mss int, automatic bool) []firewallRule {
 	out := make([]firewallRule, 0, 4)
+	modeArgs := []string{"--set-mss", fmt.Sprint(mss)}
+	if automatic {
+		modeArgs = []string{"--clamp-mss-to-pmtu"}
+	}
 	for _, command := range []string{"iptables", "ip6tables"} {
 		for _, chain := range []string{"FORWARD", "OUTPUT"} {
 			out = append(out, firewallRule{
@@ -331,7 +438,26 @@ func mssClampRules(ifName string, mss int) []firewallRule {
 					"-p", "tcp",
 					"--tcp-flags", "SYN,RST", "SYN",
 					"-j", "TCPMSS",
-					"--set-mss", fmt.Sprint(mss),
+				},
+			})
+			out[len(out)-1].args = append(out[len(out)-1].args, modeArgs...)
+		}
+	}
+	return out
+}
+
+func fixedMSSClampRules(ifName string, ipv4MSS, ipv6MSS int) []firewallRule {
+	out := make([]firewallRule, 0, 4)
+	for _, family := range []struct {
+		command string
+		mss     int
+	}{{"iptables", ipv4MSS}, {"ip6tables", ipv6MSS}} {
+		for _, chain := range []string{"FORWARD", "OUTPUT"} {
+			out = append(out, firewallRule{
+				command: family.command,
+				args: []string{
+					"-t", "mangle", "-A", chain, "-o", ifName, "-p", "tcp",
+					"--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", fmt.Sprint(family.mss),
 				},
 			})
 		}

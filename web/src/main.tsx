@@ -1,26 +1,15 @@
 import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { HashRouter } from 'react-router-dom';
+import { createRoot } from 'react-dom/client';
+import { App } from './app/App';
+import { I18nProvider } from './i18n/I18nProvider';
 import 'antd/dist/reset.css';
-import '@/styles/page-shell.css';
-import '@/styles/app.css';
+import './styles/base.css';
+import './styles/themes.css';
 
-import { App } from './App';
-import { I18nProvider } from './i18n';
-import { ThemeProvider } from './theme';
-
-const root = document.getElementById('root');
-
-if (root) {
-  ReactDOM.createRoot(root).render(
-    <React.StrictMode>
-      <ThemeProvider>
-        <I18nProvider>
-          <HashRouter>
-            <App />
-          </HashRouter>
-        </I18nProvider>
-      </ThemeProvider>
-    </React.StrictMode>,
-  );
-}
+createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <I18nProvider>
+      <App />
+    </I18nProvider>
+  </React.StrictMode>,
+);

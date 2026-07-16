@@ -55,15 +55,16 @@ func (c *Counters) Snapshot() CountersSnapshot {
 }
 
 type UDPConfig struct {
-	TUNFD        int
-	UDPFD        int
-	FrameKind    FrameKind
-	MaxFrameSize uint32
-	PeerMode     UDPPeerMode
-	Peer         netip.AddrPort
-	VKey         []byte
-	AddressGuard AddressGuard
-	Counters     *Counters
+	TUNFD              int
+	UDPFD              int
+	FrameKind          FrameKind
+	MaxFrameSize       uint32
+	MaxDatagramPayload uint32
+	PeerMode           UDPPeerMode
+	Peer               netip.AddrPort
+	VKey               []byte
+	AddressGuard       AddressGuard
+	Counters           *Counters
 }
 
 type TCPConfig struct {

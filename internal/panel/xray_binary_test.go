@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -109,4 +111,95 @@ func TestServerExternalXrayRejectsBadDownloadURL(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	postJSON(t, server.URL+"/api/xray/external/download", []byte(`{"url":"file:///tmp/xray"}`), http.StatusBadRequest)
+}
+
+func TestServerExternalXrayDownloadRetriesVerifiesChecksumAndBacksUp(t *testing.T) {
+	store := newTestStore(t)
+	binaryPath := filepath.Join(t.TempDir(), "xray")
+	if err := os.WriteFile(binaryPath, []byte("old-xray"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := sampleConfig()
+	cfg.Settings[0].ExternalXrayPath = binaryPath
+	if err := store.ReplaceConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+	server := httptest.NewServer(NewServer(store).Handler())
+	t.Cleanup(server.Close)
+
+	payload := []byte("verified-xray")
+	attempts := 0
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(w, "retry", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(source.Close)
+	checksum := fmt.Sprintf("%x", sha256.Sum256(payload))
+	body := fmt.Sprintf(`{"url":%q,"sha256":%q,"retryCount":1,"timeoutSecond":5,"overwriteStrategy":"backup"}`, source.URL, checksum)
+	postJSON(t, server.URL+"/api/xray/external/download", []byte(body), http.StatusOK)
+	if attempts != 2 {
+		t.Fatalf("download attempts = %d, want 2", attempts)
+	}
+	if got, err := os.ReadFile(binaryPath); err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("installed payload = %q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(binaryPath + ".bak"); err != nil || string(got) != "old-xray" {
+		t.Fatalf("backup payload = %q err=%v", got, err)
+	}
+}
+
+func TestServerExternalXrayDownloadRejectsChecksumWithoutReplacingBinary(t *testing.T) {
+	store := newTestStore(t)
+	binaryPath := filepath.Join(t.TempDir(), "xray")
+	if err := os.WriteFile(binaryPath, []byte("keep-me"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := sampleConfig()
+	cfg.Settings[0].ExternalXrayPath = binaryPath
+	if err := store.ReplaceConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+	server := httptest.NewServer(NewServer(store).Handler())
+	t.Cleanup(server.Close)
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("wrong-payload"))
+	}))
+	t.Cleanup(source.Close)
+
+	body := fmt.Sprintf(`{"url":%q,"sha256":"%064x","overwriteStrategy":"overwrite"}`, source.URL, 1)
+	postJSON(t, server.URL+"/api/xray/external/download", []byte(body), http.StatusBadRequest)
+	if got, err := os.ReadFile(binaryPath); err != nil || string(got) != "keep-me" {
+		t.Fatalf("binary changed after checksum failure: %q err=%v", got, err)
+	}
+}
+
+func TestServerExternalXrayDownloadSkipDoesNotContactSource(t *testing.T) {
+	store := newTestStore(t)
+	binaryPath := filepath.Join(t.TempDir(), "xray")
+	if err := os.WriteFile(binaryPath, []byte("existing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := sampleConfig()
+	cfg.Settings[0].ExternalXrayPath = binaryPath
+	if err := store.ReplaceConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+	server := httptest.NewServer(NewServer(store).Handler())
+	t.Cleanup(server.Close)
+	contacted := false
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contacted = true
+		_, _ = w.Write([]byte("replacement"))
+	}))
+	t.Cleanup(source.Close)
+
+	body := fmt.Sprintf(`{"url":%q,"overwriteStrategy":"skip"}`, source.URL)
+	postJSON(t, server.URL+"/api/xray/external/download", []byte(body), http.StatusOK)
+	if contacted {
+		t.Fatal("download source was contacted for skip strategy")
+	}
 }

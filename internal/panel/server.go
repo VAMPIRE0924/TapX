@@ -6,29 +6,42 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"tapx/internal/config"
+	"tapx/internal/core"
 	"tapx/internal/model"
 )
 
-const maxRequestBody = 8 << 20
+const (
+	maxRequestBody = 8 << 20
+	maxBackupBody  = 64 << 20
+)
 
 type Server struct {
-	store     *Store
-	runtime   *RuntimeManager
-	logs      *LogRecorder
-	sessions  *SessionManager
-	started   time.Time
-	basePath  string
-	dashboard dashboardRateTracker
+	store        *Store
+	runtime      *RuntimeManager
+	logs         *LogRecorder
+	sessions     *SessionManager
+	loginLimiter *LoginLimiter
+	started      time.Time
+	basePath     string
+	dashboard    dashboardRateTracker
+	system       systemSampler
+	integrations integrationScheduler
+	restart      func() error
+	nodesMu      sync.Mutex
 }
 
 type ServerOptions struct {
 	BasePath string
+	Restart  func() error
 }
 
 func NewServer(store *Store, runtime ...*RuntimeManager) *Server {
@@ -40,7 +53,12 @@ func NewServerWithOptions(store *Store, opts ServerOptions, runtime ...*RuntimeM
 	if len(runtime) > 0 && runtime[0] != nil {
 		manager = runtime[0]
 	}
-	return &Server{store: store, runtime: manager, logs: NewLogRecorder(defaultLogLimit), sessions: NewSessionManager(), started: time.Now(), basePath: normalizeBasePath(opts.BasePath)}
+	server := &Server{store: store, runtime: manager, logs: NewPersistentLogRecorder(store, defaultLogLimit), sessions: NewSessionManager(), loginLimiter: NewLoginLimiter(), started: time.Now(), basePath: normalizeBasePath(opts.BasePath), restart: opts.Restart}
+	manager.SetLimitConfigRefresher(func(state RuntimeState, now time.Time) (config.RuntimeConfig, error) {
+		return refreshLimitConfig(store, state, now)
+	})
+	server.restoreIntegrationSchedules()
+	return server
 }
 
 func (s *Server) Handler() http.Handler {
@@ -49,27 +67,79 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/auth/session", s.handleAuthSession)
 	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	mux.HandleFunc("POST /api/panel/credentials", s.handleAdminCredentials)
+	mux.HandleFunc("POST /api/panel/restart", s.handlePanelRestart)
+	mux.HandleFunc("GET /api/security", s.handleSecurityStatus)
+	mux.HandleFunc("POST /api/security/totp/prepare", s.handleTOTPPrepare)
+	mux.HandleFunc("POST /api/security/totp/enable", s.handleTOTPEnable)
+	mux.HandleFunc("POST /api/security/totp/disable", s.handleTOTPDisable)
+	mux.HandleFunc("POST /api/security/tokens", s.handleAPITokens)
+	mux.HandleFunc("DELETE /api/security/tokens/{id}", s.handleAPITokenDelete)
+	mux.HandleFunc("GET /api/nodes", s.handleManagedNodes)
+	mux.HandleFunc("POST /api/nodes/test", s.handleManagedNodeDraftTest)
+	mux.HandleFunc("PUT /api/nodes/{id}", s.handleManagedNodePut)
+	mux.HandleFunc("DELETE /api/nodes/{id}", s.handleManagedNodeDelete)
+	mux.HandleFunc("POST /api/nodes/{id}/test", s.handleManagedNodeTest)
+	mux.HandleFunc("POST /api/nodes/{id}/update", s.handleManagedNodeUpdate)
+	mux.HandleFunc("GET /api/nodes/{id}/config", s.handleManagedNodeConfig)
+	mux.HandleFunc("PUT /api/nodes/{id}/config", s.handleManagedNodeConfig)
+	mux.HandleFunc("POST /api/nodes/{id}/runtime/apply", s.handleManagedNodeRuntimeApply)
+	mux.HandleFunc("GET /api/nodes/{id}/stats", s.handleManagedNodeStats)
+	mux.HandleFunc("GET /api/nodes/{id}/system/interfaces", s.handleManagedNodeSystemInterfaces)
+	mux.HandleFunc("GET /api/nodes/{id}/share/clients/{objectID}", s.handleManagedNodeClientShare)
+	mux.HandleFunc("POST /api/nodes/{id}/connectors/test", s.handleManagedNodeConnectorTest)
+	mux.HandleFunc("POST /api/nodes/{id}/{kind}/{objectID}/traffic/reset", s.handleManagedNodeTrafficReset)
+	mux.HandleFunc("/api/nodes/{id}/integrations/{provider}/{action}", s.handleManagedNodeIntegration)
+	mux.HandleFunc("GET /api/nodes/mtls", s.handleManagedNodeMTLSGet)
+	mux.HandleFunc("PUT /api/nodes/mtls", s.handleManagedNodeMTLSPut)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/config/validate", s.handleValidate)
 	mux.HandleFunc("GET /api/runtime/state", s.handleRuntimeState)
 	mux.HandleFunc("POST /api/runtime/apply", s.handleRuntimeApply)
 	mux.HandleFunc("POST /api/runtime/enforce", s.handleRuntimeEnforce)
 	mux.HandleFunc("POST /api/runtime/stop", s.handleRuntimeStop)
+	mux.HandleFunc("POST /api/runtime/components/{component}/{action}", s.handleRuntimeComponentAction)
 	mux.HandleFunc("/api/runtime", s.handleRuntime)
 	mux.HandleFunc("GET /api/dashboard", s.handleDashboard)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /api/server/interfaces", s.handleSystemInterfaces)
+	mux.HandleFunc("GET /api/system/interfaces", s.handleSystemInterfaces)
+	mux.HandleFunc("POST /api/connectors/test", s.handleConnectorTest)
+	mux.HandleFunc("GET /panel/api/server/interfaces", s.handleSystemInterfaces)
 	mux.HandleFunc("GET /api/templates/raw-pair", s.handleRawPairTemplate)
 	mux.HandleFunc("/api/share/clients/", s.handleClientShare)
 	mux.HandleFunc("/api/clients/", s.handleClientTraffic)
+	mux.HandleFunc("/api/connectors/", s.handleConnectorTraffic)
+	mux.HandleFunc("/api/listeners/", s.handleListenerTraffic)
 	mux.HandleFunc("GET /api/xray/external/status", s.handleXrayExternalStatus)
+	mux.HandleFunc("GET /api/xray/vless-encryption", s.handleVlessEncryption)
+	mux.HandleFunc("GET /panel/api/server/getNewVlessEnc", s.handleVlessEncryption)
+	mux.HandleFunc("GET /api/xray/reality/x25519", s.handleRealityX25519)
+	mux.HandleFunc("GET /panel/api/server/getNewX25519Cert", s.handleRealityX25519)
+	mux.HandleFunc("GET /api/xray/reality/mldsa65", s.handleRealityMLDSA65)
+	mux.HandleFunc("GET /panel/api/server/getNewmldsa65", s.handleRealityMLDSA65)
+	mux.HandleFunc("POST /api/xray/tls/ech", s.handleTLSECH)
+	mux.HandleFunc("POST /panel/api/server/getNewEchCert", s.handleTLSECH)
+	mux.HandleFunc("POST /api/xray/tls/cert-hash", s.handleTLSCertHash)
+	mux.HandleFunc("POST /panel/api/server/getCertHash", s.handleTLSCertHash)
+	mux.HandleFunc("POST /api/xray/tls/remote-cert-hash", s.handleTLSRemoteCertHash)
+	mux.HandleFunc("POST /panel/api/server/getRemoteCertHash", s.handleTLSRemoteCertHash)
+	mux.HandleFunc("POST /api/xray/reality/scan", s.handleRealityScanTarget)
+	mux.HandleFunc("POST /panel/api/server/scanRealityTarget", s.handleRealityScanTarget)
+	mux.HandleFunc("POST /api/xray/reality/scan-many", s.handleRealityScanTargets)
+	mux.HandleFunc("POST /panel/api/server/scanRealityTargets", s.handleRealityScanTargets)
+	mux.HandleFunc("/api/integrations/warp/", s.handleWarpIntegration)
+	mux.HandleFunc("/api/integrations/nord/", s.handleNordIntegration)
 	mux.HandleFunc("POST /api/xray/external/upload", s.handleXrayExternalUpload)
 	mux.HandleFunc("POST /api/xray/external/download", s.handleXrayExternalDownload)
+	mux.HandleFunc("GET /api/updates/{component}", s.handleUpdateCatalog)
+	mux.HandleFunc("POST /api/updates/{component}", s.handleComponentUpdate)
 	mux.HandleFunc("/api/backup", s.handleBackup)
 	mux.HandleFunc("POST /api/backup/restore", s.handleBackupRestore)
 	mux.HandleFunc("/api/logs", s.handleLogs)
 	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnostics)
 	mux.HandleFunc("/api/objects/", s.handleObjects)
-	mux.Handle("/", staticHandler())
+	mux.Handle("/", staticHandler(s.basePath))
 	handler := s.authMiddleware(mux)
 	if s.basePath == "" {
 		return handler
@@ -171,20 +241,32 @@ func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 	if authenticated {
 		username = auth.Username
 	}
+	security, err := s.loadPanelSecurity(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            true,
-		"authEnabled":   auth.Enabled,
-		"authenticated": authenticated,
-		"username":      username,
+		"ok":               true,
+		"authEnabled":      auth.Enabled,
+		"authenticated":    authenticated,
+		"username":         username,
+		"twoFactorEnabled": security.TOTPSecret != "",
 	})
 }
 
 type loginRequest struct {
-	Username string
-	Password string
+	Username      string
+	Password      string
+	TwoFactorCode string
 }
 
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	loginKey := remoteHost(r.RemoteAddr)
+	if retryAfter := s.loginLimiter.RetryAfter(loginKey); retryAfter > 0 {
+		writeLoginRateLimit(w, retryAfter)
+		return
+	}
 	auth, err := s.authConfig(r.Context())
 	if err != nil {
 		writeError(w, err)
@@ -207,7 +289,25 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if subtleString(req.Username, auth.Username) != 1 || !VerifyPanelPassword(auth.PasswordHash, req.Password) {
 		s.log("warn", "auth.login", "invalid login")
+		if retryAfter := s.loginLimiter.Failure(loginKey); retryAfter > 0 {
+			writeLoginRateLimit(w, retryAfter)
+			return
+		}
 		writeErrorStatus(w, http.StatusUnauthorized, fmt.Errorf("invalid username or password"))
+		return
+	}
+	security, err := s.loadPanelSecurity(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if security.TOTPSecret != "" && !verifyTOTP(security.TOTPSecret, req.TwoFactorCode, time.Now()) {
+		s.log("warn", "auth.login", "invalid two-factor code")
+		if retryAfter := s.loginLimiter.Failure(loginKey); retryAfter > 0 {
+			writeLoginRateLimit(w, retryAfter)
+			return
+		}
+		writeErrorStatus(w, http.StatusUnauthorized, fmt.Errorf("invalid two-factor code"))
 		return
 	}
 	token, expires, err := s.sessions.Create(sessionTTL(auth))
@@ -216,6 +316,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setSessionCookie(w, token, expires, auth.SecureCookie)
+	s.loginLimiter.Success(loginKey)
 	s.log("info", "auth.login", "login succeeded")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
@@ -225,11 +326,35 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func remoteHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	if remoteAddr == "" {
+		return "unknown"
+	}
+	return remoteAddr
+}
+
+func writeLoginRateLimit(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int64((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	writeErrorStatus(w, http.StatusTooManyRequests, fmt.Errorf("too many login attempts; try again later"))
+}
+
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		s.sessions.Delete(cookie.Value)
 	}
-	clearSessionCookie(w)
+	secure := r.TLS != nil
+	if auth, err := s.authConfig(r.Context()); err == nil {
+		secure = auth.SecureCookie
+	}
+	clearSessionCookie(w, secure)
 	s.log("info", "auth.logout", "session cleared")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -246,6 +371,42 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	report := BuildStatsReport(cfg, s.runtime.State(), time.Now())
 	writeJSON(w, http.StatusOK, report)
+}
+
+type systemInterfaceInfo struct {
+	Name         string   `json:"name"`
+	Index        int      `json:"index"`
+	MTU          int      `json:"mtu"`
+	HardwareAddr string   `json:"hardwareAddr,omitempty"`
+	Flags        []string `json:"flags"`
+	Up           bool     `json:"up"`
+	Loopback     bool     `json:"loopback"`
+}
+
+func (s *Server) handleSystemInterfaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		writeErrorStatus(w, http.StatusInternalServerError, err)
+		return
+	}
+	items := make([]systemInterfaceInfo, 0, len(ifaces))
+	for _, iface := range ifaces {
+		flags := strings.Fields(iface.Flags.String())
+		items = append(items, systemInterfaceInfo{
+			Name:         iface.Name,
+			Index:        iface.Index,
+			MTU:          iface.MTU,
+			HardwareAddr: iface.HardwareAddr.String(),
+			Flags:        flags,
+			Up:           iface.Flags&net.FlagUp != 0,
+			Loopback:     iface.Flags&net.FlagLoopback != 0,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "obj": items})
 }
 
 func (s *Server) handleRuntimeApply(w http.ResponseWriter, r *http.Request) {
@@ -275,7 +436,7 @@ func (s *Server) handleRuntimeEnforce(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	state, events, err := s.runtime.EnforceClientLimits(cfg, time.Now())
+	state, events, err := s.runtime.EnforceLimits(cfg, time.Now())
 	if err != nil {
 		s.log("error", "runtime.enforce", err.Error())
 		writeError(w, err)
@@ -297,6 +458,37 @@ func (s *Server) handleRuntimeStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log("info", "runtime.stop", "runtime stopped")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": state})
+}
+
+func (s *Server) handleRuntimeComponentAction(w http.ResponseWriter, r *http.Request) {
+	component := strings.TrimSpace(r.PathValue("component"))
+	switch component {
+	case core.RuntimeComponentTapX, core.RuntimeComponentEmbeddedXray, core.RuntimeComponentExternalXray:
+	default:
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("unsupported runtime component %q", component))
+		return
+	}
+	action := strings.TrimSpace(r.PathValue("action"))
+	var (
+		state RuntimeState
+		err   error
+	)
+	switch action {
+	case "restart":
+		state, err = s.runtime.RestartComponent(component)
+	case "stop":
+		state, err = s.runtime.StopComponent(component)
+	default:
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("unsupported runtime component action %q", action))
+		return
+	}
+	if err != nil {
+		s.log("error", "runtime.component."+action, component+": "+err.Error())
+		writeRuntimeApplyError(w, err, state)
+		return
+	}
+	s.log("info", "runtime.component."+action, component)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": state})
 }
 
@@ -456,16 +648,36 @@ func (s *Server) handleObjects(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type BackupDocument struct {
-	Product    string               `json:"product"`
-	Version    int                  `json:"version"`
-	ExportedAt string               `json:"exportedAt"`
-	Config     config.RuntimeConfig `json:"config"`
-}
-
 func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	s.log("info", "backup.export", "database backup exported")
+	file, size, cleanup, err := s.store.OpenDatabaseBackup(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer cleanup()
+	filename := "tapx-backup-" + time.Now().UTC().Format("20060102-150405") + ".db"
+	w.Header().Set("Content-Type", "application/vnd.sqlite3")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, file)
+}
+
+func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
+	path, cleanup, err := readBackupFile(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer cleanup()
+	if err := s.store.RestoreDatabaseFile(r.Context(), path); err != nil {
+		s.log("error", "backup.restore", err.Error())
+		writeError(w, err)
 		return
 	}
 	cfg, err := s.store.LoadConfig(r.Context())
@@ -473,63 +685,30 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	doc := BackupDocument{
-		Product:    "TapX",
-		Version:    1,
-		ExportedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		Config:     cfg,
-	}
-	s.log("info", "backup.export", "configuration backup exported")
-	writeJSON(w, http.StatusOK, doc)
-}
-
-func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
-	raw, err := readBody(r)
+	persistedLogs, err := s.store.LoadLogs(r.Context(), defaultLogLimit)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	cfg, err := decodeBackupConfig(raw)
-	if err != nil {
-		s.log("error", "backup.restore", err.Error())
-		writeError(w, err)
-		return
+	s.logs.Replace(persistedLogs)
+	s.sessions.Clear()
+	state, stopErr := s.runtime.Stop()
+	s.dashboard.Reset()
+	s.log("info", "backup.restore", "database restored from backup")
+	warnings := make([]string, 0, 1)
+	if stopErr != nil {
+		warning := "configuration was restored, but the previous runtime could not be stopped: " + stopErr.Error()
+		warnings = append(warnings, warning)
+		s.log("error", "backup.restore.runtime-stop", warning)
 	}
-	if err := s.store.ReplaceConfig(r.Context(), cfg); err != nil {
-		s.log("error", "backup.restore", err.Error())
-		writeError(w, err)
-		return
-	}
-	s.log("info", "backup.restore", "configuration restored from backup")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg})
-}
-
-func decodeBackupConfig(raw []byte) (config.RuntimeConfig, error) {
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return config.RuntimeConfig{}, err
-	}
-	if rawConfig, ok := envelope["config"]; ok {
-		if len(rawConfig) == 0 || string(rawConfig) == "null" {
-			return config.RuntimeConfig{}, fmt.Errorf("backup config is required")
-		}
-		var cfg config.RuntimeConfig
-		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
-			return config.RuntimeConfig{}, err
-		}
-		return cfg, nil
-	}
-	if _, ok := envelope["product"]; ok {
-		return config.RuntimeConfig{}, fmt.Errorf("backup config is required")
-	}
-	if _, ok := envelope["version"]; ok {
-		return config.RuntimeConfig{}, fmt.Errorf("backup config is required")
-	}
-	var cfg config.RuntimeConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return config.RuntimeConfig{}, err
-	}
-	return cfg, nil
+	s.restoreIntegrationSchedules()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"config":          cfg,
+		"runtimeState":    state,
+		"restartRequired": true,
+		"warnings":        warnings,
+	})
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -595,6 +774,43 @@ func readBody(r *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("request body is empty")
 	}
 	return raw, nil
+}
+
+func readBackupFile(r *http.Request) (string, func(), error) {
+	defer r.Body.Close()
+	if r.ContentLength > maxBackupBody {
+		return "", nil, fmt.Errorf("backup database is too large")
+	}
+	file, err := os.CreateTemp("", "tapx-db-upload-*.db")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", nil, err
+	}
+	written, copyErr := io.Copy(file, io.LimitReader(r.Body, maxBackupBody+1))
+	closeErr := file.Close()
+	if copyErr != nil {
+		cleanup()
+		return "", nil, copyErr
+	}
+	if closeErr != nil {
+		cleanup()
+		return "", nil, closeErr
+	}
+	if written > maxBackupBody {
+		cleanup()
+		return "", nil, fmt.Errorf("backup database is too large")
+	}
+	if written == 0 {
+		cleanup()
+		return "", nil, fmt.Errorf("backup database is empty")
+	}
+	return path, cleanup, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

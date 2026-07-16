@@ -19,6 +19,7 @@ func TestResetClientTrafficStoresCurrentRuntimeOffsets(t *testing.T) {
 		t.Fatalf("replace config: %v", err)
 	}
 	state := RuntimeState{
+		Generation: 4,
 		UDPPipes: []RuntimePipeState{{
 			EndpointID:   "udp-a",
 			EndpointKind: "listener",
@@ -36,10 +37,10 @@ func TestResetClientTrafficStoresCurrentRuntimeOffsets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reset client traffic: %v", err)
 	}
-	if reset.TrafficRXOffset != 400 || reset.TrafficTXOffset != 200 || reset.ResetAt != now.Unix() {
+	if reset.TrafficRXOffset != 400 || reset.TrafficTXOffset != 200 || reset.ResetAt != now.Unix() || reset.Generation != 4 {
 		t.Fatalf("reset = %+v, want current counters", reset)
 	}
-	if next.Clients[0].TrafficRXOffset != 400 || next.Clients[0].TrafficTXOffset != 200 {
+	if next.Clients[0].TrafficRXOffset != 400 || next.Clients[0].TrafficTXOffset != 200 || next.Clients[0].TrafficResetGeneration != 4 {
 		t.Fatalf("stored client = %+v, want offsets", next.Clients[0])
 	}
 
