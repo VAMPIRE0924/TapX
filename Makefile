@@ -43,9 +43,6 @@ package-openwrt-x86: panel-web build-openwrt-x86
 package-release: build-linux package-openwrt-x86
 	bash ./scripts/build/release-archives.sh
 
-package-release: build-linux-amd64 package-openwrt-x86
-	bash ./scripts/build/release-archives.sh
-
 install-linux: build-linux-amd64
 	bash ./scripts/install/linux-install.sh
 

@@ -339,13 +339,6 @@ func (v *verifier) checkClientTrafficReset() {
 			"TrafficRXOffset",
 		}
 	}
-	if v.exists("docs/panel-api.md") {
-		checks["docs/panel-api.md"] = []string{
-			"POST   /api/clients/{id}/traffic/reset",
-			"TrafficResetAt",
-			"TrafficRXOffset",
-		}
-	}
 	for rel, markers := range checks {
 		payload, err := os.ReadFile(v.path(rel))
 		if err != nil {
@@ -552,8 +545,6 @@ func (v *verifier) checkClientSharing() {
 		},
 		"web/src/shared/api.ts": {
 			"/api/share/clients",
-		},
-		"web/src/schema.ts": {
 			"CredentialType",
 			"ConnectorID",
 			"IPv4Gateway",

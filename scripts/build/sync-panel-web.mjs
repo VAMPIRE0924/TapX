@@ -1,4 +1,4 @@
-import { access, cp, mkdir, readdir, rm } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,3 +20,9 @@ for (const entry of await readdir(targetDir, { withFileTypes: true })) {
 }
 
 await cp(sourceDir, targetDir, { recursive: true, force: true });
+
+for (const entry of ['index.html', 'login.html']) {
+  const target = resolve(targetDir, entry);
+  const content = await readFile(target, 'utf8');
+  await writeFile(target, content.replace(/\r\n/g, '\n'), 'utf8');
+}

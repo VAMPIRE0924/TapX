@@ -682,15 +682,6 @@ func firstImportedChunk(t *testing.T, app []byte, prefix string) string {
 	return string(match[1])
 }
 
-func firstJSAsset(t *testing.T, index []byte) string {
-	t.Helper()
-	match := regexp.MustCompile(`(?:src|href)="\./(assets/[^"]+\.js)"`).FindSubmatch(index)
-	if len(match) != 2 {
-		t.Fatalf("index missing JS asset: %s", string(index))
-	}
-	return string(match[1])
-}
-
 func TestServerValidationProblems(t *testing.T) {
 	store := newTestStore(t)
 	server := httptest.NewServer(NewServer(store).Handler())
