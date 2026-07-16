@@ -53,7 +53,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc gcc-aarch64-linux-gnu make pkg-config file curl ca-certificates \
+            gcc gcc-aarch64-linux-gnu libc6-dev-arm64-cross make pkg-config file curl ca-certificates \
             zstd xz-utils tar gzip
 
       - name: Cache OpenWrt SDK
