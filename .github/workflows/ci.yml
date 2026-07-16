@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc gcc-aarch64-linux-gnu libc6-dev-arm64-cross make pkg-config file \
-            iproute2 iptables iputils-ping
+            iperf3 iproute2 iptables iputils-ping
 
       - name: Build panel web
         run: make panel-web
