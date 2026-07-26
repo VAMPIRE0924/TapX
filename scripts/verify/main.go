@@ -1,18 +1,13 @@
 package main
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"tapx/internal/config"
@@ -162,9 +157,7 @@ func (v *verifier) checkRequiredFiles() {
 		"scripts/integration/raw-tcp-tls-tun-netns.sh",
 		"scripts/integration/raw-udp-dtls-tun-netns.sh",
 		"scripts/integration/address-guard-netns.sh",
-		"scripts/build/openwrt-x86-64-ipk.sh",
 		"scripts/build/openwrt-x86-64-packages.sh",
-		"scripts/install/openwrt-install.sh",
 		"openwrt/Makefile",
 		"docs/openwrt-dependencies.md",
 		"openwrt/tapx-core/files/etc/config/tapx",
@@ -817,124 +810,26 @@ func (v *verifier) checkOpenWrtPackages() {
 	}
 	packageDir := v.path("build/openwrt-x86-64/packages")
 	patterns := []struct {
-		name   string
-		ipk    string
-		apk    string
-		expect ipkExpectation
+		name string
+		apk  string
 	}{
-		{name: "tapx-core", ipk: "tapx-core_*.ipk", apk: "tapx-core-*.apk", expect: ipkExpectation{
-			ControlContains: []string{
-				"Package: tapx-core",
-				"Architecture: x86_64",
-				"Depends: libc",
-				"kmod-tun",
-				"ip-full",
-				"tc-full",
-				"kmod-sched-flower",
-				"iptables-nft",
-				"ip6tables-nft",
-				"ca-bundle",
-			},
-			DataFiles: []string{
-				"./usr/bin/tapx-core",
-				"./etc/config/tapx",
-				"./etc/init.d/tapx",
-				"./etc/tapx/runtime.json.example",
-			},
-			Conffiles: []string{"/etc/config/tapx"},
-		}},
-		{name: "luci-app-tapx", ipk: "luci-app-tapx_*.ipk", apk: "luci-app-tapx-*.apk", expect: ipkExpectation{
-			ControlContains: []string{
-				"Package: luci-app-tapx",
-				"Architecture: all",
-				"luci-base",
-				"tapx-core",
-				"tapx-panel",
-			},
-			DataFiles: []string{
-				"./usr/share/luci/menu.d/luci-app-tapx.json",
-				"./usr/share/rpcd/acl.d/luci-app-tapx.json",
-				"./usr/libexec/tapx-openwrt-config",
-				"./www/luci-static/resources/tapx/common.js",
-				"./www/luci-static/resources/view/tapx/overview.js",
-				"./www/luci-static/resources/view/tapx/panel.js",
-				"./www/luci-static/resources/view/tapx/backup.js",
-				"./www/luci-static/resources/view/tapx/logs.js",
-			},
-			DataContains: map[string][]string{
-				"./usr/share/rpcd/acl.d/luci-app-tapx.json": {
-					"/usr/bin/tapx-panel",
-					"/etc/init.d/tapx",
-					"/etc/init.d/tapx-panel",
-					"/sbin/logread",
-					"exec",
-				},
-				"./www/luci-static/resources/view/tapx/panel.js": {
-					"Listening interface",
-					"Save and apply",
-					"coreAutostart",
-					"panelAutostart",
-				},
-				"./usr/libexec/tapx-openwrt-config": {
-					"etc/config/tapx etc/tapx/tapx.db",
-					"/rom/etc/config/tapx",
-					"/rom/etc/tapx/tapx.db",
-				},
-			},
-		}},
-		{name: "tapx-panel", ipk: "tapx-panel_*.ipk", apk: "tapx-panel-*.apk", expect: ipkExpectation{
-			ControlContains: []string{
-				"Package: tapx-panel",
-				"Architecture: x86_64",
-				"libc",
-				"tapx-core",
-			},
-			DataFiles: []string{
-				"./usr/bin/tapx-panel",
-				"./etc/init.d/tapx-panel",
-				"./lib/upgrade/keep.d/tapx",
-			},
-			DataContains: map[string][]string{
-				"./lib/upgrade/keep.d/tapx": {
-					"/etc/config/tapx",
-					"/etc/tapx/tapx.db",
-				},
-			},
-		}},
+		{name: "tapx-core", apk: "tapx-core-*.apk"},
+		{name: "luci-app-tapx", apk: "luci-app-tapx-*.apk"},
+		{name: "tapx-panel", apk: "tapx-panel-*.apk"},
 	}
-	foundAny := false
-	format := ""
 	for _, item := range patterns {
-		ipks, _ := filepath.Glob(filepath.Join(packageDir, item.ipk))
-		apks, _ := filepath.Glob(filepath.Join(packageDir, item.apk))
-		matches := append(ipks, apks...)
+		matches, _ := filepath.Glob(filepath.Join(packageDir, item.apk))
 		if len(matches) == 0 {
-			if v.requireOpenWrtPackages {
-				v.fail("missing OpenWrt package %s", item.name)
-			}
+			v.fail("missing OpenWrt APK %s", item.name)
 			continue
 		}
-		foundAny = true
 		if len(matches) != 1 {
-			v.fail("expected one OpenWrt package for %s, found %d", item.name, len(matches))
+			v.fail("expected one OpenWrt APK for %s, found %d", item.name, len(matches))
 			continue
 		}
-		ext := filepath.Ext(matches[0])
-		if format == "" {
-			format = ext
-		} else if format != ext {
-			v.fail("OpenWrt package formats are mixed: %s and %s", format, ext)
-		}
-		if ext == ".ipk" {
-			if err := verifyIPK(matches[0], item.expect); err != nil {
-				v.fail("verify ipk %s: %v", v.rel(matches[0]), err)
-			}
-		} else if info, err := os.Stat(matches[0]); err != nil || info.Size() < 512 {
+		if info, err := os.Stat(matches[0]); err != nil || info.Size() < 512 {
 			v.fail("invalid apk %s", v.rel(matches[0]))
 		}
-	}
-	if foundAny && format != ".ipk" && format != ".apk" {
-		v.fail("unsupported OpenWrt package format %s", format)
 	}
 }
 
@@ -998,181 +893,4 @@ func (v *verifier) rel(path string) string {
 func (v *verifier) exists(rel string) bool {
 	_, err := os.Stat(v.path(rel))
 	return err == nil
-}
-
-type ipkExpectation struct {
-	ControlContains []string
-	DataFiles       []string
-	DataContains    map[string][]string
-	Conffiles       []string
-}
-
-func verifyIPK(path string, expect ipkExpectation) error {
-	members, err := readIPK(path)
-	if err != nil {
-		return err
-	}
-	for _, name := range []string{"debian-binary", "control.tar.gz", "data.tar.gz"} {
-		if _, ok := members[name]; !ok {
-			return fmt.Errorf("missing ar member %s", name)
-		}
-	}
-	if strings.TrimSpace(string(members["debian-binary"])) != "2.0" {
-		return errors.New("debian-binary is not 2.0")
-	}
-	controlFiles, err := readTarGz(members["control.tar.gz"])
-	if err != nil {
-		return fmt.Errorf("control.tar.gz: %w", err)
-	}
-	control := string(controlFiles["./control"])
-	for _, want := range expect.ControlContains {
-		if !strings.Contains(control, want) {
-			return fmt.Errorf("control missing %q", want)
-		}
-	}
-	if len(expect.Conffiles) > 0 {
-		conffiles := splitLines(string(controlFiles["./conffiles"]))
-		for _, want := range expect.Conffiles {
-			if !contains(conffiles, want) {
-				return fmt.Errorf("conffiles missing %q", want)
-			}
-		}
-	}
-	dataFiles, err := readTarGz(members["data.tar.gz"])
-	if err != nil {
-		return fmt.Errorf("data.tar.gz: %w", err)
-	}
-	for _, want := range expect.DataFiles {
-		if _, ok := dataFiles[want]; !ok {
-			return fmt.Errorf("data missing %s; got %s", want, strings.Join(sortedKeys(dataFiles), ", "))
-		}
-	}
-	for name, markers := range expect.DataContains {
-		data, ok := dataFiles[name]
-		if !ok {
-			return fmt.Errorf("data missing %s; got %s", name, strings.Join(sortedKeys(dataFiles), ", "))
-		}
-		text := string(data)
-		for _, marker := range markers {
-			if !strings.Contains(text, marker) {
-				return fmt.Errorf("data %s missing %q", name, marker)
-			}
-		}
-	}
-	return nil
-}
-
-func readIPK(path string) (map[string][]byte, error) {
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var members map[string][]byte
-	switch {
-	case len(payload) >= 8 && string(payload[:8]) == "!<arch>\n":
-		members, err = readArPayload(payload)
-	case len(payload) >= 2 && payload[0] == 0x1f && payload[1] == 0x8b:
-		members, err = readTarGz(payload)
-	default:
-		return nil, errors.New("unsupported ipk container")
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	normalized := make(map[string][]byte, len(members))
-	for name, data := range members {
-		normalized[strings.TrimPrefix(name, "./")] = data
-	}
-	return normalized, nil
-}
-
-func readArPayload(payload []byte) (map[string][]byte, error) {
-	if len(payload) < 8 || string(payload[:8]) != "!<arch>\n" {
-		return nil, errors.New("invalid ar magic")
-	}
-	out := map[string][]byte{}
-	offset := 8
-	for offset < len(payload) {
-		if offset+60 > len(payload) {
-			return nil, errors.New("truncated ar header")
-		}
-		header := string(payload[offset : offset+60])
-		offset += 60
-		name := strings.TrimSpace(header[:16])
-		name = strings.TrimSuffix(name, "/")
-		sizeText := strings.TrimSpace(header[48:58])
-		var size int
-		if _, err := fmt.Sscanf(sizeText, "%d", &size); err != nil {
-			return nil, fmt.Errorf("parse ar size %q: %w", sizeText, err)
-		}
-		if offset+size > len(payload) {
-			return nil, fmt.Errorf("ar member %s exceeds file", name)
-		}
-		out[name] = append([]byte(nil), payload[offset:offset+size]...)
-		offset += size
-		if offset%2 == 1 {
-			offset++
-		}
-	}
-	return out, nil
-}
-
-func readTarGz(payload []byte) (map[string][]byte, error) {
-	gz, err := gzip.NewReader(bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	out := map[string][]byte{}
-	for {
-		header, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		if header.FileInfo().IsDir() {
-			continue
-		}
-		data, err := io.ReadAll(tr)
-		if err != nil {
-			return nil, err
-		}
-		out[header.Name] = data
-	}
-	return out, nil
-}
-
-func splitLines(value string) []string {
-	lines := strings.Split(value, "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			out = append(out, line)
-		}
-	}
-	return out
-}
-
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
-func sortedKeys(values map[string][]byte) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }

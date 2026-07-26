@@ -23,6 +23,11 @@ import {
   type UpdateComponent,
 } from '../shared/api';
 import { formatBytes } from '../shared/format';
+import {
+  activeExternalXrayPipes,
+  activeRawTCPPipes,
+  activeTapXPipeCount,
+} from '../shared/runtime-status';
 import { useI18n } from '../i18n/I18nProvider';
 import {
   BackupDialog,
@@ -45,7 +50,7 @@ const emptyReport: DashboardReport = {
   system: {},
 };
 
-export function DashboardPage() {
+export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => void }) {
   const { t } = useI18n();
   const [data, setData] = useState<DashboardReport>(emptyReport);
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport>();
@@ -93,11 +98,11 @@ export function DashboardPage() {
   const counts = data.objectCounts || {};
   const system = data.system || {};
   const rates = data.rates || {};
-  const activeTcpPipes = (runtime.tcpPipes || []).filter((item) => !(item as { inactive?: boolean }).inactive);
-  const tapxPipes = (runtime.udpPipes?.length || 0) + activeTcpPipes.length;
+  const activeRawTcpPipes = activeRawTCPPipes(runtime);
+  const tapxPipes = activeTapXPipeCount(runtime);
   const xrayPipes = runtime.xrayPipes?.length || 0;
-  const externalXrayTunnels = activeTcpPipes.filter((item) => (item as { xrayRuntime?: string }).xrayRuntime === 'external').length;
-  const rawTcpTunnels = Math.max(0, activeTcpPipes.length - externalXrayTunnels);
+  const externalXrayTunnels = activeExternalXrayPipes(runtime).length;
+  const rawTcpTunnels = activeRawTcpPipes.length;
   const rawUdpTunnels = runtime.udpPipes?.length || 0;
   const activeEndpoints = (data.stats?.byEndpoint || []).filter((item) => (item.activePipes ?? item.pipes ?? 0) > 0);
   const activeListeners = activeEndpoints.filter((item) => item.kind === 'listener').length;
@@ -196,7 +201,7 @@ export function DashboardPage() {
             <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'tapx' })} />
             <ActionItem icon={<PoweroffOutlined />} text={t('common.stop')} onClick={() => confirmRuntimeAction('tapx', 'TapX', 'stop')} />
             <ActionItem icon={<ReloadOutlined />} text={t('common.restart')} onClick={() => confirmRuntimeAction('tapx', 'TapX', 'restart')} />
-            <ActionItem icon={<ToolOutlined />} text={t('common.config')} onClick={() => setUpdateTarget('tapx')} />
+            <ActionItem icon={<ToolOutlined />} text={t('common.config')} onClick={() => onNavigate('/kernels#kernel')} />
           </ActionGrid>
         </DashboardCard>
 
@@ -206,10 +211,10 @@ export function DashboardPage() {
           statusTone={embeddedXray?.running ? 'green' : 'orange'}
         >
           <ActionGrid>
-            <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'xray' })} />
+            <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'embedded-xray' })} />
             <ActionItem icon={<PoweroffOutlined />} text={t('common.stop')} onClick={() => confirmRuntimeAction('embedded-xray', t('dashboard.embeddedXray'), 'stop')} />
             <ActionItem icon={<ReloadOutlined />} text={t('common.restart')} onClick={() => confirmRuntimeAction('embedded-xray', t('dashboard.embeddedXray'), 'restart')} />
-            <ActionItem icon={<ToolOutlined />} text={t('common.config')} onClick={() => setUpdateTarget('tapx')} />
+            <ActionItem icon={<ToolOutlined />} text={t('common.config')} onClick={() => onNavigate('/kernels#kernel')} />
           </ActionGrid>
         </DashboardCard>
 
@@ -219,10 +224,10 @@ export function DashboardPage() {
           statusTone={externalXray?.running ? 'green' : 'orange'}
         >
           <ActionGrid>
-            <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'xray' })} />
+            <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'external-xray' })} />
             <ActionItem icon={<PoweroffOutlined />} text={t('common.stop')} onClick={() => confirmRuntimeAction('external-xray', t('dashboard.externalXray'), 'stop')} />
             <ActionItem icon={<ReloadOutlined />} text={t('common.restart')} onClick={() => confirmRuntimeAction('external-xray', t('dashboard.externalXray'), 'restart')} />
-            <ActionItem icon={<ToolOutlined />} text={t('common.config')} onClick={() => setUpdateTarget('external-xray')} />
+            <ActionItem icon={<ToolOutlined />} text={t('common.config')} onClick={() => onNavigate('/kernels#external')} />
           </ActionGrid>
         </DashboardCard>
 
@@ -398,8 +403,7 @@ function appendSample(current: DashboardSample[], report: DashboardReport): Dash
   const embedded = runtimes.find((item) => item.runtime === 'embedded');
   const external = runtimes.find((item) => item.runtime === 'external');
   const process = report.process || {};
-  const rawPipes = (runtime.udpPipes?.length || 0)
-    + (runtime.tcpPipes || []).filter((item) => !(item as { inactive?: boolean }).inactive).length;
+  const rawPipes = activeTapXPipeCount(runtime);
   const generatedAt = report.generatedAt ? Date.parse(report.generatedAt) : Number.NaN;
   const next: DashboardSample = {
     at: Number.isFinite(generatedAt) ? generatedAt : Date.now(),

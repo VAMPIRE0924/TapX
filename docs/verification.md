@@ -35,9 +35,9 @@ make package-openwrt-x86
 make verify-release
 ```
 
-`verify-release` requires all three native OpenWrt packages. IPK artifacts are
-unpacked to verify control metadata, conffiles, and installed paths; APK
-artifacts must be emitted together by the selected OpenWrt SDK.
+`verify-release` requires all three native OpenWrt APK packages. The final
+acceptance check installs those exact APKs on the dedicated OpenWrt device and
+verifies their files, conffiles, init services, LuCI pages, and runtime.
 
 ## Linux Runtime Checks
 

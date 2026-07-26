@@ -89,7 +89,7 @@ export function App() {
       <Shell active={active} theme={theme} currentPath={currentPath} onThemeChange={setTheme} onNavigate={navigate}>
         <Suspense fallback={<div className="page-loading"><Spin size="large" /></div>}>
           {active === 'dashboard'
-            ? <DashboardPage />
+            ? <DashboardPage onNavigate={navigate} />
             : active === 'nodes'
               ? <NodePage />
               : active === 'devices'
@@ -106,7 +106,7 @@ export function App() {
                         ? <SettingsPage currentPath={currentPath} />
                         : active === 'kernels'
                           ? <KernelPage currentPath={currentPath} />
-                          : <DashboardPage />}
+                          : <DashboardPage onNavigate={navigate} />}
         </Suspense>
       </Shell>
     </ConfigProvider>

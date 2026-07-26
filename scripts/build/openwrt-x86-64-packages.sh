@@ -55,8 +55,7 @@ fi
 make -C "$sdk" defconfig
 mkdir -p "$sdk/bin"
 find "$sdk/bin" -type f \
-  \( -name 'tapx-core*.apk' -o -name 'tapx-panel*.apk' -o -name 'luci-app-tapx*.apk' \
-     -o -name 'tapx-core*.ipk' -o -name 'tapx-panel*.ipk' -o -name 'luci-app-tapx*.ipk' \) \
+  \( -name 'tapx-core*.apk' -o -name 'tapx-panel*.apk' -o -name 'luci-app-tapx*.apk' \) \
   -delete
 TAPX_PREBUILT_DIR="$out_dir" TAPX_VERSION="$version" \
   make -C "$sdk" package/tapx/compile V=sc
@@ -64,8 +63,7 @@ TAPX_PREBUILT_DIR="$out_dir" TAPX_VERSION="$version" \
 rm -rf "$pkg_dir"
 mkdir -p "$pkg_dir"
 mapfile -t packages < <(find "$sdk/bin" -type f \
-  \( -name 'tapx-core-*.apk' -o -name 'tapx-panel-*.apk' -o -name 'luci-app-tapx-*.apk' \
-     -o -name 'tapx-core_*.ipk' -o -name 'tapx-panel_*.ipk' -o -name 'luci-app-tapx_*.ipk' \) \
+  \( -name 'tapx-core-*.apk' -o -name 'tapx-panel-*.apk' -o -name 'luci-app-tapx-*.apk' \) \
   -print | sort)
 if ((${#packages[@]} != 3)); then
   printf 'expected 3 TapX packages, found %d:\n' "${#packages[@]}" >&2

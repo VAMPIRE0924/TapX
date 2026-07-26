@@ -213,10 +213,11 @@ Forbidden in the hot path:
 
 - Linux installer.
 - systemd service.
-- OpenWrt `tapx-core.ipk`, with current development validation on x86-64 first.
-- OpenWrt `tapx-panel.ipk`, with current development validation on x86-64 first.
-- OpenWrt `luci-app-tapx.ipk`, with current development validation on x86-64 first.
-- Non-x86 OpenWrt architectures, including MT7986 when explicitly needed, are follow-up packaging targets.
+- OpenWrt `tapx-core` APK, with the public release target on x86-64.
+- OpenWrt `tapx-panel` APK, with the public release target on x86-64.
+- OpenWrt `luci-app-tapx` APK, with the public release target on x86-64.
+- MT7986 APKs are built for the explicitly requested dedicated lab device;
+  other non-x86 architectures remain follow-up packaging targets.
 - Documentation for install, config, API, OpenWrt, troubleshooting, and development.
 
 Current delivery status: Linux amd64 binary build, systemd unit, root installer,
@@ -232,9 +233,9 @@ counter totals, rate estimates, error/drop counts, fastpath/process diagnostics,
 object counts, and recent logs.
 Client traffic reset is also wired through API/UI, closing the required
 used-traffic/reset part of Client traffic-package management.
-OpenWrt currently has x86-64 SDK build targets and IPK packaging for
+OpenWrt currently has x86-64 release and MT7986 lab APK packaging for
 `tapx-core`, `tapx-panel`, and `luci-app-tapx`. The core and panel have separate
 procd services. LuCI is intentionally limited to service status/actions, basic
 UCI settings, recent logs, and opening the full TapX-UI; advanced object and
-runtime configuration stays in the shared full panel. Non-x86 package
+runtime configuration stays in the shared full panel. Other non-x86 package
 validation and full architecture packaging remain follow-up work.

@@ -21,11 +21,9 @@ need_file() {
 
 need_file "$repo_root/scripts/install/linux-install.sh"
 need_file "$repo_root/scripts/install/install.sh"
-need_file "$repo_root/scripts/install/openwrt-install.sh"
 
 mapfile -t openwrt_packages < <(find "$openwrt_pkg_dir" -maxdepth 1 -type f \
-  \( -name 'tapx-core_*.ipk' -o -name 'tapx-panel_*.ipk' -o -name 'luci-app-tapx_*.ipk' \
-     -o -name 'tapx-core-*.apk' -o -name 'tapx-panel-*.apk' -o -name 'luci-app-tapx-*.apk' \) \
+  \( -name 'tapx-core-*.apk' -o -name 'tapx-panel-*.apk' -o -name 'luci-app-tapx-*.apk' \) \
   -print | sort)
 if ((${#openwrt_packages[@]} != 3)); then
   echo "expected 3 OpenWrt packages in $openwrt_pkg_dir" >&2
@@ -52,7 +50,6 @@ for arch in "${linux_arches[@]}"; do
 done
 
 cp "${openwrt_packages[@]}" "$work_dir/$openwrt_name/"
-install -m 0755 "$repo_root/scripts/install/openwrt-install.sh" "$work_dir/$openwrt_name/install.sh"
 
 tar -C "$work_dir" -czf "$dist_dir/$openwrt_asset" "$openwrt_name"
 

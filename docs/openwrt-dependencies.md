@@ -2,7 +2,7 @@
 
 TapX packages declare runtime dependencies in `openwrt/Makefile`. On an OpenWrt
 system with matching package feeds, installing `tapx-core`, `tapx-panel`, or
-`luci-app-tapx` must resolve the required APK/IPK packages automatically.
+`luci-app-tapx` must resolve the required APK packages automatically.
 
 ## Runtime dependencies
 

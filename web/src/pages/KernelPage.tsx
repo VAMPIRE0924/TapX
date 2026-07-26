@@ -23,6 +23,7 @@ import { UnitInputNumber } from '../components/UnitInputNumber';
 import { objectToSettings, settingsToObject, stableSettingsSnapshot } from '../shared/settings';
 import { formatBytes } from '../shared/format';
 import { useI18n } from '../i18n/I18nProvider';
+import { activeTapXPipeCount } from '../shared/runtime-status';
 import type { TranslationKey } from '../i18n/dictionaries';
 import './KernelPage.css';
 import { hashFromPath } from '../app/hash-route';
@@ -373,7 +374,7 @@ function BuiltInKernelSettings({ dashboard, dirty, restarting, onRestart, onUpda
   const tapxEnabled = Form.useWatch('tapxEnabled', form) !== false;
   const runtime = dashboard?.runtime;
   const embeddedXray = runtime?.xrayRuntimes?.find((item) => item.runtime === 'embedded');
-  const tapxRunning = runtime?.running === true;
+  const tapxRunning = activeTapXPipeCount(runtime) > 0;
   return (
     <div className="kernel-section-stack">
       <Card className="kernel-runtime-card" title={t('kernel.kernelManagement')}>

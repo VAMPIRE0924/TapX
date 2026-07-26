@@ -9,7 +9,7 @@
 make package-openwrt-x86
 ```
 
-构建格式由 SDK 决定：OpenWrt 25.12 及以后生成 APK，旧版 SDK 生成 IPK。输出位于：
+当前构建使用 OpenWrt APK 格式。输出位于：
 
 ```text
 build/openwrt-x86-64/packages/
@@ -17,13 +17,14 @@ build/openwrt-x86-64/packages/
 
 ## 安装
 
-将同一构建中的三个包和 `install.sh` 放在同一目录，以 root 运行：
+将同一构建中的三个 APK 放在同一目录，以 root 直接安装：
 
 ```sh
-./install.sh
+apk add --allow-untrusted --force-reinstall \
+  ./tapx-core-*.apk ./tapx-panel-*.apk ./luci-app-tapx-*.apk
 ```
 
-脚本自动识别 `apk` 或 `opkg`，并由系统仓库安装 `kmod-tun`、`ip-full`、`tc-full`、iptables nft 后端、CA 证书和 LuCI 依赖。
+`apk` 会从系统仓库解析并安装 `kmod-tun`、`ip-full`、`tc-full`、iptables nft 后端、CA 证书和 LuCI 依赖。
 
 安装后服务保持关闭。进入 `LuCI -> 服务 -> TapX`，设置监听网卡、面板端口、登录入口、用户名和密码后才能启动。
 
@@ -33,7 +34,7 @@ build/openwrt-x86-64/packages/
 - LuCI 可导出和恢复 OpenWrt 配置包，包内固定仅含 `/etc/config/tapx` 与一致性快照 `/etc/tapx/tapx.db`，不包含证书或其他文件。
 - `/lib/upgrade/keep.d/tapx` 只登记上述 UCI 和 DB 文件，`sysupgrade` 固件升级时一并保留。
 - `/etc/tapx/runtime.json` 是派生文件，不进入备份；核心启动前由 Go 控制面从 DB 校验并重新生成，避免升级或恢复后使用旧运行配置。
-- 普通 IPK/APK 升级不会删除未由软件包覆盖的 DB，也不会重置首次初始化状态。
+- 普通 APK 升级不会删除未由软件包覆盖的 DB，也不会重置首次初始化状态。
 - LuCI 不保存用户名或密码；密码在浏览器中生成 PBKDF2 哈希后写入 SQLite，初始化完成后不回显凭据。
 
 LuCI 的“重置到固件”与设备恢复出厂后的规则一致：只有将 TapX 软件包、`/etc/config/tapx` 和预置 `/etc/tapx/tapx.db` 一并编入固件时，才会恢复固件内的预置配置。固件没有预置 DB 时回到未初始化状态；运行后产生的 overlay 数据不会跨出厂重置保留。

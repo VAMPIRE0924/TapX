@@ -107,7 +107,7 @@
 
 ## Phase 7: OpenWrt
 
-- Separate tapx-core and tapx-panel packages for x86-64 first. (Initial `.ipk` packaging exists.)
+- Separate tapx-core and tapx-panel APK packages for x86-64 releases and the explicitly requested MT7986 lab target.
 - UCI config. (Initial implementation exists.)
 - procd service. (Initial implementation exists.)
 - Minimal LuCI service bridge. (Initial UCI settings, core/panel service status

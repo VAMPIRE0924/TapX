@@ -17,7 +17,26 @@ import {
 import './DashboardDialogs.css';
 import { useI18n } from '../../i18n/I18nProvider';
 
-export type LogScope = 'all' | 'tapx' | 'xray';
+export type LogScope = 'all' | 'tapx' | 'embedded-xray' | 'external-xray';
+
+export function logMatchesScope(event: PanelLogEvent, scope: LogScope): boolean {
+  if (scope === 'all') return true;
+  const action = event.action.toLowerCase();
+  const detail = `${action} ${event.message}`.toLowerCase();
+  if (scope === 'embedded-xray') {
+    return action.startsWith('runtime.component.') && detail.includes('embedded-xray');
+  }
+  if (scope === 'external-xray') {
+    return action.startsWith('xray.') || (
+      action.startsWith('runtime.component.') && detail.includes('external-xray')
+    );
+  }
+  return action === 'runtime.apply'
+    || action === 'runtime.enforce'
+    || action === 'runtime.stop'
+    || action.startsWith('tapx.')
+    || (action.startsWith('runtime.component.') && /\btapx\b/.test(event.message.toLowerCase()));
+}
 
 export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogScope; onClose: () => void }) {
   const { t } = useI18n();
@@ -25,11 +44,7 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
   const [loading, setLoading] = useState(false);
   const [messageApi, contextHolder] = message.useMessage();
 
-  const filtered = useMemo(() => events.filter((event) => {
-    if (scope === 'all') return true;
-    const action = event.action.toLowerCase();
-    return scope === 'xray' ? action.includes('xray') : !action.includes('xray');
-  }), [events, scope]);
+  const filtered = useMemo(() => events.filter((event) => logMatchesScope(event, scope)), [events, scope]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -46,17 +61,32 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
     if (open) void load();
   }, [load, open, scope]);
 
-  async function clear() {
-    try {
-      await clearPanelLogs();
-      setEvents([]);
-      messageApi.success(t('dashboard.logsCleared'));
-    } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : t('dashboard.logClearFailed'));
-    }
+  function confirmClear() {
+    Modal.confirm({
+      title: t('dashboard.clearLogsConfirm'),
+      content: t('dashboard.clearLogsConfirmHelp'),
+      okText: t('dashboard.clear'),
+      cancelText: t('dashboard.cancel'),
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await clearPanelLogs();
+          setEvents([]);
+          messageApi.success(t('dashboard.logsCleared'));
+        } catch (error) {
+          messageApi.error(error instanceof Error ? error.message : t('dashboard.logClearFailed'));
+        }
+      },
+    });
   }
 
-  const title = scope === 'all' ? t('dashboard.panelLogs') : scope === 'xray' ? t('dashboard.xrayLogs') : t('dashboard.tapxLogs');
+  const title = scope === 'all'
+    ? t('dashboard.panelLogs')
+    : scope === 'tapx'
+      ? t('dashboard.tapxLogs')
+      : scope === 'embedded-xray'
+        ? t('dashboard.embeddedXrayLogs')
+        : t('dashboard.externalXrayLogs');
   return (
     <>
       {contextHolder}
@@ -68,7 +98,9 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
         footer={(
           <Space>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>{t('common.refresh')}</Button>
-            <Button danger icon={<ClearOutlined />} disabled={events.length === 0} onClick={() => void clear()}>{t('dashboard.clear')}</Button>
+            {scope === 'all' ? (
+              <Button danger icon={<ClearOutlined />} disabled={events.length === 0} onClick={confirmClear}>{t('dashboard.clear')}</Button>
+            ) : null}
             <Button type="primary" onClick={onClose}>{t('common.close')}</Button>
           </Space>
         )}

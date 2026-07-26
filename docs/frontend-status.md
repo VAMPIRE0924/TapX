@@ -82,7 +82,7 @@
 - `✅` 前端入口依赖图无孤儿生产模块；设置页和内核页重复的 hash 解析已合并为共享工具并覆盖测试。
 - `✅` 生产构建只发布 `web/`；Go 静态服务会注入无脚本的 `<base>`/`tapx-base-path` 元数据并为前端子路由回退 `index.html`。真实浏览器已验证 `/tapx-secret/devices` 导航与直接刷新、前缀资源加载和控制台零错误；根路径开发服务器的 `/devices` 也已回归。
 - `✅` 管理日志已从进程内存迁移到控制面数据库，保留最近 500 条并支持重启恢复和持久清空；SQLite 为默认后端，安装时可选 PostgreSQL。两种后端统一导出可移植 `.db`，恢复前校验文件头、完整性、TapX 表和保存配置，并支持 SQLite 与 PostgreSQL 双向迁移。登录会话不属于持久配置。
-- `✅` OpenWrt x86-64 已拆分为 `tapx-core`、`tapx-panel`、`luci-app-tapx` 三只 IPK；LuCI 仅保留服务状态/操作、基础 UCI、日志和打开完整面板。2026-07-13 使用 OpenWrt 25.12.5 SDK 完成交叉编译、三包结构校验和双归档组装；真实路由器安装与 LuCI 交互回归尚未执行。
+- `✅` OpenWrt 已拆分为 `tapx-core`、`tapx-panel`、`luci-app-tapx` 三只 APK；LuCI 仅保留服务状态/操作、基础 UCI、日志和打开完整面板。旧 IPK/安装脚本兼容路径已删除，实际路由器使用 `apk` 直接安装并重新回归。
 - `✅` 生产静态资源已删除遗留的 3x-ui `openapi.json`（其中包含 TapX 不存在的订阅、分组、节点和 Telegram API）；用户分享响应同步删除永远为空的 `qrPng` 字段，保留 `raw://` 与各支持协议的直接链接。
 - `✅` Linux 中文安装/管理脚本已增加 `TAPX_NONINTERACTIVE=1` 验收模式；SQLite 默认安装、管理员初始化、环境文件权限和 systemd 参数已在 WSL 临时根目录验证。PostgreSQL 13 通过 SSH 加密隧道完成真实 schema 迁移、读写、`.db` 导出、跨后端恢复和面板 `-check`，测试服务与软件包随后清理。
 
@@ -136,7 +136,7 @@
 - `✅ TAP/TUN 语义`：Raw UDP、内置 Xray 和受管外置 Xray 均通过 PPPoE discovery/session、MAC 学习、广播、多播、未知单播、VLAN、QinQ、STP、LACP、802.1X、LLDP；TUN 双向 IPv4/IPv6 和 DF 大包通过。设备 MTU 保持 1500，未把历史 1300 字节回归载荷当作传输上限。
 - `✅ 公网边缘协议`：当前 Linux amd64 构建在两台验证机上通过外置 Xray Shadowsocks、Hysteria、mKCP、HTTPUpgrade、XHTTP 的 TUN/TAP 共 10 项，全部验证 MTU 1500、双向 IPv4/IPv6 和满 MTU DF。一次 32 项重跑在第 23 项因两台机器 SSH 同时限流而中止；该项拆批后通过，确认不是数据面死锁。远端临时目录、接口和端口已清理。
 - `✅ DB 与升级`：SQLite 与 PostgreSQL 均支持统一 `.db` 导出、拒绝 JSON、清空后恢复和跨后端迁移；SQLite 在线快照与 PostgreSQL 事务恢复已验证。TapX-UI、TapX 和内置 Xray 使用同一兼容发布包升级；外置 Xray 独立使用官方发布；数据库和升级只运行在控制面，不修改 C FastPath、TUN/TAP 热路径或官方 Xray 核心。
-- `✅ x86 交付结构`：OpenWrt x86-64 三只 IPK 通过结构验证；发布归档包含 Linux 双二进制包、OpenWrt 组合包和带 SHA256/组件兼容关系的 `tapx-update-manifest.json`。
+- `✅ OpenWrt 交付结构`：OpenWrt x86-64 发布与 MT7986 实验室目标均输出三只 APK；发布归档包含 Linux 双二进制包、OpenWrt APK 组合包和带 SHA256/组件兼容关系的 `tapx-update-manifest.json`。
 - `🟡 后端缺口`：`AddressConfigEnabled` 的关闭和手动地址路径已有真实应用证据；`AddressAssignMode=auto` 目前只会让接口启动且不写静态地址，尚未实现跨 Raw/Xray 的协议级地址推送或 Linux/OpenWrt DHCP/SLAAC 生命周期。前端保留该选项，但在完成地址协商前不得标记为“自动获取已完成”。
 
 ## 表单说明与示例审查（2026-07-16）

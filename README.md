@@ -43,15 +43,17 @@ sudo tapx update
 
 ## OpenWrt x86-64
 
-Download `tapx-openwrt-x86-64.tar.gz` from the latest Release and run:
+Download `tapx-openwrt-x86-64.tar.gz` from the latest Release and install the
+three APK packages directly:
 
 ```bash
 tar -xzf tapx-openwrt-x86-64.tar.gz
 cd tapx-openwrt-x86-64
-./install.sh
+apk add --allow-untrusted --force-reinstall \
+  ./tapx-core-*.apk ./tapx-panel-*.apk ./luci-app-tapx-*.apk
 ```
 
-The package installs TapX Core, TapX-UI, and the minimal LuCI management page. Full object and runtime configuration remains available in TapX-UI.
+The APKs install TapX Core, TapX-UI, and the minimal LuCI management page. Full object and runtime configuration remains available in TapX-UI.
 
 OpenWrt upgrades preserve `/etc/config/tapx` and `/etc/tapx/tapx.db`. Configuration export contains only these panel settings and database files; certificate files are excluded.
 

@@ -41,7 +41,7 @@ initial release artifact set is intentionally small and x86-focused:
 
 - `tapx-linux-amd64.tar.gz`, containing `tapx-core`, `tapx-panel`, and the installer
 - `tapx-linux-arm64.tar.gz`, containing the same Linux bundle for arm64
-- `tapx-openwrt-x86-64.tar.gz`, containing the native IPK or APK `tapx-core`, `tapx-panel`, `luci-app-tapx` packages and installer
+- `tapx-openwrt-x86-64.tar.gz`, containing the native APK `tapx-core`, `tapx-panel`, and `luci-app-tapx` packages for direct installation with `apk`
 - `SHA256SUMS`
 - `tapx-update-manifest.json`, describing compatible panel, TapX Core, embedded Xray, platform assets, and SHA256 values for the panel updater
 
@@ -77,4 +77,4 @@ atomically replaces `tapx-panel` and `tapx-core` with rollback backups, then
 requests a supervisor restart. OpenWrt publishes one combined native-package
 archive. Package and firmware upgrades preserve `/etc/config/tapx` and
 `/etc/tapx/tapx.db`; certificates are excluded. Automatic in-panel installation remains
-disabled until both `apk` and `opkg` paths have transactional rollback coverage.
+disabled until the `apk` path has transactional rollback coverage.
