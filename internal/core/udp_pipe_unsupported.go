@@ -106,6 +106,10 @@ func (h *TCPPipeHandle) Err() error {
 	return nil
 }
 
+func (h *TCPPipeHandle) Active() bool {
+	return false
+}
+
 func (h *TCPPipeHandle) AcceptedRemoteAddr() netip.AddrPort {
 	return netip.AddrPort{}
 }

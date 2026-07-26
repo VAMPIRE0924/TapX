@@ -450,8 +450,9 @@ func TestServerPanelAuthSessionFlow(t *testing.T) {
 
 func TestServerBackupRestoreAndLogs(t *testing.T) {
 	store := newTestStore(t)
-	controller := &fakeRuntimeController{}
-	manager := newFakeRuntimeManager(controller)
+	activeController := &fakeRuntimeController{}
+	restoredController := &fakeRuntimeController{}
+	manager := newFakeRuntimeManager(activeController, restoredController)
 	runtime, err := config.GenerateRuntime(sampleConfig())
 	if err != nil {
 		t.Fatalf("generate active runtime: %v", err)
@@ -535,11 +536,14 @@ func TestServerBackupRestoreAndLogs(t *testing.T) {
 		t.Fatalf("POST database restore: %v", err)
 	}
 	restored := decodeResponse(t, restoreResponse, http.StatusOK)
-	if restored["restartRequired"] != true {
-		t.Fatalf("restore restartRequired = %v, want true", restored["restartRequired"])
+	if restored["runtimeApplied"] != true || restored["restartRequired"] != false {
+		t.Fatalf("restore apply state = applied:%v restartRequired:%v, want true/false", restored["runtimeApplied"], restored["restartRequired"])
 	}
-	if manager.State().Running || controller.stopCalls != 1 {
-		t.Fatalf("runtime after restore = %+v stopCalls=%d, want stopped", manager.State(), controller.stopCalls)
+	if !manager.State().Running || manager.State().Generation != 2 {
+		t.Fatalf("runtime after restore = %+v, want running generation 2", manager.State())
+	}
+	if activeController.stopCalls != 1 || restoredController.startCalls != 1 {
+		t.Fatalf("restore controller calls = active.stop:%d restored.start:%d, want 1/1", activeController.stopCalls, restoredController.startCalls)
 	}
 	if panelServer.sessions.Valid(session) {
 		t.Fatal("session created before restore remained valid")
@@ -558,8 +562,8 @@ func TestServerBackupRestoreAndLogs(t *testing.T) {
 
 	logs := getJSON(t, server.URL+"/api/logs", http.StatusOK)
 	events := logs["events"].([]any)
-	if len(events) != len(backupLogs)+1 {
-		t.Fatalf("restored logs = %+v, want %d backed-up events plus restore event", events, len(backupLogs))
+	if len(events) != len(backupLogs)+2 {
+		t.Fatalf("restored logs = %+v, want %d backed-up events plus runtime-apply and restore events", events, len(backupLogs))
 	}
 	lastEvent := events[len(events)-1].(map[string]any)
 	if lastEvent["action"] != "backup.restore" {

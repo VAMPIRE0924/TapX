@@ -38,6 +38,7 @@ func TestBuildStatsReportAggregatesRuntimeCountersAndClientQuota(t *testing.T) {
 			EndpointID:   "tcp-a",
 			EndpointKind: "connector",
 			Transport:    "tcp",
+			Inactive:     true,
 			DeviceID:     "tun-a",
 			ClientID:     "client-b",
 			Counters: fastpath.CountersSnapshot{
@@ -57,6 +58,14 @@ func TestBuildStatsReportAggregatesRuntimeCountersAndClientQuota(t *testing.T) {
 	if len(report.ByTransport) != 2 {
 		t.Fatalf("by transport = %+v, want udp/tcp", report.ByTransport)
 	}
+	for _, bucket := range report.ByTransport {
+		if bucket.ID == "tcp" && (bucket.Pipes != 1 || bucket.ActivePipes != 0) {
+			t.Fatalf("inactive TCP bucket = %+v, want one historical pipe and zero active pipes", bucket)
+		}
+		if bucket.ID == "udp" && bucket.ActivePipes != 1 {
+			t.Fatalf("active UDP bucket = %+v, want one active pipe", bucket)
+		}
+	}
 	if len(report.ByDevice) != 1 || report.ByDevice[0].ID != "tun-a" || report.ByDevice[0].Counters.RXBytes != 480 {
 		t.Fatalf("by device = %+v, want tun-a aggregate", report.ByDevice)
 	}
@@ -68,6 +77,9 @@ func TestBuildStatsReportAggregatesRuntimeCountersAndClientQuota(t *testing.T) {
 	}
 	if report.Clients[1].ID != "client-b" || report.Clients[1].UsedBytes != 150 || !report.Clients[1].OverQuota || !report.Clients[1].Expired {
 		t.Fatalf("client-b quota = %+v", report.Clients[1])
+	}
+	if report.Clients[1].ActivePipes != 0 {
+		t.Fatalf("inactive client-b pipes = %d, want zero", report.Clients[1].ActivePipes)
 	}
 }
 

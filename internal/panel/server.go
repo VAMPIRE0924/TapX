@@ -683,22 +683,34 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logs.Replace(persistedLogs)
-	s.sessions.Clear()
-	state, stopErr := s.runtime.Stop()
+	state := s.runtime.State()
+	runtimeApplied := false
+	warnings := make([]string, 0, 1)
+	generated, applyErr := config.GenerateRuntime(cfg)
+	if applyErr == nil {
+		state, applyErr = s.runtime.Apply(generated, cfg)
+	}
+	if applyErr != nil {
+		warning := "configuration was restored, but applying the restored runtime failed: " + applyErr.Error()
+		warnings = append(warnings, warning)
+		s.log("error", "backup.restore.runtime-apply", warning)
+	} else {
+		runtimeApplied = true
+		s.log("info", "backup.restore.runtime-apply", fmt.Sprintf("applied generation %d", state.Generation))
+	}
 	s.dashboard.Reset()
 	s.log("info", "backup.restore", "database restored from backup")
-	warnings := make([]string, 0, 1)
-	if stopErr != nil {
-		warning := "configuration was restored, but the previous runtime could not be stopped: " + stopErr.Error()
-		warnings = append(warnings, warning)
-		s.log("error", "backup.restore.runtime-stop", warning)
-	}
 	s.restoreIntegrationSchedules()
+	// Restoring a database can replace authentication settings and session
+	// records. Invalidate every pre-restore session only after this authenticated
+	// request has finished applying the restored runtime.
+	s.sessions.Clear()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
 		"config":          cfg,
 		"runtimeState":    state,
-		"restartRequired": true,
+		"runtimeApplied":  runtimeApplied,
+		"restartRequired": !runtimeApplied,
 		"warnings":        warnings,
 	})
 }

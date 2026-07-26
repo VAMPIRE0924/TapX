@@ -31,12 +31,13 @@ type StatsCounters struct {
 }
 
 type StatsBucket struct {
-	ID       string        `json:"id"`
-	Name     string        `json:"name,omitempty"`
-	Kind     string        `json:"kind,omitempty"`
-	Endpoint string        `json:"endpoint,omitempty"`
-	Pipes    int           `json:"pipes"`
-	Counters StatsCounters `json:"counters"`
+	ID          string        `json:"id"`
+	Name        string        `json:"name,omitempty"`
+	Kind        string        `json:"kind,omitempty"`
+	Endpoint    string        `json:"endpoint,omitempty"`
+	Pipes       int           `json:"pipes"`
+	ActivePipes int           `json:"activePipes"`
+	Counters    StatsCounters `json:"counters"`
 }
 
 type ClientQuotaState struct {
@@ -137,7 +138,7 @@ func BuildListenerEnforcementPlan(cfg config.RuntimeConfig, state RuntimeState, 
 	unixNow := now.Unix()
 	for _, listener := range cfg.Listeners {
 		bucket, active := buckets["listener:"+listener.ID]
-		if !active || bucket.Pipes == 0 {
+		if !active || bucket.ActivePipes == 0 {
 			continue
 		}
 		reason := ""
@@ -192,20 +193,21 @@ func statsNames(cfg config.RuntimeConfig) statsNameIndex {
 func (a *statsAccumulator) addPipe(pipe RuntimePipeState, names statsNameIndex) {
 	counters := countersFromFastpath(pipe.Counters)
 	a.total.add(counters)
-	a.bucket(a.transport, pipe.Transport, pipe.Transport, "", "", counters)
-	a.bucket(a.devices, pipe.DeviceID, names.devices[pipe.DeviceID], "", "", counters)
+	active := !pipe.Inactive
+	a.bucket(a.transport, pipe.Transport, pipe.Transport, "", "", counters, active)
+	a.bucket(a.devices, pipe.DeviceID, names.devices[pipe.DeviceID], "", "", counters, active)
 	if pipe.RouteID != "" {
-		a.bucket(a.routes, pipe.RouteID, names.routes[pipe.RouteID], "", "", counters)
+		a.bucket(a.routes, pipe.RouteID, names.routes[pipe.RouteID], "", "", counters, active)
 	}
 	if pipe.ClientID != "" {
 		client := names.clients[pipe.ClientID]
-		a.bucket(a.clients, pipe.ClientID, firstNonEmpty(client.Name, client.Email), "", "", counters)
+		a.bucket(a.clients, pipe.ClientID, firstNonEmpty(client.Name, client.Email), "", "", counters, active)
 	}
 	endpointID := pipe.EndpointKind + ":" + pipe.EndpointID
-	a.bucket(a.endpoints, endpointID, pipe.EndpointID, pipe.EndpointKind, pipe.Transport, counters)
+	a.bucket(a.endpoints, endpointID, pipe.EndpointID, pipe.EndpointKind, pipe.Transport, counters, active)
 }
 
-func (a *statsAccumulator) bucket(index map[string]*StatsBucket, id, name, kind, endpoint string, counters StatsCounters) {
+func (a *statsAccumulator) bucket(index map[string]*StatsBucket, id, name, kind, endpoint string, counters StatsCounters, active bool) {
 	if id == "" {
 		id = "(unbound)"
 	}
@@ -215,6 +217,9 @@ func (a *statsAccumulator) bucket(index map[string]*StatsBucket, id, name, kind,
 		index[id] = bucket
 	}
 	bucket.Pipes++
+	if active {
+		bucket.ActivePipes++
+	}
 	bucket.Counters.add(counters)
 }
 
@@ -257,7 +262,7 @@ func clientQuotaStates(clients []model.Client, buckets map[string]*StatsBucket, 
 		activePipes := 0
 		if bucket := buckets[client.ID]; bucket != nil {
 			counters = bucket.Counters
-			activePipes = bucket.Pipes
+			activePipes = bucket.ActivePipes
 		}
 		counters = adjustClientCounters(client, counters, generation)
 		used := counters.RXBytes + counters.TXBytes

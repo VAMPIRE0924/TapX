@@ -300,7 +300,7 @@ export function ConnectorPage() {
           if (bucket.kind !== 'connector' && !bucket.id.startsWith('connector:')) continue;
           const id = bucket.name || bucket.id.replace(/^connector:/, '');
           const key = `${nodeIDOf(bucket)}:${id}`;
-          active.add(key);
+          if ((bucket.activePipes ?? bucket.pipes ?? 0) > 0) active.add(key);
           next[key] = {
             rxBytes: Number(bucket.counters?.rxBytes || 0),
             txBytes: Number(bucket.counters?.txBytes || 0),

@@ -8,7 +8,6 @@ import {
 import { Alert, Button, Empty, Modal, Select, Space, Spin, Table, Tabs, Tag, Upload, message } from 'antd';
 import type { UploadProps } from 'antd';
 import {
-  applyRuntimeConfig,
   clearPanelLogs,
   downloadBackupDatabase,
   getPanelLogs,
@@ -94,7 +93,7 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
   );
 }
 
-export function BackupDialog({ open, onClose, onRestored }: { open: boolean; onClose: () => void; onRestored: () => void }) {
+export function BackupDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useI18n();
   const [restoring, setRestoring] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -144,16 +143,18 @@ export function BackupDialog({ open, onClose, onRestored }: { open: boolean; onC
     if (!restoreFile) return;
     setRestoring(true);
     try {
-      await restoreBackupDatabase(restoreFile);
-      try {
-        await applyRuntimeConfig();
+      const result = await restoreBackupDatabase(restoreFile);
+      if (result.runtimeApplied) {
         messageApi.success(t('dashboard.backupRestored'));
-      } catch (applyError) {
-        messageApi.warning(t('dashboard.restoreApplyFailed', { error: applyError instanceof Error ? applyError.message : String(applyError) }));
+      } else {
+        const warning = result.warnings.join('; ') || t('dashboard.restoreFailed');
+        messageApi.warning(t('dashboard.restoreApplyFailed', { error: warning }));
       }
       setRestoreFile(null);
-      onRestored();
       onClose();
+      // The backend deliberately invalidates all pre-restore sessions after it
+      // applies the restored runtime. Reload into the restored auth state.
+      window.setTimeout(() => window.location.reload(), 1500);
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : t('dashboard.restoreFailed'));
     } finally {

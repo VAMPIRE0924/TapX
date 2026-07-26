@@ -93,12 +93,13 @@ export function DashboardPage() {
   const counts = data.objectCounts || {};
   const system = data.system || {};
   const rates = data.rates || {};
-  const tapxPipes = (runtime.udpPipes?.length || 0) + (runtime.tcpPipes?.length || 0);
+  const activeTcpPipes = (runtime.tcpPipes || []).filter((item) => !(item as { inactive?: boolean }).inactive);
+  const tapxPipes = (runtime.udpPipes?.length || 0) + activeTcpPipes.length;
   const xrayPipes = runtime.xrayPipes?.length || 0;
-  const externalXrayTunnels = (runtime.tcpPipes || []).filter((item) => (item as { xrayRuntime?: string }).xrayRuntime === 'external').length;
-  const rawTcpTunnels = Math.max(0, (runtime.tcpPipes?.length || 0) - externalXrayTunnels);
+  const externalXrayTunnels = activeTcpPipes.filter((item) => (item as { xrayRuntime?: string }).xrayRuntime === 'external').length;
+  const rawTcpTunnels = Math.max(0, activeTcpPipes.length - externalXrayTunnels);
   const rawUdpTunnels = runtime.udpPipes?.length || 0;
-  const activeEndpoints = (data.stats?.byEndpoint || []).filter((item) => (item.pipes || 0) > 0);
+  const activeEndpoints = (data.stats?.byEndpoint || []).filter((item) => (item.activePipes ?? item.pipes ?? 0) > 0);
   const activeListeners = activeEndpoints.filter((item) => item.kind === 'listener').length;
   const activeConnectors = activeEndpoints.filter((item) => item.kind === 'connector').length;
   const activeDevices = (data.stats?.byDevice || []).filter((item) => item.id !== '(unbound)' && (item.pipes || 0) > 0).length;
@@ -281,7 +282,7 @@ export function DashboardPage() {
       </section>
 
       <LogDialog open={logs.open} scope={logs.scope} onClose={() => setLogs((current) => ({ ...current, open: false }))} />
-      <BackupDialog open={backupOpen} onClose={() => setBackupOpen(false)} onRestored={() => void getDashboard().then(setData)} />
+      <BackupDialog open={backupOpen} onClose={() => setBackupOpen(false)} />
       <ChartDialog open={chart.open} kind={chart.kind} samples={samples} onClose={() => setChart((current) => ({ ...current, open: false }))} />
       {updateTarget ? (
         <ComponentUpdateDialog
@@ -397,7 +398,8 @@ function appendSample(current: DashboardSample[], report: DashboardReport): Dash
   const embedded = runtimes.find((item) => item.runtime === 'embedded');
   const external = runtimes.find((item) => item.runtime === 'external');
   const process = report.process || {};
-  const rawPipes = (runtime.udpPipes?.length || 0) + (runtime.tcpPipes?.length || 0);
+  const rawPipes = (runtime.udpPipes?.length || 0)
+    + (runtime.tcpPipes || []).filter((item) => !(item as { inactive?: boolean }).inactive).length;
   const generatedAt = report.generatedAt ? Date.parse(report.generatedAt) : Number.NaN;
   const next: DashboardSample = {
     at: Number.isFinite(generatedAt) ? generatedAt : Date.now(),

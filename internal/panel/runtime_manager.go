@@ -91,6 +91,7 @@ type RuntimePipeState struct {
 	EndpointID          string                    `json:"endpointId"`
 	EndpointKind        string                    `json:"endpointKind"`
 	Transport           string                    `json:"transport"`
+	Inactive            bool                      `json:"inactive,omitempty"`
 	XrayRuntime         string                    `json:"xrayRuntime,omitempty"`
 	RouteID             string                    `json:"routeId,omitempty"`
 	DeviceID            string                    `json:"deviceId"`
@@ -381,6 +382,7 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 			EndpointID:   pipe.Pipe.EndpointID,
 			EndpointKind: pipe.Pipe.EndpointKind,
 			Transport:    transport,
+			Inactive:     !pipe.Active(),
 			XrayRuntime:  xrayRuntime,
 			RouteID:      pipe.Pipe.RouteID,
 			DeviceID:     pipe.Pipe.DeviceID,

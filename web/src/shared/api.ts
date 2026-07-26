@@ -117,6 +117,7 @@ export interface DashboardStatsBucket {
   kind?: string;
   endpoint?: string;
   pipes?: number;
+  activePipes?: number;
   counters?: DashboardStatsCounters;
 }
 
@@ -222,6 +223,7 @@ export interface StatsBucket {
   kind?: string;
   endpoint?: string;
   pipes?: number;
+  activePipes?: number;
   counters?: StatsCounters;
 }
 
@@ -785,7 +787,14 @@ export async function downloadBackupDatabase(): Promise<{ blob: Blob; filename: 
   return { blob: await response.blob(), filename };
 }
 
-export async function restoreBackupDatabase(file: Blob): Promise<RuntimeConfig> {
+export interface BackupRestoreResult {
+  config: RuntimeConfig;
+  runtimeApplied: boolean;
+  restartRequired: boolean;
+  warnings: string[];
+}
+
+export async function restoreBackupDatabase(file: Blob): Promise<BackupRestoreResult> {
   const response = await fetch('/api/backup/restore', {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/vnd.sqlite3' },
@@ -793,7 +802,18 @@ export async function restoreBackupDatabase(file: Blob): Promise<RuntimeConfig> 
     body: file,
   });
   if (!response.ok) throw await responseError(response, 'backup restore');
-  return unwrapConfig(await response.json());
+  const payload = await response.json() as {
+    config?: RuntimeConfig;
+    runtimeApplied?: boolean;
+    restartRequired?: boolean;
+    warnings?: string[];
+  };
+  return {
+    config: payload.config || {},
+    runtimeApplied: payload.runtimeApplied === true,
+    restartRequired: payload.restartRequired === true,
+    warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+  };
 }
 
 export async function getExternalXrayStatus(path?: string): Promise<XrayBinaryStatus> {

@@ -372,6 +372,9 @@ func TestRuntimeManagerReportsExternalXrayBridgeAsXray(t *testing.T) {
 	if pipe.Transport != "xray" || pipe.XrayRuntime != "external" || pipe.RemoteAddr != "example.com:443" {
 		t.Fatalf("external xray bridge state = %+v", pipe)
 	}
+	if !pipe.Inactive {
+		t.Fatalf("external xray bridge without a session = %+v, want inactive", pipe)
+	}
 }
 
 func TestRuntimeManagerConfirmsOneArmApply(t *testing.T) {

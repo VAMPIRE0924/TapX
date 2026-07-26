@@ -533,6 +533,24 @@ func (h *TCPPipeHandle) Err() error {
 	return h.lastErr
 }
 
+// Active reports whether the endpoint can currently carry traffic. A listener
+// remains active while its socket is accepting connections, while a connector
+// is active only while its data-plane session is established.
+func (h *TCPPipeHandle) Active() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Pipe.EndpointKind == "listener" {
+		return h.listener != nil
+	}
+	if h.Pipe.TLS.Enabled || h.Pipe.ExternalXrayBridge {
+		return h.tlsConn != nil && h.tlsDone != nil
+	}
+	return h.session != nil
+}
+
 func (h *TCPPipeHandle) AcceptedRemoteAddr() netip.AddrPort {
 	h.mu.Lock()
 	defer h.mu.Unlock()
