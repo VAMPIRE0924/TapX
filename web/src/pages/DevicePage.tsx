@@ -196,7 +196,9 @@ export function DevicePage() {
 
   function openCreate() {
     const name = nextDeviceName(devices, 'tapx-tun');
-    const next = { ...defaultDevice, ID: makeDeviceId(name), Name: name, IfName: name, ManagedNodeID: defaultTargetNodeID(scope) };
+    // Keep the ID empty until submit so changing the visible interface name
+    // cannot leave a stale ID that collides with an earlier renamed device.
+    const next = { ...defaultDevice, ID: '', Name: name, IfName: name, ManagedNodeID: defaultTargetNodeID(scope) };
     setEditing(null);
     form.resetFields();
     form.setFieldsValue(next);
@@ -249,8 +251,10 @@ export function DevicePage() {
       return;
     }
     const values = form.getFieldsValue(true) as DeviceRecord;
-    const id = values.ID || editing?.ID || makeDeviceId(values.Name || values.IfName || '');
-    const ifName = (values.IfName || values.Name || id).trim();
+    const ifNameSeed = String(values.IfName || values.Name || '').trim();
+    const preferredID = String(values.ID || '').trim() || makeDeviceId(ifNameSeed);
+    const id = editing?.ID || uniqueDeviceID(devices, preferredID, values.ManagedNodeID);
+    const ifName = (ifNameSeed || id).trim();
     const routes = (values.Routes || [])
       .filter((route) => String(route.Destination || '').trim())
       .map((route) => ({
@@ -1287,6 +1291,20 @@ export function normalizeInterfaceNames(input: unknown): string[] {
 function makeDeviceId(name = '') {
   const suffix = name.trim().replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 32);
   return `dev-${suffix || Date.now()}`;
+}
+
+export function uniqueDeviceID(devices: DeviceRecord[], preferredID: string, managedNodeID?: string): string {
+  const targetNodeID = managedNodeID || 'local';
+  const used = new Set(
+    devices
+      .filter((item) => nodeIDOf(item) === targetNodeID)
+      .map((item) => String(item.ID || '').trim())
+      .filter(Boolean),
+  );
+  if (!used.has(preferredID)) return preferredID;
+  let suffix = 2;
+  while (used.has(`${preferredID}-${suffix}`)) suffix += 1;
+  return `${preferredID}-${suffix}`;
 }
 
 function nextDeviceName(devices: DeviceRecord[], prefix: string): string {
