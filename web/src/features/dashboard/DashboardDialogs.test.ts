@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PanelLogEvent } from '../../shared/api';
-import { logMatchesScope } from './DashboardDialogs';
+import { logMatchesLevel, logMatchesScope } from './DashboardDialogs';
 
 function event(action: string, message: string): PanelLogEvent {
   return { seq: 1, time: '', level: 'info', action, message };
@@ -31,5 +31,14 @@ describe('dashboard component log scopes', () => {
     expect(logMatchesScope(event('syslog', 'embedded Xray core started'), 'embedded-xray')).toBe(true);
     expect(logMatchesScope(event('syslog', 'external Xray process started'), 'external-xray')).toBe(true);
     expect(logMatchesScope(event('syslog', 'external Xray process started'), 'embedded-xray')).toBe(false);
+  });
+
+  it('uses the selected level as a severity threshold like 3x-ui', () => {
+    expect(logMatchesLevel('debug', 'info')).toBe(false);
+    expect(logMatchesLevel('info', 'info')).toBe(true);
+    expect(logMatchesLevel('notice', 'info')).toBe(true);
+    expect(logMatchesLevel('warning', 'info')).toBe(true);
+    expect(logMatchesLevel('error', 'warning')).toBe(true);
+    expect(logMatchesLevel('info', 'warning')).toBe(false);
   });
 });

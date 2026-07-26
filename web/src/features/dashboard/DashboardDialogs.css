@@ -67,6 +67,10 @@
   color: #22c98b;
 }
 
+.log-level-notice {
+  color: #40a9ff;
+}
+
 .log-level-warn {
   color: #f5a623;
 }
