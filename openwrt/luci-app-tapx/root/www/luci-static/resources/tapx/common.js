@@ -1,6 +1,7 @@
 'use strict';
 'require baseclass';
 'require fs';
+'require rpc';
 'require uci';
 'require ui';
 
@@ -8,6 +9,11 @@ var LANGUAGE_KEY = 'tapx.luci.language';
 var CORE_INIT = '/etc/init.d/tapx';
 var PANEL_INIT = '/etc/init.d/tapx-panel';
 var PIDOF = '/bin/pidof';
+var callUciCommit = rpc.declare({
+	object: 'uci',
+	method: 'commit',
+	params: [ 'config' ]
+});
 
 var ZH = {
 	overview: '\u6982\u89c8', panelSettings: '\u9ad8\u7ea7\u8bbe\u7f6e', backup: '\u5907\u4efd\u6062\u590d', logs: '\u65e5\u5fd7',
@@ -53,7 +59,7 @@ function notify(message, level) { ui.addNotification(null, E('p', {}, message), 
 function button(label, style, handler) { return E('button', { 'type': 'button', 'class': 'btn cbi-button cbi-button-' + style, 'click': handler }, label); }
 function status(running) { return E('span', { 'class': 'tapx-status ' + (running ? 'is-running' : 'is-stopped') }, [ E('i'), running ? tr('running') : tr('stopped') ]); }
 function applyChanges() {
-	return uci.save().then(function() { return uci.commit('tapx'); });
+	return uci.save().then(function() { return callUciCommit('tapx'); });
 }
 
 function languageControl() {
