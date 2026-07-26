@@ -200,7 +200,7 @@ func TestUDPPipeDiagnoseDTLSEndToEnd(t *testing.T) {
 	}
 	defer listener.Close()
 
-	serverCtx, cancelServer := context.WithCancel(context.Background())
+	serverCtx, cancelServer := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelServer()
 	serverResult := make(chan error, 1)
 	go func() {
@@ -266,7 +266,13 @@ func TestUDPPipeDiagnoseDTLSEndToEnd(t *testing.T) {
 		t.Fatalf("path = %+v, err=%v", path, err)
 	}
 	if err := <-serverResult; err != nil {
-		t.Fatal(err)
+		var timeoutError net.Error
+		// UDP does not guarantee delivery of DTLS close_notify. Once all three
+		// client operations have received valid responses, a server-side read
+		// timeout only means that the final close alert was lost.
+		if !errors.As(err, &timeoutError) || !timeoutError.Timeout() {
+			t.Fatal(err)
+		}
 	}
 }
 
