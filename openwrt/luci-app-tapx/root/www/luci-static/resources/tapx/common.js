@@ -18,11 +18,11 @@ var callUciCommit = rpc.declare({
 var ZH = {
 	overview: '\u6982\u89c8', panelSettings: '\u9ad8\u7ea7\u8bbe\u7f6e', backup: '\u5907\u4efd\u6062\u590d', logs: '\u65e5\u5fd7',
 	core: 'TapX \u6838\u5fc3', panel: 'TapX-UI', running: '\u8fd0\u884c\u4e2d', stopped: '\u5df2\u505c\u6b62',
-	start: '\u542f\u52a8', restart: '\u91cd\u542f', stop: '\u505c\u6b62', boot: '\u5f00\u673a\u542f\u52a8', operationFailed: '\u64cd\u4f5c\u5931\u8d25'
+	start: '\u542f\u52a8', restart: '\u91cd\u542f', stop: '\u505c\u6b62', boot: '\u5f00\u673a\u542f\u52a8', managedByPanel: '\u7531 TapX-UI \u6258\u7ba1', operationFailed: '\u64cd\u4f5c\u5931\u8d25'
 };
 var EN = {
 	overview: 'Overview', panelSettings: 'Advanced settings', backup: 'Backup and restore', logs: 'Logs', core: 'TapX Core', panel: 'TapX-UI',
-	running: 'Running', stopped: 'Stopped', start: 'Start', restart: 'Restart', stop: 'Stop', boot: 'Start at boot', operationFailed: 'Operation failed'
+	running: 'Running', stopped: 'Stopped', start: 'Start', restart: 'Restart', stop: 'Stop', boot: 'Start at boot', managedByPanel: 'Managed by TapX-UI', operationFailed: 'Operation failed'
 };
 
 function language() {
@@ -94,7 +94,7 @@ function syncNavigation() {
 	}, 0);
 }
 
-function serviceCard(name, section, initPath, running, autostart, checkboxId, ready) {
+function serviceCard(name, section, initPath, running, autostart, checkboxId, ready, managed) {
 	function action(command) {
 		var previousEnabled = uci.get('tapx', section, 'enabled') || '0';
 		var nextEnabled = command === 'stop' ? '0' : '1';
@@ -111,10 +111,17 @@ function serviceCard(name, section, initPath, running, autostart, checkboxId, re
 		});
 	}
 	var actions = [ status(running) ];
+	if (managed) actions.push(E('span', { 'class': 'tapx-managed-hint' }, tr('managedByPanel')));
 	if (checkboxId) actions.push(E('label', { 'class': 'tapx-switch-line' }, [
 		E('input', { 'id': checkboxId, 'type': 'checkbox', 'checked': autostart ? '' : null }),
 		E('span', {}, tr('boot'))
 	]));
+	if (managed) {
+		return E('section', { 'class': 'tapx-card' }, [
+			E('div', { 'class': 'tapx-card-heading' }, [ E('h3', {}, name) ]),
+			E('div', { 'class': 'tapx-service-actions' }, actions)
+		]);
+	}
 	var startButton = button(tr('start'), 'apply', function() { return action('start'); });
 	var restartButton = button(tr('restart'), 'action', function() { return action('restart'); });
 	var stopButton = button(tr('stop'), 'reset', function() { return action('stop'); });

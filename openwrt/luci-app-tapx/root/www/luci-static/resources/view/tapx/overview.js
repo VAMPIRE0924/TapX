@@ -28,6 +28,8 @@ return view.extend({
 	},
 	render: function(data) {
 		var initialized = uci.get('tapx', 'panel', 'initialized') === '1';
+		var panelRunning = data[2].code === 0;
+		var coreRunning = data[1].code === 0 || (initialized && panelRunning);
 		var port = uci.get('tapx', 'panel', 'listen_port') || '';
 		var basePath = uci.get('tapx', 'panel', 'base_path') || '';
 		var panelUrl = initialized && port && basePath ? tapx.panelUrl(port, basePath, uci.get('tapx', 'panel', 'https') === '1') : '';
@@ -38,8 +40,8 @@ return view.extend({
 			E('section', { 'class': 'tapx-plain-section' }, [
 				E('h3', { 'class': 'tapx-section-title' }, tr('info')),
 				E('dl', { 'class': 'tapx-details' }, [
-					row(tr('coreStatus'), tapx.status(data[1].code === 0)),
-					row(tr('panelStatus'), tapx.status(data[2].code === 0)),
+					row(tr('coreStatus'), tapx.status(coreRunning)),
+					row(tr('panelStatus'), tapx.status(panelRunning)),
 					row(tr('coreVersion'), value(tapx.output(data[3]))),
 					row(tr('panelVersion'), value(tapx.output(data[4]))),
 					row(tr('panelUrl'), panelLink),
