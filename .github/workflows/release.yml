@@ -17,6 +17,7 @@ on:
 
 jobs:
   build:
+    if: github.ref != 'refs/heads/codex/lab-filogic-build'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -136,7 +137,7 @@ jobs:
           curl -4 -fL --retry 5 -o ".immortalwrt-sdk/download/$archive" "$base/$archive"
           (
             cd .immortalwrt-sdk/download
-            grep -F " $archive" sha256sums | head -n 1 | sha256sum -c -
+            awk -v file="$archive" '{ name=$2; sub(/^\*/, "", name); if (name == file) { print $1 "  " name; exit } }' sha256sums | sha256sum -c -
           )
           tar -C .immortalwrt-sdk -xf ".immortalwrt-sdk/download/$archive"
 
