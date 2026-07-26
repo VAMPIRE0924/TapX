@@ -131,7 +131,7 @@ jobs:
           base="https://downloads.immortalwrt.org/releases/${IMMORTALWRT_VERSION}/targets/${IMMORTALWRT_TARGET}"
           mkdir -p .immortalwrt-sdk/download
           curl -4 -fL --retry 5 -o .immortalwrt-sdk/download/sha256sums "$base/sha256sums"
-          archive="$(awk '$2 ~ /^immortalwrt-sdk-.*Linux-x86_64\.tar\.zst$/ { sub(/^\*/, "", $2); print $2; exit }' .immortalwrt-sdk/download/sha256sums)"
+          archive="$(awk '$2 ~ /^\*?immortalwrt-sdk-.*Linux-x86_64\.tar\.zst$/ { sub(/^\*/, "", $2); print $2; exit }' .immortalwrt-sdk/download/sha256sums)"
           test -n "$archive"
           curl -4 -fL --retry 5 -o ".immortalwrt-sdk/download/$archive" "$base/$archive"
           (
