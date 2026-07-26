@@ -43,6 +43,7 @@ func main() {
 	v.checkAddressGuardIntegration()
 	v.checkOpenWrtLuCI()
 	v.checkOpenWrtPackages()
+	v.checkOpenWrtPackageVersion()
 	v.checkSensitiveStrings()
 	if len(v.failures) > 0 {
 		for _, failure := range v.failures {
@@ -51,6 +52,30 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("verify local: ok")
+}
+
+func (v *verifier) checkOpenWrtPackageVersion() {
+	payload, err := os.ReadFile(v.path("openwrt/Makefile"))
+	if err != nil {
+		v.fail("read OpenWrt package version rules: %v", err)
+		return
+	}
+	text := string(payload)
+	for _, want := range []string{
+		"TAPX_PACKAGE_VERSION:=$(subst -dev.,_git,$(TAPX_SOURCE_VERSION))",
+		"PKG_VERSION:=$(subst -,_,$(TAPX_PACKAGE_VERSION))",
+	} {
+		if !strings.Contains(text, want) {
+			v.fail("OpenWrt package version rules missing %q", want)
+		}
+	}
+
+	source := "0.2.1-dev.da033f2"
+	normalized := strings.Replace(source, "-dev.", "_git", 1)
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	if normalized != "0.2.1_gitda033f2" {
+		v.fail("OpenWrt development package version normalized to %q", normalized)
+	}
 }
 
 func (v *verifier) checkTemplates() {
