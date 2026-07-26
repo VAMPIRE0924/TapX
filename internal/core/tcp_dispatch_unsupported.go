@@ -12,7 +12,7 @@ type TCPDispatchHandle struct {
 	Dispatch config.RuntimeTCPDispatch
 }
 
-func startTCPDispatch(config.RuntimeTCPDispatch, []config.RuntimeTCPPipe, []config.RuntimeDevice) (*TCPDispatchHandle, []*TCPPipeHandle, error) {
+func startTCPDispatch(config.RuntimeTCPDispatch, []config.RuntimeTCPPipe, []config.RuntimeDevice, *deviceFabric) (*TCPDispatchHandle, []*TCPPipeHandle, error) {
 	return nil, nil, errors.New("core: TCP vKey dispatch requires linux")
 }
 

@@ -32,6 +32,10 @@ type linuxDevice struct {
 	fd   int
 }
 
+func wrapFD(name string, fd int) Device {
+	return &linuxDevice{name: name, fd: fd}
+}
+
 func Open(opts OpenOptions) (Device, error) {
 	if opts.Name == "" {
 		return nil, errors.New("tuntap: device name is required")

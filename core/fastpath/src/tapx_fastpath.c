@@ -21,6 +21,9 @@
 #define TAPX_DEFAULT_MAX_FRAME_SIZE 65535U
 #define TAPX_MAX_FRAME_SIZE 65535U
 #define TAPX_EPOLL_MAX_EVENTS 3
+#define TAPX_SWITCH_MAX_EVENTS 64
+#define TAPX_SWITCH_FDB_SIZE 4096U
+#define TAPX_SWITCH_FDB_AGE_NS 300000000000ULL
 #define TAPX_ETH_HEADER_LEN 14U
 #define TAPX_ETHERTYPE_IPV4 0x0800U
 #define TAPX_ETHERTYPE_ARP 0x0806U
@@ -63,6 +66,8 @@
 #define TAPX_DIAG_DOWNLOAD_REQUEST 6U
 #define TAPX_DIAG_DOWNLOAD_DATA 7U
 #define TAPX_DIAG_DOWNLOAD_FINISH 8U
+#define TAPX_ADDRESS_REQUEST_SIZE 8U
+#define TAPX_KEEPALIVE_SIZE 8U
 
 struct tapx_reassembly_slot {
     uint32_t sequence;
@@ -80,6 +85,12 @@ struct tapx_rate_pacer {
     uint64_t next_ns;
 };
 
+struct tapx_worker;
+typedef int (*tapx_udp_control_handler)(struct tapx_worker *worker,
+                                        const uint8_t *payload, size_t payload_len,
+                                        const struct sockaddr_storage *from,
+                                        socklen_t from_len);
+
 struct tapx_worker {
     pthread_t thread;
     int epoll_fd;
@@ -92,6 +103,8 @@ struct tapx_worker {
     uint32_t peer_mode;
     uint32_t length_mode;
     uint32_t address_guard_remote;
+    uint32_t keepalive_interval_ms;
+    uint32_t idle_timeout_ms;
     uint32_t header_size;
     uint32_t vkey_header_size;
     uint32_t max_datagram_payload;
@@ -105,6 +118,9 @@ struct tapx_worker {
     uint8_t *stream_buffer;
     uint8_t *vkey_value;
     size_t vkey_len;
+    uint8_t *address_response;
+    size_t address_response_len;
+    tapx_udp_control_handler udp_control_handler;
     size_t stream_len;
     size_t stream_cap;
     struct sockaddr_storage peer_addr;
@@ -117,9 +133,53 @@ struct tapx_worker {
     size_t mac_count;
     int has_peer;
 	uint64_t diag_upload_session;
-	uint64_t diag_upload_bytes;
+    uint64_t diag_upload_bytes;
+    uint64_t next_keepalive_ns;
+    uint64_t last_activity_ns;
     struct tapx_rate_pacer device_to_network_pacer;
     struct tapx_rate_pacer network_to_device_pacer;
+    struct tapx_fastpath_counters pending_counters;
+    struct tapx_fastpath_counters *counters;
+};
+
+struct tapx_switch_route4 {
+    uint32_t network;
+    uint32_t mask;
+    uint8_t prefix_bits;
+};
+
+struct tapx_switch_route6 {
+    uint8_t network[16];
+    uint8_t mask[16];
+    uint8_t prefix_bits;
+};
+
+struct tapx_switch_port {
+    int fd;
+    struct tapx_switch_route4 *ipv4;
+    size_t ipv4_count;
+    struct tapx_switch_route6 *ipv6;
+    size_t ipv6_count;
+};
+
+struct tapx_switch_fdb_entry {
+    uint8_t mac[6];
+    uint32_t port;
+    uint64_t seen_ns;
+    uint8_t used;
+};
+
+struct tapx_device_switch {
+    pthread_t thread;
+    int epoll_fd;
+    int stop_fd;
+    int device_fd;
+    uint32_t frame_kind;
+    uint32_t max_frame_size;
+    struct tapx_switch_port *ports;
+    size_t port_count;
+    uint8_t *buffer;
+    struct tapx_switch_fdb_entry *fdb;
     struct tapx_fastpath_counters pending_counters;
     struct tapx_fastpath_counters *counters;
 };
@@ -130,6 +190,60 @@ static uint64_t tapx_monotonic_ns(void) {
         return 0;
     }
     return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+}
+
+static void tapx_mark_activity(struct tapx_worker *worker) {
+    if (worker->idle_timeout_ms == 0U) {
+        return;
+    }
+    worker->last_activity_ns = tapx_monotonic_ns();
+}
+
+static int tapx_idle_timeout_remaining_ms(const struct tapx_worker *worker) {
+    if (worker->idle_timeout_ms == 0U) {
+        return -1;
+    }
+    uint64_t now = tapx_monotonic_ns();
+    if (now == 0 || worker->last_activity_ns == 0) {
+        return (int)worker->idle_timeout_ms;
+    }
+    uint64_t timeout_ns = (uint64_t)worker->idle_timeout_ms * 1000000ULL;
+    uint64_t elapsed_ns = now - worker->last_activity_ns;
+    if (elapsed_ns >= timeout_ns) {
+        return 0;
+    }
+    uint64_t remaining_ms = (timeout_ns - elapsed_ns + 999999ULL) / 1000000ULL;
+    return remaining_ms > (uint64_t)INT_MAX ? INT_MAX : (int)remaining_ms;
+}
+
+static int tapx_min_timeout_ms(int first, int second) {
+    if (first < 0) {
+        return second;
+    }
+    if (second < 0) {
+        return first;
+    }
+    return first < second ? first : second;
+}
+
+static void tapx_expire_udp_peer_if_idle(struct tapx_worker *worker) {
+    if (tapx_idle_timeout_remaining_ms(worker) != 0) {
+        return;
+    }
+    if (worker->peer_mode != TAPX_UDP_PEER_FIXED) {
+        worker->has_peer = 0;
+        worker->peer_addr_len = 0;
+        memset(&worker->peer_addr, 0, sizeof(worker->peer_addr));
+        if (worker->reassembly_slots != NULL) {
+            memset(worker->reassembly_slots, 0,
+                   TAPX_REASSEMBLY_SLOTS * sizeof(struct tapx_reassembly_slot));
+            for (size_t i = 0; i < TAPX_REASSEMBLY_SLOTS; i++) {
+                worker->reassembly_slots[i].data = worker->reassembly_data +
+                                                   i * worker->max_frame_size;
+            }
+        }
+    }
+    tapx_mark_activity(worker);
 }
 
 static int tapx_rate_pacer_wait(struct tapx_worker *worker,
@@ -449,6 +563,98 @@ static int tapx_handle_udp_diagnostic(struct tapx_worker *worker,
         default:
             return 1;
     }
+}
+
+static int tapx_handle_udp_address_request(struct tapx_worker *worker,
+                                           const uint8_t *payload, size_t payload_len,
+                                           const struct sockaddr_storage *from, socklen_t from_len) {
+    static const uint8_t request[TAPX_ADDRESS_REQUEST_SIZE] = {'T', 'X', 'A', 'D', 'D', 'R', '1', 0};
+    if (worker->address_response_len == 0 || payload_len != TAPX_ADDRESS_REQUEST_SIZE ||
+        memcmp(payload, request, TAPX_ADDRESS_REQUEST_SIZE) != 0) {
+        return 0;
+    }
+    size_t wire_len = worker->vkey_header_size + worker->address_response_len;
+    if (wire_len > worker->buffer_capacity) {
+        tapx_count_io_drop(worker);
+        return 1;
+    }
+    tapx_write_vkey_header(worker, worker->buffer);
+    memcpy(worker->buffer + worker->vkey_header_size,
+           worker->address_response, worker->address_response_len);
+    ssize_t sent = sendto(worker->udp_fd, worker->buffer, wire_len, 0,
+                          (const struct sockaddr *)from, from_len);
+    if (sent != (ssize_t)wire_len) {
+        tapx_count_io_drop(worker);
+    }
+    return 1;
+}
+
+static int tapx_handle_udp_keepalive(const uint8_t *payload, size_t payload_len) {
+    static const uint8_t keepalive[TAPX_KEEPALIVE_SIZE] = {'T', 'X', 'K', 'E', 'E', 'P', '1', 0};
+    return payload_len == TAPX_KEEPALIVE_SIZE &&
+           memcmp(payload, keepalive, TAPX_KEEPALIVE_SIZE) == 0;
+}
+
+static int tapx_handle_udp_address_and_diagnostic(struct tapx_worker *worker,
+                                                   const uint8_t *payload, size_t payload_len,
+                                                   const struct sockaddr_storage *from,
+                                                   socklen_t from_len) {
+    if (tapx_handle_udp_keepalive(payload, payload_len)) {
+        return 1;
+    }
+    if (tapx_handle_udp_address_request(worker, payload, payload_len, from, from_len)) {
+        return 1;
+    }
+    return tapx_handle_udp_diagnostic(worker, payload, payload_len, from, from_len);
+}
+
+static int tapx_udp_keepalive_timeout_ms(const struct tapx_worker *worker) {
+    if (worker->keepalive_interval_ms == 0U || !worker->has_peer) {
+        return -1;
+    }
+    uint64_t now = tapx_monotonic_ns();
+    if (now == 0 || now >= worker->next_keepalive_ns) {
+        return 0;
+    }
+    uint64_t remaining_ns = worker->next_keepalive_ns - now;
+    uint64_t timeout_ms = (remaining_ns + 999999ULL) / 1000000ULL;
+    return timeout_ms > (uint64_t)INT_MAX ? INT_MAX : (int)timeout_ms;
+}
+
+static int tapx_send_udp_keepalive(struct tapx_worker *worker) {
+    if (!worker->has_peer) {
+        return 0;
+    }
+    static const uint8_t keepalive[TAPX_KEEPALIVE_SIZE] = {'T', 'X', 'K', 'E', 'E', 'P', '1', 0};
+    size_t wire_len = worker->vkey_header_size + TAPX_KEEPALIVE_SIZE;
+    if (wire_len > worker->buffer_capacity) {
+        tapx_count_io_drop(worker);
+        return -ENOBUFS;
+    }
+    tapx_write_vkey_header(worker, worker->buffer);
+    memcpy(worker->buffer + worker->vkey_header_size, keepalive, TAPX_KEEPALIVE_SIZE);
+    ssize_t sent = sendto(worker->udp_fd, worker->buffer, wire_len, 0,
+                          (const struct sockaddr *)&worker->peer_addr,
+                          worker->peer_addr_len);
+    if (sent != (ssize_t)wire_len &&
+        (sent >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))) {
+        tapx_count_io_drop(worker);
+        return sent < 0 ? -errno : -EIO;
+    }
+    return 0;
+}
+
+static void tapx_send_udp_keepalive_if_due(struct tapx_worker *worker) {
+    if (worker->keepalive_interval_ms == 0U || !worker->has_peer) {
+        return;
+    }
+    uint64_t now = tapx_monotonic_ns();
+    if (now != 0 && now < worker->next_keepalive_ns) {
+        return;
+    }
+    (void)tapx_send_udp_keepalive(worker);
+    uint64_t base = now != 0 ? now : tapx_monotonic_ns();
+    worker->next_keepalive_ns = base + (uint64_t)worker->keepalive_interval_ms * 1000000ULL;
 }
 
 static int tapx_segment_enabled(const struct tapx_worker *worker) {
@@ -1118,6 +1324,7 @@ static void tapx_worker_free_buffers(struct tapx_worker *worker) {
     free(worker->ipv6_prefixes);
     free(worker->ipv4_prefixes);
     free(worker->vkey_value);
+    free(worker->address_response);
     free(worker->reassembly_slots);
     free(worker->reassembly_data);
     free(worker->frame_buffer);
@@ -1217,6 +1424,7 @@ static void tapx_handle_tun_read(struct tapx_worker *worker) {
             }
         }
         tapx_count_tx(worker, n);
+        tapx_mark_activity(worker);
     }
 }
 
@@ -1242,11 +1450,18 @@ static void tapx_handle_udp_read(struct tapx_worker *worker) {
         if (!tapx_strip_vkey_header(worker, &payload, &payload_len)) {
             continue;
         }
-        if (tapx_handle_udp_diagnostic(worker, payload, payload_len, &from, from_len)) {
+        /* Address renewal may use a short-lived control socket after the data
+         * peer has been learned. Authenticate it above, then answer it before
+         * enforcing the pinned data peer. */
+        if (tapx_handle_udp_address_request(worker, payload, payload_len, &from, from_len)) {
             continue;
         }
-
         if (worker->peer_mode == TAPX_UDP_PEER_FIXED && worker->has_peer &&
+            !tapx_peer_equal(&worker->peer_addr, worker->peer_addr_len, &from, from_len)) {
+            tapx_count_io_drop(worker);
+            continue;
+        }
+        if (worker->peer_mode == TAPX_UDP_PEER_LEARN && worker->has_peer &&
             !tapx_peer_equal(&worker->peer_addr, worker->peer_addr_len, &from, from_len)) {
             tapx_count_io_drop(worker);
             continue;
@@ -1255,6 +1470,10 @@ static void tapx_handle_udp_read(struct tapx_worker *worker) {
             memcpy(&worker->peer_addr, &from, from_len);
             worker->peer_addr_len = from_len;
             worker->has_peer = 1;
+        }
+        tapx_mark_activity(worker);
+        if (worker->udp_control_handler(worker, payload, payload_len, &from, from_len)) {
+            continue;
         }
         if (worker->peer_mode == TAPX_UDP_PEER_ANY) {
             memcpy(&worker->peer_addr, &from, from_len);
@@ -1339,6 +1558,7 @@ static void tapx_handle_tun_read_limited(struct tapx_worker *worker) {
             }
         }
         tapx_count_tx(worker, n);
+        tapx_mark_activity(worker);
     }
 }
 
@@ -1363,10 +1583,15 @@ static void tapx_handle_udp_read_limited(struct tapx_worker *worker) {
         if (!tapx_strip_vkey_header(worker, &payload, &payload_len)) {
             continue;
         }
-        if (tapx_handle_udp_diagnostic(worker, payload, payload_len, &from, from_len)) {
+        if (tapx_handle_udp_address_request(worker, payload, payload_len, &from, from_len)) {
             continue;
         }
         if (worker->peer_mode == TAPX_UDP_PEER_FIXED && worker->has_peer &&
+            !tapx_peer_equal(&worker->peer_addr, worker->peer_addr_len, &from, from_len)) {
+            tapx_count_io_drop(worker);
+            continue;
+        }
+        if (worker->peer_mode == TAPX_UDP_PEER_LEARN && worker->has_peer &&
             !tapx_peer_equal(&worker->peer_addr, worker->peer_addr_len, &from, from_len)) {
             tapx_count_io_drop(worker);
             continue;
@@ -1375,6 +1600,10 @@ static void tapx_handle_udp_read_limited(struct tapx_worker *worker) {
             memcpy(&worker->peer_addr, &from, from_len);
             worker->peer_addr_len = from_len;
             worker->has_peer = 1;
+        }
+        tapx_mark_activity(worker);
+        if (worker->udp_control_handler(worker, payload, payload_len, &from, from_len)) {
+            continue;
         }
         if (worker->peer_mode == TAPX_UDP_PEER_ANY) {
             memcpy(&worker->peer_addr, &from, from_len);
@@ -1421,7 +1650,9 @@ static void *tapx_udp_pipe_main(void *arg) {
 
     for (;;) {
         tapx_flush_counters(worker);
-        int n = epoll_wait(worker->epoll_fd, events, TAPX_EPOLL_MAX_EVENTS, -1);
+        int timeout_ms = tapx_min_timeout_ms(tapx_udp_keepalive_timeout_ms(worker),
+                                             tapx_idle_timeout_remaining_ms(worker));
+        int n = epoll_wait(worker->epoll_fd, events, TAPX_EPOLL_MAX_EVENTS, timeout_ms);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1456,6 +1687,8 @@ static void *tapx_udp_pipe_main(void *arg) {
                 tapx_handle_udp_read(worker);
             }
         }
+        tapx_send_udp_keepalive_if_due(worker);
+        tapx_expire_udp_peer_if_idle(worker);
     }
 }
 
@@ -1464,7 +1697,9 @@ static void *tapx_udp_pipe_limited_main(void *arg) {
     struct epoll_event events[TAPX_EPOLL_MAX_EVENTS];
     for (;;) {
         tapx_flush_counters(worker);
-        int n = epoll_wait(worker->epoll_fd, events, TAPX_EPOLL_MAX_EVENTS, -1);
+        int timeout_ms = tapx_min_timeout_ms(tapx_udp_keepalive_timeout_ms(worker),
+                                             tapx_idle_timeout_remaining_ms(worker));
+        int n = epoll_wait(worker->epoll_fd, events, TAPX_EPOLL_MAX_EVENTS, timeout_ms);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1499,6 +1734,8 @@ static void *tapx_udp_pipe_limited_main(void *arg) {
                 tapx_handle_udp_read_limited(worker);
             }
         }
+        tapx_send_udp_keepalive_if_due(worker);
+        tapx_expire_udp_peer_if_idle(worker);
     }
 }
 
@@ -1537,6 +1774,7 @@ static void tapx_handle_tcp_tun_read(struct tapx_worker *worker) {
             continue;
         }
         tapx_count_tx(worker, n);
+        tapx_mark_activity(worker);
     }
 }
 
@@ -1618,6 +1856,7 @@ static void tapx_handle_tcp_read(struct tapx_worker *worker) {
         if (n == 0) {
             return;
         }
+        tapx_mark_activity(worker);
         worker->stream_len += (size_t)n;
         tapx_tcp_parse_stream(worker);
     }
@@ -1665,6 +1904,7 @@ static void tapx_handle_tcp_tun_read_limited(struct tapx_worker *worker) {
             continue;
         }
         tapx_count_tx(worker, n);
+        tapx_mark_activity(worker);
     }
 }
 
@@ -1724,6 +1964,7 @@ static void tapx_handle_tcp_read_limited(struct tapx_worker *worker) {
         if (n == 0) {
             return;
         }
+        tapx_mark_activity(worker);
         worker->stream_len += (size_t)n;
         tapx_tcp_parse_stream_limited(worker);
     }
@@ -1735,7 +1976,8 @@ static void *tapx_tcp_pipe_main(void *arg) {
 
     for (;;) {
         tapx_flush_counters(worker);
-        int n = epoll_wait(worker->epoll_fd, events, TAPX_EPOLL_MAX_EVENTS, -1);
+        int n = epoll_wait(worker->epoll_fd, events, TAPX_EPOLL_MAX_EVENTS,
+                           tapx_idle_timeout_remaining_ms(worker));
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1754,13 +1996,20 @@ static void *tapx_tcp_pipe_main(void *arg) {
             }
             if ((events[i].events & (EPOLLERR | EPOLLHUP)) != 0) {
                 tapx_count_io_drop(worker);
-                continue;
+                shutdown(worker->tcp_fd, SHUT_RDWR);
+                tapx_flush_counters(worker);
+                return NULL;
             }
             if (fd == worker->tun_fd) {
                 tapx_handle_tcp_tun_read(worker);
             } else if (fd == worker->tcp_fd) {
                 tapx_handle_tcp_read(worker);
             }
+        }
+        if (tapx_idle_timeout_remaining_ms(worker) == 0) {
+            shutdown(worker->tcp_fd, SHUT_RDWR);
+            tapx_flush_counters(worker);
+            return NULL;
         }
     }
 }
@@ -1770,7 +2019,8 @@ static void *tapx_tcp_pipe_limited_main(void *arg) {
     struct epoll_event events[TAPX_EPOLL_MAX_EVENTS];
     for (;;) {
         tapx_flush_counters(worker);
-        int n = epoll_wait(worker->epoll_fd, events, TAPX_EPOLL_MAX_EVENTS, -1);
+        int n = epoll_wait(worker->epoll_fd, events, TAPX_EPOLL_MAX_EVENTS,
+                           tapx_idle_timeout_remaining_ms(worker));
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1789,7 +2039,9 @@ static void *tapx_tcp_pipe_limited_main(void *arg) {
             }
             if ((events[i].events & (EPOLLERR | EPOLLHUP)) != 0) {
                 tapx_count_io_drop(worker);
-                continue;
+                shutdown(worker->tcp_fd, SHUT_RDWR);
+                tapx_flush_counters(worker);
+                return NULL;
             }
             if (fd == worker->tun_fd) {
                 tapx_handle_tcp_tun_read_limited(worker);
@@ -1797,7 +2049,367 @@ static void *tapx_tcp_pipe_limited_main(void *arg) {
                 tapx_handle_tcp_read_limited(worker);
             }
         }
+        if (tapx_idle_timeout_remaining_ms(worker) == 0) {
+            shutdown(worker->tcp_fd, SHUT_RDWR);
+            tapx_flush_counters(worker);
+            return NULL;
+        }
     }
+}
+
+static uint8_t tapx_mask_bits4(uint32_t mask) {
+    uint8_t bits = 0;
+    while ((mask & 0x80000000U) != 0U) {
+        bits++;
+        mask <<= 1U;
+    }
+    return bits;
+}
+
+static uint8_t tapx_mask_bits6(const uint8_t mask[16]) {
+    uint8_t bits = 0;
+    for (size_t i = 0; i < 16; i++) {
+        uint8_t value = mask[i];
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            if ((value & 0x80U) == 0U) {
+                return bits;
+            }
+            bits++;
+            value <<= 1U;
+        }
+    }
+    return bits;
+}
+
+static int tapx_switch_copy_routes(struct tapx_switch_port *target,
+                                   const struct tapx_device_switch_port *source) {
+    target->fd = source->fd;
+    if (source->ipv4_prefix_count > 0U) {
+        if (source->ipv4_prefixes == NULL ||
+            source->ipv4_prefix_count > SIZE_MAX / sizeof(*target->ipv4)) {
+            return -EINVAL;
+        }
+        target->ipv4 = calloc(source->ipv4_prefix_count, sizeof(*target->ipv4));
+        if (target->ipv4 == NULL) {
+            return -ENOMEM;
+        }
+        target->ipv4_count = source->ipv4_prefix_count;
+        for (size_t i = 0; i < target->ipv4_count; i++) {
+            target->ipv4[i].network = source->ipv4_prefixes[i].network;
+            target->ipv4[i].mask = source->ipv4_prefixes[i].mask;
+            target->ipv4[i].prefix_bits = tapx_mask_bits4(source->ipv4_prefixes[i].mask);
+        }
+    }
+    if (source->ipv6_prefix_count > 0U) {
+        if (source->ipv6_prefixes == NULL ||
+            source->ipv6_prefix_count > SIZE_MAX / sizeof(*target->ipv6)) {
+            return -EINVAL;
+        }
+        target->ipv6 = calloc(source->ipv6_prefix_count, sizeof(*target->ipv6));
+        if (target->ipv6 == NULL) {
+            return -ENOMEM;
+        }
+        target->ipv6_count = source->ipv6_prefix_count;
+        for (size_t i = 0; i < target->ipv6_count; i++) {
+            memcpy(target->ipv6[i].network, source->ipv6_prefixes[i].network, 16);
+            memcpy(target->ipv6[i].mask, source->ipv6_prefixes[i].mask, 16);
+            target->ipv6[i].prefix_bits = tapx_mask_bits6(source->ipv6_prefixes[i].mask);
+        }
+    }
+    return 0;
+}
+
+static void tapx_switch_free(struct tapx_device_switch *device_switch) {
+    if (device_switch == NULL) {
+        return;
+    }
+    if (device_switch->ports != NULL) {
+        for (size_t i = 0; i < device_switch->port_count; i++) {
+            free(device_switch->ports[i].ipv4);
+            free(device_switch->ports[i].ipv6);
+        }
+    }
+    free(device_switch->ports);
+    free(device_switch->buffer);
+    free(device_switch->fdb);
+    free(device_switch);
+}
+
+static void tapx_switch_count_rx(struct tapx_device_switch *device_switch, size_t len) {
+    if (device_switch->counters == NULL) {
+        return;
+    }
+    __atomic_add_fetch(&device_switch->counters->rx_packets, 1U, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&device_switch->counters->rx_bytes, (uint64_t)len, __ATOMIC_RELAXED);
+}
+
+static void tapx_switch_count_tx(struct tapx_device_switch *device_switch, size_t len) {
+    if (device_switch->counters == NULL) {
+        return;
+    }
+    __atomic_add_fetch(&device_switch->counters->tx_packets, 1U, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&device_switch->counters->tx_bytes, (uint64_t)len, __ATOMIC_RELAXED);
+}
+
+static void tapx_switch_count_drop(struct tapx_device_switch *device_switch) {
+    if (device_switch->counters != NULL) {
+        __atomic_add_fetch(&device_switch->counters->drops_io, 1U, __ATOMIC_RELAXED);
+    }
+}
+
+static int tapx_switch_fd(const struct tapx_device_switch *device_switch, uint32_t port) {
+    if (port == 0U) {
+        return device_switch->device_fd;
+    }
+    size_t index = (size_t)port - 1U;
+    return index < device_switch->port_count ? device_switch->ports[index].fd : -1;
+}
+
+static void tapx_switch_send(struct tapx_device_switch *device_switch, uint32_t port,
+                             const uint8_t *frame, size_t frame_len) {
+    int fd = tapx_switch_fd(device_switch, port);
+    if (fd < 0) {
+        tapx_switch_count_drop(device_switch);
+        return;
+    }
+    ssize_t sent;
+    do {
+        sent = write(fd, frame, frame_len);
+    } while (sent < 0 && errno == EINTR);
+    if (sent == (ssize_t)frame_len) {
+        tapx_switch_count_tx(device_switch, frame_len);
+    } else {
+        tapx_switch_count_drop(device_switch);
+    }
+}
+
+static uint32_t tapx_switch_fdb_hash(const uint8_t mac[6]) {
+    uint32_t hash = 2166136261U;
+    for (size_t i = 0; i < 6; i++) {
+        hash = (hash ^ mac[i]) * 16777619U;
+    }
+    return hash % TAPX_SWITCH_FDB_SIZE;
+}
+
+static void tapx_switch_fdb_learn(struct tapx_device_switch *device_switch,
+                                  const uint8_t mac[6], uint32_t port, uint64_t now) {
+    if ((mac[0] & 1U) != 0U) {
+        return;
+    }
+    uint32_t slot = tapx_switch_fdb_hash(mac);
+    uint32_t replace = slot;
+    uint64_t oldest = UINT64_MAX;
+    for (uint32_t probe = 0; probe < 16U; probe++) {
+        uint32_t index = (slot + probe) % TAPX_SWITCH_FDB_SIZE;
+        struct tapx_switch_fdb_entry *entry = &device_switch->fdb[index];
+        if (!entry->used || memcmp(entry->mac, mac, 6) == 0) {
+            memcpy(entry->mac, mac, 6);
+            entry->port = port;
+            entry->seen_ns = now;
+            entry->used = 1U;
+            return;
+        }
+        if (entry->seen_ns < oldest) {
+            oldest = entry->seen_ns;
+            replace = index;
+        }
+    }
+    struct tapx_switch_fdb_entry *entry = &device_switch->fdb[replace];
+    memcpy(entry->mac, mac, 6);
+    entry->port = port;
+    entry->seen_ns = now;
+    entry->used = 1U;
+}
+
+static int tapx_switch_fdb_find(struct tapx_device_switch *device_switch,
+                                const uint8_t mac[6], uint64_t now, uint32_t *port) {
+    uint32_t slot = tapx_switch_fdb_hash(mac);
+    for (uint32_t probe = 0; probe < 16U; probe++) {
+        struct tapx_switch_fdb_entry *entry =
+            &device_switch->fdb[(slot + probe) % TAPX_SWITCH_FDB_SIZE];
+        if (!entry->used) {
+            continue;
+        }
+        if (now - entry->seen_ns > TAPX_SWITCH_FDB_AGE_NS) {
+            entry->used = 0U;
+            continue;
+        }
+        if (memcmp(entry->mac, mac, 6) == 0) {
+            *port = entry->port;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void tapx_switch_flood(struct tapx_device_switch *device_switch, uint32_t ingress,
+                              const uint8_t *frame, size_t frame_len) {
+    for (uint32_t port = 0; port <= (uint32_t)device_switch->port_count; port++) {
+        if (port != ingress) {
+            tapx_switch_send(device_switch, port, frame, frame_len);
+        }
+    }
+}
+
+static void tapx_switch_tap_frame(struct tapx_device_switch *device_switch, uint32_t ingress,
+                                  const uint8_t *frame, size_t frame_len) {
+    if (frame_len < TAPX_ETH_HEADER_LEN) {
+        tapx_switch_count_drop(device_switch);
+        return;
+    }
+    uint64_t now = tapx_monotonic_ns();
+    tapx_switch_fdb_learn(device_switch, frame + 6, ingress, now);
+    if ((frame[0] & 1U) != 0U) {
+        tapx_switch_flood(device_switch, ingress, frame, frame_len);
+        return;
+    }
+    uint32_t destination = 0;
+    if (tapx_switch_fdb_find(device_switch, frame, now, &destination)) {
+        if (destination != ingress) {
+            tapx_switch_send(device_switch, destination, frame, frame_len);
+        }
+        return;
+    }
+    tapx_switch_flood(device_switch, ingress, frame, frame_len);
+}
+
+static int tapx_switch_ipv6_equal_masked(const uint8_t address[16],
+                                         const struct tapx_switch_route6 *route) {
+    for (size_t i = 0; i < 16; i++) {
+        if ((address[i] & route->mask[i]) != route->network[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int tapx_switch_tun_destination(const struct tapx_device_switch *device_switch,
+                                       const uint8_t *frame, size_t frame_len,
+                                       uint32_t *destination) {
+    int best_bits = -1;
+    uint32_t best_port = 0;
+    uint8_t version = frame_len > 0U ? (uint8_t)(frame[0] >> 4U) : 0U;
+    if (version == 4U && frame_len >= 20U) {
+        uint32_t address = tapx_read_be32(frame + 16);
+        for (size_t port = 0; port < device_switch->port_count; port++) {
+            for (size_t route = 0; route < device_switch->ports[port].ipv4_count; route++) {
+                const struct tapx_switch_route4 *candidate = &device_switch->ports[port].ipv4[route];
+                if ((address & candidate->mask) == candidate->network &&
+                    (int)candidate->prefix_bits > best_bits) {
+                    best_bits = candidate->prefix_bits;
+                    best_port = (uint32_t)port + 1U;
+                }
+            }
+        }
+    } else if (version == 6U && frame_len >= 40U) {
+        const uint8_t *address = frame + 24;
+        for (size_t port = 0; port < device_switch->port_count; port++) {
+            for (size_t route = 0; route < device_switch->ports[port].ipv6_count; route++) {
+                const struct tapx_switch_route6 *candidate = &device_switch->ports[port].ipv6[route];
+                if (tapx_switch_ipv6_equal_masked(address, candidate) &&
+                    (int)candidate->prefix_bits > best_bits) {
+                    best_bits = candidate->prefix_bits;
+                    best_port = (uint32_t)port + 1U;
+                }
+            }
+        }
+    } else {
+        return -EINVAL;
+    }
+    if (best_bits >= 0) {
+        *destination = best_port;
+        return 1;
+    }
+    return 0;
+}
+
+static void tapx_switch_tun_frame(struct tapx_device_switch *device_switch, uint32_t ingress,
+                                  const uint8_t *frame, size_t frame_len) {
+    uint32_t destination = 0;
+    int matched = tapx_switch_tun_destination(device_switch, frame, frame_len, &destination);
+    if (matched < 0) {
+        tapx_switch_count_drop(device_switch);
+        return;
+    }
+    if (matched > 0 && destination != ingress) {
+        tapx_switch_send(device_switch, destination, frame, frame_len);
+        return;
+    }
+    if (ingress != 0U) {
+        tapx_switch_send(device_switch, 0U, frame, frame_len);
+        return;
+    }
+    if (device_switch->port_count == 1U) {
+        tapx_switch_send(device_switch, 1U, frame, frame_len);
+        return;
+    }
+    tapx_switch_count_drop(device_switch);
+}
+
+static void tapx_switch_read(struct tapx_device_switch *device_switch, uint32_t ingress) {
+    int fd = tapx_switch_fd(device_switch, ingress);
+    for (;;) {
+        ssize_t n = read(fd, device_switch->buffer, device_switch->max_frame_size);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                tapx_switch_count_drop(device_switch);
+            }
+            return;
+        }
+        if (n == 0) {
+            return;
+        }
+        tapx_switch_count_rx(device_switch, (size_t)n);
+        if (device_switch->frame_kind == TAPX_FRAME_TAP) {
+            tapx_switch_tap_frame(device_switch, ingress, device_switch->buffer, (size_t)n);
+        } else {
+            tapx_switch_tun_frame(device_switch, ingress, device_switch->buffer, (size_t)n);
+        }
+    }
+}
+
+static void *tapx_device_switch_main(void *arg) {
+    struct tapx_device_switch *device_switch = arg;
+    struct epoll_event events[TAPX_SWITCH_MAX_EVENTS];
+    for (;;) {
+        int n = epoll_wait(device_switch->epoll_fd, events, TAPX_SWITCH_MAX_EVENTS, -1);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            tapx_switch_count_drop(device_switch);
+            continue;
+        }
+        for (int i = 0; i < n; i++) {
+            uint32_t port = events[i].data.u32;
+            if (port == UINT32_MAX) {
+                uint64_t value = 0;
+                ssize_t ignored = read(device_switch->stop_fd, &value, sizeof(value));
+                (void)ignored;
+                return NULL;
+            }
+            if ((events[i].events & EPOLLIN) != 0U) {
+                tapx_switch_read(device_switch, port);
+            }
+            if ((events[i].events & (EPOLLERR | EPOLLHUP)) != 0U) {
+                tapx_switch_count_drop(device_switch);
+            }
+        }
+    }
+}
+
+static int tapx_switch_epoll_add(int epoll_fd, int fd, uint32_t port) {
+    struct epoll_event event;
+    memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN | EPOLLET;
+    event.data.u32 = port;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
+        return -errno;
+    }
+    return 0;
 }
 
 uint32_t tapx_fastpath_abi_version(void) {
@@ -1853,7 +2465,7 @@ int tapx_udp_pipe_start(const struct tapx_udp_pipe_config *config, struct tapx_w
         config->peer_mode != TAPX_UDP_PEER_LEARN) {
         return -EINVAL;
     }
-    if (config->address_guard_remote > 1U) {
+    if (config->initial_handshake > 1U || config->address_guard_remote > 1U) {
         return -EINVAL;
     }
     if (config->peer_mode == TAPX_UDP_PEER_FIXED && config->peer_addr_len == 0) {
@@ -1881,17 +2493,45 @@ int tapx_udp_pipe_start(const struct tapx_udp_pipe_config *config, struct tapx_w
     worker->max_datagram_payload = config->max_datagram_payload;
     worker->peer_mode = config->peer_mode;
     worker->address_guard_remote = config->address_guard_remote;
+    worker->keepalive_interval_ms = config->keepalive_interval_ms;
+    worker->idle_timeout_ms = config->idle_timeout_ms;
     worker->device_to_network_pacer.bits_per_second = config->device_to_network_rate_bps;
     worker->network_to_device_pacer.bits_per_second = config->network_to_device_rate_bps;
     worker->counters = config->counters;
+    worker->udp_control_handler = tapx_handle_udp_address_and_diagnostic;
     int rc = tapx_copy_vkey(worker, &config->vkey);
     if (rc != 0) {
         tapx_worker_free_buffers(worker);
         return rc;
     }
+    if (config->address_response_len > 0) {
+        if (config->address_response == NULL || config->address_response_len > UINT16_MAX) {
+            tapx_worker_free_buffers(worker);
+            return -EINVAL;
+        }
+        worker->address_response = malloc(config->address_response_len);
+        if (worker->address_response == NULL) {
+            tapx_worker_free_buffers(worker);
+            return -ENOMEM;
+        }
+        memcpy(worker->address_response, config->address_response, config->address_response_len);
+        worker->address_response_len = config->address_response_len;
+    }
     size_t udp_frame_cap = (size_t)max_frame_size;
     size_t udp_vkey_cap = (size_t)worker->vkey_header_size;
     size_t wire_cap = udp_frame_cap + udp_vkey_cap;
+    if (udp_vkey_cap <= SIZE_MAX - TAPX_KEEPALIVE_SIZE &&
+        udp_vkey_cap + TAPX_KEEPALIVE_SIZE > wire_cap) {
+        wire_cap = udp_vkey_cap + TAPX_KEEPALIVE_SIZE;
+    }
+    if (worker->address_response_len > SIZE_MAX - udp_vkey_cap) {
+        tapx_worker_free_buffers(worker);
+        return -ENOMEM;
+    }
+    size_t address_wire_cap = worker->address_response_len + udp_vkey_cap;
+    if (address_wire_cap > wire_cap) {
+        wire_cap = address_wire_cap;
+    }
     if (config->max_datagram_payload > 0) {
         if (max_frame_size > UINT16_MAX || config->max_datagram_payload > UINT16_MAX ||
             config->max_datagram_payload <= worker->vkey_header_size + TAPX_SEGMENT_HEADER_SIZE) {
@@ -1944,6 +2584,13 @@ int tapx_udp_pipe_start(const struct tapx_udp_pipe_config *config, struct tapx_w
         worker->peer_addr_len = config->peer_addr_len;
         worker->has_peer = 1;
     }
+    if (worker->keepalive_interval_ms > 0U) {
+        worker->next_keepalive_ns = tapx_monotonic_ns() +
+                                    (uint64_t)worker->keepalive_interval_ms * 1000000ULL;
+    }
+    if (worker->idle_timeout_ms > 0U) {
+        worker->last_activity_ns = tapx_monotonic_ns();
+    }
 
     rc = tapx_set_nonblock(worker->tun_fd);
     if (rc != 0) {
@@ -1954,6 +2601,9 @@ int tapx_udp_pipe_start(const struct tapx_udp_pipe_config *config, struct tapx_w
     if (rc != 0) {
         tapx_worker_free_buffers(worker);
         return rc;
+    }
+    if (config->initial_handshake != 0U) {
+        (void)tapx_send_udp_keepalive(worker);
     }
 
     worker->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
@@ -2039,6 +2689,7 @@ int tapx_tcp_pipe_start(const struct tapx_tcp_pipe_config *config, struct tapx_w
     }
     worker->length_mode = config->length_mode;
     worker->address_guard_remote = config->address_guard_remote;
+    worker->idle_timeout_ms = config->idle_timeout_ms;
     worker->device_to_network_pacer.bits_per_second = config->device_to_network_rate_bps;
     worker->network_to_device_pacer.bits_per_second = config->network_to_device_rate_bps;
     worker->header_size = config->length_mode == TAPX_TCP_LENGTH_UINT16 ? 2U : 4U;
@@ -2077,6 +2728,9 @@ int tapx_tcp_pipe_start(const struct tapx_tcp_pipe_config *config, struct tapx_w
     worker->tcp_fd = config->tcp_fd;
     worker->frame_kind = config->frame_kind;
     worker->counters = config->counters;
+    if (worker->idle_timeout_ms > 0U) {
+        worker->last_activity_ns = tapx_monotonic_ns();
+    }
     rc = tapx_copy_guard(worker, &config->guard);
     if (rc != 0) {
         tapx_worker_free_buffers(worker);
@@ -2153,4 +2807,113 @@ int tapx_worker_stop(struct tapx_worker *worker) {
     close(worker->epoll_fd);
     tapx_worker_free_buffers(worker);
     return rc;
+}
+
+int tapx_device_switch_start(const struct tapx_device_switch_config *config,
+                             struct tapx_device_switch **out_switch) {
+    if (config == NULL || out_switch == NULL || config->device_fd < 0 ||
+        (config->frame_kind != TAPX_FRAME_TUN && config->frame_kind != TAPX_FRAME_TAP) ||
+        config->port_count == 0U || config->ports == NULL ||
+        config->port_count > UINT32_MAX - 1U) {
+        return -EINVAL;
+    }
+    uint32_t max_frame_size = config->max_frame_size == 0U
+        ? TAPX_DEFAULT_MAX_FRAME_SIZE : config->max_frame_size;
+    if (max_frame_size > TAPX_MAX_FRAME_SIZE) {
+        return -EINVAL;
+    }
+    struct tapx_device_switch *device_switch = calloc(1, sizeof(*device_switch));
+    if (device_switch == NULL) {
+        return -ENOMEM;
+    }
+    device_switch->epoll_fd = -1;
+    device_switch->stop_fd = -1;
+    device_switch->device_fd = config->device_fd;
+    device_switch->frame_kind = config->frame_kind;
+    device_switch->max_frame_size = max_frame_size;
+    device_switch->port_count = config->port_count;
+    device_switch->counters = config->counters;
+    device_switch->ports = calloc(config->port_count, sizeof(*device_switch->ports));
+    device_switch->buffer = malloc(max_frame_size);
+    if (config->frame_kind == TAPX_FRAME_TAP) {
+        device_switch->fdb = calloc(TAPX_SWITCH_FDB_SIZE, sizeof(*device_switch->fdb));
+    }
+    if (device_switch->ports == NULL || device_switch->buffer == NULL ||
+        (config->frame_kind == TAPX_FRAME_TAP && device_switch->fdb == NULL)) {
+        tapx_switch_free(device_switch);
+        return -ENOMEM;
+    }
+    int rc = tapx_set_nonblock(device_switch->device_fd);
+    for (size_t i = 0; rc == 0 && i < config->port_count; i++) {
+        if (config->ports[i].fd < 0) {
+            rc = -EINVAL;
+            break;
+        }
+        rc = tapx_switch_copy_routes(&device_switch->ports[i], &config->ports[i]);
+        if (rc == 0) {
+            rc = tapx_set_nonblock(device_switch->ports[i].fd);
+        }
+    }
+    if (rc != 0) {
+        tapx_switch_free(device_switch);
+        return rc;
+    }
+    device_switch->stop_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (device_switch->stop_fd < 0) {
+        rc = -errno;
+        tapx_switch_free(device_switch);
+        return rc;
+    }
+    device_switch->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (device_switch->epoll_fd < 0) {
+        rc = -errno;
+        close(device_switch->stop_fd);
+        tapx_switch_free(device_switch);
+        return rc;
+    }
+    struct epoll_event stop_event;
+    memset(&stop_event, 0, sizeof(stop_event));
+    stop_event.events = EPOLLIN;
+    stop_event.data.u32 = UINT32_MAX;
+    if (epoll_ctl(device_switch->epoll_fd, EPOLL_CTL_ADD,
+                  device_switch->stop_fd, &stop_event) < 0) {
+        rc = -errno;
+    }
+    if (rc == 0) {
+        rc = tapx_switch_epoll_add(device_switch->epoll_fd, device_switch->device_fd, 0U);
+    }
+    for (size_t i = 0; rc == 0 && i < device_switch->port_count; i++) {
+        rc = tapx_switch_epoll_add(device_switch->epoll_fd,
+                                   device_switch->ports[i].fd, (uint32_t)i + 1U);
+    }
+    if (rc != 0) {
+        close(device_switch->epoll_fd);
+        close(device_switch->stop_fd);
+        tapx_switch_free(device_switch);
+        return rc;
+    }
+    int pthread_rc = pthread_create(&device_switch->thread, NULL,
+                                    tapx_device_switch_main, device_switch);
+    if (pthread_rc != 0) {
+        close(device_switch->epoll_fd);
+        close(device_switch->stop_fd);
+        tapx_switch_free(device_switch);
+        return -pthread_rc;
+    }
+    *out_switch = device_switch;
+    return 0;
+}
+
+int tapx_device_switch_stop(struct tapx_device_switch *device_switch) {
+    if (device_switch == NULL) {
+        return -EINVAL;
+    }
+    uint64_t value = 1U;
+    ssize_t ignored = write(device_switch->stop_fd, &value, sizeof(value));
+    (void)ignored;
+    int pthread_rc = pthread_join(device_switch->thread, NULL);
+    close(device_switch->epoll_fd);
+    close(device_switch->stop_fd);
+    tapx_switch_free(device_switch);
+    return pthread_rc == 0 ? 0 : -pthread_rc;
 }

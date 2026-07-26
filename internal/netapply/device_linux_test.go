@@ -4,6 +4,7 @@ package netapply
 
 import (
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,11 @@ import (
 	"tapx/internal/model"
 )
 
+func TestMain(m *testing.M) {
+	managementPeerSource = func() []netip.Addr { return nil }
+	os.Exit(m.Run())
+}
+
 func TestApplyDeviceBuildsIPCommandsAndRollback(t *testing.T) {
 	var calls [][]string
 	runner := func(name string, args ...string) error {
@@ -22,11 +28,12 @@ func TestApplyDeviceBuildsIPCommandsAndRollback(t *testing.T) {
 	}
 
 	handle, err := applyDevice(DeviceConfig{
-		Type:     model.DeviceTUN,
-		IfName:   "tapx0",
-		MTU:      1400,
-		IPv4CIDR: "10.10.0.1/24",
-		IPv6CIDR: "2001:db8::1/64",
+		Type:   model.DeviceTUN,
+		IfName: "tapx0",
+		MTU:    1400,
+		TUNDHCP: model.TUNDHCPConfig{
+			Mode: model.TUNDHCPModeManual, IPv4CIDR: "10.10.0.1/24", IPv6CIDR: "2001:db8::1/64",
+		},
 	}, runner)
 	if err != nil {
 		t.Fatalf("apply device: %v", err)
@@ -34,9 +41,9 @@ func TestApplyDeviceBuildsIPCommandsAndRollback(t *testing.T) {
 
 	want := [][]string{
 		{"ip", "link", "set", "dev", "tapx0", "mtu", "1400"},
-		{"ip", "addr", "add", "10.10.0.1/24", "dev", "tapx0"},
-		{"ip", "addr", "add", "2001:db8::1/64", "dev", "tapx0"},
 		{"ip", "link", "set", "dev", "tapx0", "up"},
+		{"ip", "addr", "replace", "10.10.0.1/24", "dev", "tapx0"},
+		{"ip", "addr", "replace", "2001:db8::1/64", "dev", "tapx0"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %#v, want %#v", calls, want)
@@ -54,7 +61,7 @@ func TestApplyDeviceBuildsIPCommandsAndRollback(t *testing.T) {
 	}
 }
 
-func TestApplyDeviceRollsBackAddressesWhenLaterApplyFails(t *testing.T) {
+func TestApplyDeviceStopsWhenLinkActivationFails(t *testing.T) {
 	var calls [][]string
 	runner := func(name string, args ...string) error {
 		call := append([]string{name}, args...)
@@ -65,14 +72,15 @@ func TestApplyDeviceRollsBackAddressesWhenLaterApplyFails(t *testing.T) {
 		return nil
 	}
 
-	_, err := applyDevice(DeviceConfig{IfName: "tapx0", IPv4CIDR: "10.10.0.1/24"}, runner)
+	_, err := applyDevice(DeviceConfig{
+		Type: model.DeviceTUN, IfName: "tapx0",
+		TUNDHCP: model.TUNDHCPConfig{Mode: model.TUNDHCPModeManual, IPv4CIDR: "10.10.0.1/24"},
+	}, runner)
 	if err == nil {
 		t.Fatalf("expected apply error")
 	}
 	want := [][]string{
-		{"ip", "addr", "add", "10.10.0.1/24", "dev", "tapx0"},
 		{"ip", "link", "set", "dev", "tapx0", "up"},
-		{"ip", "addr", "del", "10.10.0.1/24", "dev", "tapx0"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %#v, want %#v", calls, want)
@@ -193,6 +201,154 @@ func TestApplyDeviceBuildsRouteCommandsAndRollback(t *testing.T) {
 	}
 }
 
+func TestApplyDeviceSharedUsesOneNetworkTransaction(t *testing.T) {
+	deviceRegistry.Lock()
+	deviceRegistry.items = make(map[string]*sharedDeviceApply)
+	deviceRegistry.Unlock()
+	t.Cleanup(func() {
+		deviceRegistry.Lock()
+		deviceRegistry.items = make(map[string]*sharedDeviceApply)
+		deviceRegistry.Unlock()
+	})
+
+	var calls [][]string
+	runner := func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}
+	cfg := DeviceConfig{
+		Type: model.DeviceTUN, IfName: "tapx-shared0",
+		TUNDHCP: model.TUNDHCPConfig{Mode: model.TUNDHCPModeManual, IPv4CIDR: "10.77.0.1/30"},
+	}
+	first, err := applyDeviceShared(cfg, runner)
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	second, err := applyDeviceShared(cfg, runner)
+	if err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if got := len(calls); got != 2 {
+		t.Fatalf("network config applied %d commands, want 2: %#v", got, calls)
+	}
+	if err := first.Rollback(); err != nil {
+		t.Fatalf("release first reference: %v", err)
+	}
+	if got := len(calls); got != 2 {
+		t.Fatalf("first release rolled back shared config: %#v", calls)
+	}
+	if _, err := applyDeviceShared(DeviceConfig{
+		Type: model.DeviceTUN, IfName: cfg.IfName,
+		TUNDHCP: model.TUNDHCPConfig{Mode: model.TUNDHCPModeManual, IPv4CIDR: "10.77.0.2/30"},
+	}, runner); err == nil {
+		t.Fatal("different active config was accepted")
+	}
+	if err := second.Rollback(); err != nil {
+		t.Fatalf("release last reference: %v", err)
+	}
+	if got := len(calls); got != 3 {
+		t.Fatalf("final release did not roll back shared config: %#v", calls)
+	}
+	deviceRegistry.Lock()
+	_, exists := deviceRegistry.items[cfg.IfName]
+	deviceRegistry.Unlock()
+	if exists {
+		t.Fatal("shared registry entry remains after final release")
+	}
+}
+
+func TestSharedDeviceRollbackCanRetryAfterFailure(t *testing.T) {
+	deviceRegistry.Lock()
+	deviceRegistry.items = make(map[string]*sharedDeviceApply)
+	deviceRegistry.Unlock()
+	t.Cleanup(func() {
+		deviceRegistry.Lock()
+		deviceRegistry.items = make(map[string]*sharedDeviceApply)
+		deviceRegistry.Unlock()
+	})
+
+	failDelete := true
+	runner := func(_ string, args ...string) error {
+		if len(args) > 1 && args[0] == "addr" && args[1] == "del" && failDelete {
+			failDelete = false
+			return errors.New("temporary delete failure")
+		}
+		return nil
+	}
+	handle, err := applyDeviceShared(DeviceConfig{
+		Type: model.DeviceTUN, IfName: "tapx-retry0",
+		TUNDHCP: model.TUNDHCPConfig{Mode: model.TUNDHCPModeManual, IPv4CIDR: "10.78.0.1/30"},
+	}, runner)
+	if err != nil {
+		t.Fatalf("apply shared device: %v", err)
+	}
+	if err := handle.Rollback(); err == nil {
+		t.Fatal("expected first rollback to fail")
+	}
+	if err := handle.Rollback(); err != nil {
+		t.Fatalf("retry rollback: %v", err)
+	}
+	deviceRegistry.Lock()
+	_, exists := deviceRegistry.items["tapx-retry0"]
+	deviceRegistry.Unlock()
+	if exists {
+		t.Fatal("shared registry entry remains after successful retry")
+	}
+}
+
+func TestApplyAddressLeaseReplacesPreviousLeaseAndRollsBackCurrent(t *testing.T) {
+	var calls [][]string
+	h := &appliedDevice{ifName: "tapx-tun0", allowDefaultRoute: true, runner: func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}}
+	if err := h.ApplyAddressLease(AddressLease{IPv4CIDR: "10.80.0.2/24", Gateway: "10.80.0.1", AllowDefaultRoute: true}); err != nil {
+		t.Fatalf("apply first lease: %v", err)
+	}
+	if err := h.ApplyAddressLease(AddressLease{IPv6CIDR: "fd80::2/64", Gateway: "fd80::1", AllowDefaultRoute: true}); err != nil {
+		t.Fatalf("apply renewed lease: %v", err)
+	}
+	if err := h.Rollback(); err != nil {
+		t.Fatalf("rollback lease: %v", err)
+	}
+	wantFragments := []string{
+		"ip addr replace 10.80.0.2/24 dev tapx-tun0",
+		"ip -4 route replace default via 10.80.0.1 dev tapx-tun0",
+		"ip addr replace fd80::2/64 dev tapx-tun0",
+		"ip -6 route replace default via fd80::1 dev tapx-tun0",
+		"ip addr del 10.80.0.2/24 dev tapx-tun0",
+		"ip -6 route del default via fd80::1 dev tapx-tun0",
+		"ip addr del fd80::2/64 dev tapx-tun0",
+	}
+	joined := make([]string, 0, len(calls))
+	for _, call := range calls {
+		joined = append(joined, strings.Join(call, " "))
+	}
+	for _, want := range wantFragments {
+		if !slices.Contains(joined, want) {
+			t.Fatalf("missing command %q in %#v", want, joined)
+		}
+	}
+}
+
+func TestApplyAddressLeaseDoesNotInstallDefaultRouteWithoutPermission(t *testing.T) {
+	var calls []string
+	h := &appliedDevice{ifName: "tapx-tun0", runner: func(name string, args ...string) error {
+		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		return nil
+	}}
+	if err := h.ApplyAddressLease(AddressLease{
+		IPv4CIDR: "10.81.0.2/24", Gateway: "10.81.0.1", AllowDefaultRoute: true,
+	}); err != nil {
+		t.Fatalf("apply lease: %v", err)
+	}
+	for _, call := range calls {
+		if strings.Contains(call, "route replace default") {
+			t.Fatalf("default route was installed without device permission: %s", call)
+		}
+	}
+}
+
 func TestApplyDeviceBuildsMSSClampCommandsAndRollback(t *testing.T) {
 	var calls [][]string
 	runner := func(name string, args ...string) error {
@@ -283,7 +439,7 @@ func TestApplyDeviceBuildsAutomaticPMTUMSSCommands(t *testing.T) {
 	}
 }
 
-func TestApplyDeviceWritesDNSAndRollbackRemovesNewFile(t *testing.T) {
+func TestApplyDNSAndRollbackRemovesNewFile(t *testing.T) {
 	var calls [][]string
 	runner := func(name string, args ...string) error {
 		calls = append(calls, append([]string{name}, args...))
@@ -291,18 +447,14 @@ func TestApplyDeviceWritesDNSAndRollbackRemovesNewFile(t *testing.T) {
 	}
 	outputPath := filepath.Join(t.TempDir(), "tapx.resolv.conf")
 
-	handle, err := applyDevice(DeviceConfig{
-		Type:   model.DeviceTUN,
-		IfName: "tapx0",
-		DNS: DNSConfig{
-			Enabled:       true,
-			Nameservers:   []string{"1.1.1.1", "2606:4700:4700::1111"},
-			SearchDomains: []string{"example.com", "lan"},
-			Options:       []string{"timeout:1", "attempts:2"},
-			OutputPath:    outputPath,
-		},
-	}, runner)
-	if err != nil {
+	handle := &appliedDevice{ifName: "tapx0", runner: runner}
+	if err := handle.applyDNS(DNSConfig{
+		Enabled:       true,
+		Nameservers:   []string{"1.1.1.1", "2606:4700:4700::1111"},
+		SearchDomains: []string{"example.com", "lan"},
+		Options:       []string{"timeout:1", "attempts:2"},
+		OutputPath:    outputPath,
+	}); err != nil {
 		t.Fatalf("apply DNS: %v", err)
 	}
 	if len(calls) != 0 {
@@ -332,23 +484,17 @@ func TestApplyDeviceWritesDNSAndRollbackRemovesNewFile(t *testing.T) {
 	}
 }
 
-func TestApplyDeviceRestoresExistingDNSFile(t *testing.T) {
+func TestApplyDNSRestoresExistingFile(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "tapx.resolv.conf")
 	original := []byte("nameserver 9.9.9.9\n")
 	if err := os.WriteFile(outputPath, original, 0o600); err != nil {
 		t.Fatalf("write original DNS file: %v", err)
 	}
 
-	handle, err := applyDevice(DeviceConfig{
-		Type:   model.DeviceTUN,
-		IfName: "tapx0",
-		DNS: DNSConfig{
-			Enabled:     true,
-			Nameservers: []string{"1.1.1.1"},
-			OutputPath:  outputPath,
-		},
-	}, func(string, ...string) error { return nil })
-	if err != nil {
+	handle := &appliedDevice{ifName: "tapx0", runner: func(string, ...string) error { return nil }}
+	if err := handle.applyDNS(DNSConfig{
+		Enabled: true, Nameservers: []string{"1.1.1.1"}, OutputPath: outputPath,
+	}); err != nil {
 		t.Fatalf("apply DNS: %v", err)
 	}
 	if err := handle.Rollback(); err != nil {
@@ -370,16 +516,11 @@ func TestApplyDeviceRestoresExistingDNSFile(t *testing.T) {
 	}
 }
 
-func TestApplyDeviceRejectsInvalidDNS(t *testing.T) {
-	_, err := applyDevice(DeviceConfig{
-		Type:   model.DeviceTUN,
-		IfName: "tapx0",
-		DNS: DNSConfig{
-			Enabled:     true,
-			Nameservers: []string{"bad-ip"},
-			OutputPath:  filepath.Join(t.TempDir(), "tapx.resolv.conf"),
-		},
-	}, func(string, ...string) error { return nil })
+func TestApplyDNSRejectsInvalidNameserver(t *testing.T) {
+	handle := &appliedDevice{ifName: "tapx0", runner: func(string, ...string) error { return nil }}
+	err := handle.applyDNS(DNSConfig{
+		Enabled: true, Nameservers: []string{"bad-ip"}, OutputPath: filepath.Join(t.TempDir(), "tapx.resolv.conf"),
+	})
 	if err == nil {
 		t.Fatalf("expected invalid DNS error")
 	}

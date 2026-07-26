@@ -33,6 +33,22 @@ static int expect_no_data(int fd, const char *message) {
     return expect(rc == 0, message);
 }
 
+static ssize_t read_with_timeout(int fd, void *buffer, size_t length) {
+    struct pollfd pfd = {.fd = fd, .events = POLLIN, .revents = 0};
+    int rc;
+    do {
+        rc = poll(&pfd, 1, 1000);
+    } while (rc < 0 && errno == EINTR);
+    if (rc <= 0) {
+        return rc == 0 ? -ETIMEDOUT : -errno;
+    }
+    ssize_t n;
+    do {
+        n = read(fd, buffer, length);
+    } while (n < 0 && errno == EINTR);
+    return n;
+}
+
 static uint16_t read_be16(const unsigned char *p);
 
 static void make_ipv4_packet(unsigned char packet[20],
@@ -514,6 +530,155 @@ out:
     if (peer_fd >= 0) {
         close(peer_fd);
     }
+    return rc;
+}
+
+static int test_udp_pipe_address_control(void) {
+    int tun_pair[2] = {-1, -1};
+    int udp_fd = -1;
+    int peer_fd = -1;
+    int renewal_fd = -1;
+    int rc = 1;
+    struct tapx_worker *worker = NULL;
+
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, tun_pair) != 0) {
+        perror("socketpair");
+        goto out;
+    }
+    udp_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    peer_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (udp_fd < 0 || peer_fd < 0) {
+        perror("socket");
+        goto out;
+    }
+
+    struct sockaddr_in udp_addr;
+    memset(&udp_addr, 0, sizeof(udp_addr));
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(udp_fd, (struct sockaddr *)&udp_addr, sizeof(udp_addr)) != 0) {
+        perror("bind udp");
+        goto out;
+    }
+    socklen_t udp_len = sizeof(udp_addr);
+    if (getsockname(udp_fd, (struct sockaddr *)&udp_addr, &udp_len) != 0) {
+        perror("getsockname udp");
+        goto out;
+    }
+
+    struct sockaddr_in peer_addr;
+    memset(&peer_addr, 0, sizeof(peer_addr));
+    peer_addr.sin_family = AF_INET;
+    peer_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(peer_fd, (struct sockaddr *)&peer_addr, sizeof(peer_addr)) != 0) {
+        perror("bind peer");
+        goto out;
+    }
+    socklen_t peer_len = sizeof(peer_addr);
+    if (getsockname(peer_fd, (struct sockaddr *)&peer_addr, &peer_len) != 0) {
+        perror("getsockname peer");
+        goto out;
+    }
+
+    const unsigned char key[] = "lease-key";
+    const unsigned char response[] = "TXADDR1\1{\"ipv4Cidr\":\"10.20.0.2/24\"}";
+    struct tapx_fastpath_counters counters;
+    tapx_fastpath_counters_reset(&counters);
+    struct tapx_udp_pipe_config config;
+    memset(&config, 0, sizeof(config));
+    config.tun_fd = tun_pair[0];
+    config.udp_fd = udp_fd;
+    config.frame_kind = TAPX_FRAME_TUN;
+    config.max_frame_size = 2048;
+    config.peer_mode = TAPX_UDP_PEER_FIXED;
+    memcpy(&config.peer_addr, &peer_addr, sizeof(peer_addr));
+    config.peer_addr_len = sizeof(peer_addr);
+    config.vkey.value = key;
+    config.vkey.value_len = sizeof(key) - 1;
+    config.address_response = response;
+    config.address_response_len = sizeof(response) - 1;
+    config.counters = &counters;
+    if (expect(tapx_udp_pipe_start(&config, &worker) == 0 && worker != NULL,
+               "address control udp worker start")) {
+        goto out;
+    }
+
+    const unsigned char request[] = {'T', 'X', 'A', 'D', 'D', 'R', '1', 0};
+    unsigned char wire[256];
+    size_t request_len = make_vkey_payload(wire, key, sizeof(key) - 1,
+                                           request, sizeof(request));
+    if (sendto(peer_fd, wire, request_len, 0,
+               (struct sockaddr *)&udp_addr, udp_len) != (ssize_t)request_len) {
+        perror("send address request");
+        goto out;
+    }
+    unsigned char received[256];
+    ssize_t n = recv(peer_fd, received, sizeof(received), 0);
+    size_t response_len = 8 + sizeof(key) - 1 + sizeof(response) - 1;
+    if (expect(n == (ssize_t)response_len, "address control response length") ||
+        expect(memcmp(received, "TXV1", 4) == 0,
+               "address control response vkey header") ||
+        expect(memcmp(received + 8, key, sizeof(key) - 1) == 0,
+               "address control response vkey") ||
+        expect(memcmp(received + 8 + sizeof(key) - 1,
+                      response, sizeof(response) - 1) == 0,
+               "address control response payload")) {
+        goto out;
+    }
+    if (expect_no_data(tun_pair[1], "address request must not reach tun")) {
+        goto out;
+    }
+
+    unsigned char packet[20];
+    make_ipv4_packet(packet, 10, 20, 0, 1, 10, 20, 0, 2);
+    size_t packet_len = make_vkey_payload(wire, key, sizeof(key) - 1,
+                                          packet, sizeof(packet));
+    if (sendto(peer_fd, wire, packet_len, 0,
+               (struct sockaddr *)&udp_addr, udp_len) != (ssize_t)packet_len) {
+        perror("send packet after address control");
+        goto out;
+    }
+    n = read(tun_pair[1], received, sizeof(received));
+    if (expect(n == (ssize_t)sizeof(packet), "ordinary udp payload after address control") ||
+        expect(memcmp(received, packet, sizeof(packet)) == 0,
+               "ordinary udp payload contents after address control")) {
+        goto out;
+    }
+
+    renewal_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (renewal_fd < 0) {
+        perror("create renewal socket");
+        goto out;
+    }
+    request_len = make_vkey_payload(wire, key, sizeof(key) - 1,
+                                    request, sizeof(request));
+    if (sendto(renewal_fd, wire, request_len, 0,
+               (struct sockaddr *)&udp_addr, udp_len) != (ssize_t)request_len) {
+        perror("send renewal address request");
+        goto out;
+    }
+    n = recv(renewal_fd, received, sizeof(received), 0);
+    if (expect(n == (ssize_t)response_len,
+               "address renewal from a control socket must bypass the pinned data peer") ||
+        expect(memcmp(received + 8 + sizeof(key) - 1,
+                      response, sizeof(response) - 1) == 0,
+               "address renewal response payload")) {
+        goto out;
+    }
+    if (expect_no_data(tun_pair[1], "address renewal must not reach tun")) {
+        goto out;
+    }
+    rc = 0;
+
+out:
+    if (worker != NULL) {
+        (void)tapx_worker_stop(worker);
+    }
+    if (tun_pair[0] >= 0) close(tun_pair[0]);
+    if (tun_pair[1] >= 0) close(tun_pair[1]);
+    if (udp_fd >= 0) close(udp_fd);
+    if (peer_fd >= 0) close(peer_fd);
+    if (renewal_fd >= 0) close(renewal_fd);
     return rc;
 }
 
@@ -1512,6 +1677,145 @@ out:
     return rc;
 }
 
+static int test_tap_device_switch(void) {
+    int device[2] = {-1, -1};
+    int first[2] = {-1, -1};
+    int second[2] = {-1, -1};
+    struct tapx_device_switch *device_switch = NULL;
+    int rc = 1;
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, device) != 0 ||
+        socketpair(AF_UNIX, SOCK_DGRAM, 0, first) != 0 ||
+        socketpair(AF_UNIX, SOCK_DGRAM, 0, second) != 0) {
+        perror("socketpair tap switch");
+        goto out;
+    }
+    struct tapx_device_switch_port ports[2];
+    memset(ports, 0, sizeof(ports));
+    ports[0].fd = first[0];
+    ports[1].fd = second[0];
+    struct tapx_device_switch_config config;
+    memset(&config, 0, sizeof(config));
+    config.device_fd = device[0];
+    config.frame_kind = TAPX_FRAME_TAP;
+    config.max_frame_size = 2048;
+    config.ports = ports;
+    config.port_count = 2;
+    if (expect(tapx_device_switch_start(&config, &device_switch) == 0,
+               "tap device switch starts")) {
+        goto out;
+    }
+
+    const unsigned char broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    const unsigned char mac1[6] = {0x02, 0, 0, 0, 0, 1};
+    const unsigned char mac2[6] = {0x02, 0, 0, 0, 0, 2};
+    unsigned char frame[42];
+    make_tap_arp_frame(frame, broadcast, mac1, mac1, 10, 0, 0, 1,
+                       broadcast, 10, 0, 0, 2);
+    if (write(first[1], frame, sizeof(frame)) != (ssize_t)sizeof(frame)) {
+        perror("write tap broadcast");
+        goto out;
+    }
+    unsigned char received[128];
+    if (expect(read_with_timeout(device[1], received, sizeof(received)) == (ssize_t)sizeof(frame),
+               "tap broadcast reaches physical device") ||
+        expect(read_with_timeout(second[1], received, sizeof(received)) == (ssize_t)sizeof(frame),
+               "tap broadcast reaches other tunnel")) {
+        goto out;
+    }
+
+    make_tap_pppoe_ipv4_frame(frame, mac1, mac2, 2);
+    if (write(second[1], frame, sizeof(frame)) != (ssize_t)sizeof(frame)) {
+        perror("write tap learned unicast");
+        goto out;
+    }
+    ssize_t n = read_with_timeout(first[1], received, sizeof(received));
+    if (expect(n == (ssize_t)sizeof(frame) && memcmp(received, frame, sizeof(frame)) == 0,
+               "tap learned unicast preserves PPPoE frame") ||
+        expect_no_data(device[1], "tap learned unicast avoids unrelated uplink")) {
+        goto out;
+    }
+    rc = 0;
+out:
+    if (device_switch != NULL) {
+        (void)tapx_device_switch_stop(device_switch);
+    }
+    for (size_t i = 0; i < 2; i++) {
+        if (device[i] >= 0) close(device[i]);
+        if (first[i] >= 0) close(first[i]);
+        if (second[i] >= 0) close(second[i]);
+    }
+    return rc;
+}
+
+static int test_tun_device_switch(void) {
+    int device[2] = {-1, -1};
+    int first[2] = {-1, -1};
+    int second[2] = {-1, -1};
+    struct tapx_device_switch *device_switch = NULL;
+    int rc = 1;
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, device) != 0 ||
+        socketpair(AF_UNIX, SOCK_DGRAM, 0, first) != 0 ||
+        socketpair(AF_UNIX, SOCK_DGRAM, 0, second) != 0) {
+        perror("socketpair tun switch");
+        goto out;
+    }
+    struct tapx_ipv4_prefix routes[2] = {
+        {.network = 0x0a000100U, .mask = 0xffffff00U},
+        {.network = 0x0a000200U, .mask = 0xffffff00U},
+    };
+    struct tapx_device_switch_port ports[2];
+    memset(ports, 0, sizeof(ports));
+    ports[0].fd = first[0];
+    ports[0].ipv4_prefixes = &routes[0];
+    ports[0].ipv4_prefix_count = 1;
+    ports[1].fd = second[0];
+    ports[1].ipv4_prefixes = &routes[1];
+    ports[1].ipv4_prefix_count = 1;
+    struct tapx_device_switch_config config;
+    memset(&config, 0, sizeof(config));
+    config.device_fd = device[0];
+    config.frame_kind = TAPX_FRAME_TUN;
+    config.max_frame_size = 2048;
+    config.ports = ports;
+    config.port_count = 2;
+    if (expect(tapx_device_switch_start(&config, &device_switch) == 0,
+               "tun device switch starts")) {
+        goto out;
+    }
+    unsigned char packet[20];
+    make_ipv4_packet(packet, 192, 0, 2, 1, 10, 0, 2, 9);
+    if (write(device[1], packet, sizeof(packet)) != (ssize_t)sizeof(packet)) {
+        perror("write tun routed packet");
+        goto out;
+    }
+    unsigned char received[64];
+    if (expect(read_with_timeout(second[1], received, sizeof(received)) == (ssize_t)sizeof(packet),
+               "tun longest-prefix route selects second tunnel") ||
+        expect_no_data(first[1], "tun route does not leak to first tunnel")) {
+        goto out;
+    }
+    make_ipv4_packet(packet, 10, 0, 2, 9, 8, 8, 8, 8);
+    if (write(second[1], packet, sizeof(packet)) != (ssize_t)sizeof(packet)) {
+        perror("write tun uplink packet");
+        goto out;
+    }
+    if (expect(read_with_timeout(device[1], received, sizeof(received)) == (ssize_t)sizeof(packet),
+               "tun unmatched remote packet reaches physical device")) {
+        goto out;
+    }
+    rc = 0;
+out:
+    if (device_switch != NULL) {
+        (void)tapx_device_switch_stop(device_switch);
+    }
+    for (size_t i = 0; i < 2; i++) {
+        if (device[i] >= 0) close(device[i]);
+        if (first[i] >= 0) close(first[i]);
+        if (second[i] >= 0) close(second[i]);
+    }
+    return rc;
+}
+
 int main(void) {
     if (test_abi_and_counters() != 0) {
         return 1;
@@ -1523,6 +1827,9 @@ int main(void) {
         return 1;
     }
     if (test_udp_pipe_vkey_header() != 0) {
+        return 1;
+    }
+    if (test_udp_pipe_address_control() != 0) {
         return 1;
     }
     if (test_udp_pipe_tun_ipv4_guard() != 0) {
@@ -1544,6 +1851,12 @@ int main(void) {
         return 1;
     }
     if (test_tcp_pipe_vkey_header() != 0) {
+        return 1;
+    }
+    if (test_tap_device_switch() != 0) {
+        return 1;
+    }
+    if (test_tun_device_switch() != 0) {
         return 1;
     }
     return 0;

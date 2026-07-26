@@ -13,6 +13,8 @@ TUN_B="txkcptun-b"
 PID_A=""
 PID_B=""
 CORE_ARGS="${CORE_ARGS:-}"
+XRAY_RUNTIME="${XRAY_RUNTIME:-embedded}"
+XRAY_BIN="${XRAY_BIN:-${ROOT}/build/lab/xray-linux-amd64}"
 
 cleanup() {
   set +e
@@ -47,6 +49,14 @@ snmp6_value() {
 for tool in go ip ping grep sed awk; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing required command: $tool" >&2; exit 1; }
 done
+[[ "$XRAY_RUNTIME" == "embedded" || "$XRAY_RUNTIME" == "external" ]] || {
+  echo "XRAY_RUNTIME must be embedded or external" >&2
+  exit 2
+}
+if [[ "$XRAY_RUNTIME" == "external" && ! -x "$XRAY_BIN" ]]; then
+  echo "external Xray binary is not executable: $XRAY_BIN" >&2
+  exit 1
+fi
 
 mkdir -p "$BUILD_DIR"
 trap cleanup EXIT
@@ -56,9 +66,9 @@ rm -f "${BUILD_DIR}"/{tapx-a,tapx-b}.{json,log}
 
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON
 {
-  "Devices": [{"ID":"tun-a","Enabled":true,"Type":"tun","IfName":"${TUN_A}","MTU":1400,"LinkAutoOptimize":true}],
+  "Devices": [{"ID":"tun-a","Enabled":true,"Type":"tun","IfName":"${TUN_A}","MTU":1400,"LinkAutoOptimize":true,"AccessRole":"server","TUNDHCP":{"Mode":"server","Protocol":"ipv4","IPv4CIDR":"10.89.1.1/30","PoolStart":"10.89.1.2","PoolEnd":"10.89.1.2","LeaseSeconds":300}}],
   "XrayProfiles": [{
-    "ID":"xray-server","Enabled":true,"Runtime":"embedded",
+    "ID":"xray-server","Enabled":true,"Runtime":"${XRAY_RUNTIME}",
     "InboundProtocol":"vless",
     "InboundSettingsJSON":"{\"clients\":[{\"id\":\"22222222-2222-4222-8222-222222222222\",\"level\":0}],\"decryption\":\"none\"}",
     "Network":"mkcp","Security":"none","StreamSettingsJSON":"{}",
@@ -68,15 +78,16 @@ cat >"${BUILD_DIR}/tapx-a.json" <<JSON
     "ID":"xray-a","Enabled":true,"BindHost":"fd31:251::1","BindPort":44101,
     "Transport":"xray","XrayProfileID":"xray-server","RawTCP":{"LengthMode":"uint16"},
     "Binding":{"DeviceID":"tun-a"}
-  }]
+  }],
+  "Settings": [{"ID":"global","Enabled":true,"ExternalXrayPath":"${XRAY_BIN}","DataDir":"${BUILD_DIR}/xray-a","LogLevel":"warn"}]
 }
 JSON
 
 cat >"${BUILD_DIR}/tapx-b.json" <<JSON
 {
-  "Devices": [{"ID":"tun-b","Enabled":true,"Type":"tun","IfName":"${TUN_B}","MTU":1400,"LinkAutoOptimize":true}],
+  "Devices": [{"ID":"tun-b","Enabled":true,"Type":"tun","IfName":"${TUN_B}","MTU":1400,"LinkAutoOptimize":true,"AccessRole":"client","TUNDHCP":{"Mode":"client","Protocol":"ipv4"}}],
   "XrayProfiles": [{
-    "ID":"xray-client","Enabled":true,"Runtime":"embedded",
+    "ID":"xray-client","Enabled":true,"Runtime":"${XRAY_RUNTIME}",
     "OutboundProtocol":"vless",
     "OutboundSettingsJSON":"{\"vnext\":[{\"address\":\"fd31:251::1\",\"port\":44101,\"users\":[{\"id\":\"22222222-2222-4222-8222-222222222222\",\"encryption\":\"none\"}]}]}",
     "Network":"mkcp","Security":"none","StreamSettingsJSON":"{}"
@@ -85,7 +96,8 @@ cat >"${BUILD_DIR}/tapx-b.json" <<JSON
     "ID":"xray-b","Enabled":true,"Remote":"tapx.frame.local","Port":1,
     "Transport":"xray","XrayProfileID":"xray-client","RawTCP":{"LengthMode":"uint16"},
     "Binding":{"DeviceID":"tun-b"}
-  }]
+  }],
+  "Settings": [{"ID":"global","Enabled":true,"ExternalXrayPath":"${XRAY_BIN}","DataDir":"${BUILD_DIR}/xray-b","LogLevel":"warn"}]
 }
 JSON
 
@@ -108,10 +120,8 @@ wait_for "grep -q 'runtime started' '${BUILD_DIR}/tapx-b.log' 2>/dev/null" || fa
 wait_for "ip -n '$NS_A' link show '$TUN_A' >/dev/null 2>&1" || fail_with_logs
 wait_for "ip -n '$NS_B' link show '$TUN_B' >/dev/null 2>&1" || fail_with_logs
 
-ip -n "$NS_A" addr add 10.89.1.1/30 dev "$TUN_A"
-ip -n "$NS_B" addr add 10.89.1.2/30 dev "$TUN_B"
-ip -n "$NS_A" link set "$TUN_A" up
-ip -n "$NS_B" link set "$TUN_B" up
+ip -n "$NS_A" addr show dev "$TUN_A" | grep -q "10.89.1.1/30" || fail_with_logs
+ip -n "$NS_B" addr show dev "$TUN_B" | grep -q "10.89.1.2/30" || fail_with_logs
 ip netns exec "$NS_A" ping -6 -c 1 -W 1 fd31:251::2 >/dev/null || fail_with_logs
 
 frag_a_before="$(snmp6_value "$NS_A" Ip6FragCreates)"
@@ -129,4 +139,4 @@ wait_for "ip netns exec '$NS_B' ping -M do -c 2 -W 2 -s 1372 10.89.1.1 >/dev/nul
 [[ "$(snmp6_value "$NS_A" Ip6ReasmReqds)" == "$reasm_a_before" ]] || fail_with_logs
 [[ "$(snmp6_value "$NS_B" Ip6ReasmReqds)" == "$reasm_b_before" ]] || fail_with_logs
 
-echo "embedded Xray mKCP/TUN over 1280-byte IPv6 underlay without IP fragmentation: ok"
+echo "${XRAY_RUNTIME} Xray mKCP/TUN auto-address over 1280-byte IPv6 underlay without IP fragmentation: ok"

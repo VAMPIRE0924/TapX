@@ -26,7 +26,7 @@ text() {
 }
 
 has_tty() {
-  [[ "${TAPX_NONINTERACTIVE:-0}" != "1" && -r /dev/tty ]]
+  [[ "${TAPX_NONINTERACTIVE:-0}" != "1" && ( -t 0 || -t 1 || -t 2 ) && -r /dev/tty ]]
 }
 
 read_value() {
@@ -77,6 +77,46 @@ need_systemd() {
   fi
 }
 
+ensure_runtime_dependencies() {
+  local missing=() command
+  for command in ip tc dnsmasq dhcrelay; do
+    command -v "$command" >/dev/null 2>&1 || missing+=("$command")
+  done
+  if ! command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1; then
+    missing+=("nftables/iptables")
+  fi
+  ((${#missing[@]})) || return 0
+
+  printf '%s %s\n' "$(text 'Installing runtime dependencies:' '正在安装运行依赖：')" "${missing[*]}"
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates iproute2 nftables iptables dnsmasq-base isc-dhcp-relay
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y ca-certificates iproute nftables iptables dnsmasq dhcp-relay
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y ca-certificates iproute nftables iptables dnsmasq dhcp-relay
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install ca-certificates iproute2 nftables iptables dnsmasq dhcp-relay
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm ca-certificates iproute2 nftables iptables-nft dnsmasq dhcp
+  else
+    printf '%s %s\n' "$(text 'Install these commands first:' '请先安装这些命令：')" "${missing[*]}" >&2
+    return 1
+  fi
+
+  missing=()
+  for command in ip tc dnsmasq dhcrelay; do
+    command -v "$command" >/dev/null 2>&1 || missing+=("$command")
+  done
+  if ! command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1; then
+    missing+=("nftables/iptables")
+  fi
+  if ((${#missing[@]})); then
+    printf '%s %s\n' "$(text 'Missing required runtime commands:' '仍缺少运行命令：')" "${missing[*]}" >&2
+    return 1
+  fi
+}
+
 random_token() {
   local bytes="${1:-18}"
   if command -v openssl >/dev/null 2>&1; then
@@ -124,8 +164,35 @@ TAPX_DB_SOURCE='$source'
 TAPX_PANEL_LISTEN='$listen'
 TAPX_PANEL_BASE_PATH='$base_path'
 TAPX_PANEL_HTTPS='$https'
+TAPX_LANG='${TAPX_LANG:-en}'
 EOF
   chmod 0600 "$(env_file)"
+}
+
+set_language() {
+  local choice="" next="en" file
+  printf '\n1,English\n2,中文\n\n'
+  read_value choice '> '
+  case "$choice" in
+    2|zh|ZH) next=zh ;;
+    1|en|EN|'') next=en ;;
+    *)
+      printf '%s\n' "$(text 'Invalid option.' '无效选项。')"
+      return 1
+      ;;
+  esac
+  TAPX_LANG="$next"
+  export TAPX_LANG
+  file="$(env_file)"
+  if [[ -f "$file" ]]; then
+    if grep -q '^TAPX_LANG=' "$file"; then
+      sed -i "s/^TAPX_LANG=.*/TAPX_LANG='$TAPX_LANG'/" "$file"
+    else
+      printf "TAPX_LANG='%s'\n" "$TAPX_LANG" >>"$file"
+    fi
+    chmod 0600 "$file"
+  fi
+  printf '%s\n' "$(text 'Language changed to English.' '界面语言已切换为中文。')"
 }
 
 load_env() {
@@ -249,7 +316,28 @@ choose_first_install_settings() {
     fi
   fi
   PANEL_HTTPS=0
-  [[ -n "$PANEL_CERT_FILE" ]] && PANEL_HTTPS=1
+  if [[ -n "$PANEL_CERT_FILE" ]]; then
+    PANEL_HTTPS=1
+  fi
+}
+
+validate_certificate_paths() {
+  local cert="${1:-}" key="${2:-}" resolved
+  if [[ -z "$cert" && -z "$key" ]]; then
+    return 0
+  fi
+  if [[ ! -r "$cert" || ! -r "$key" ]]; then
+    printf '%s\n' "$(text 'The certificate or private key cannot be read.' '证书或私钥无法读取。')" >&2
+    return 1
+  fi
+  for resolved in "$(readlink -f "$cert")" "$(readlink -f "$key")"; do
+    case "$resolved" in
+      /tmp/*|/run/*|/dev/shm/*)
+        printf '%s\n' "$(text 'Certificate files must use a persistent path such as /etc/letsencrypt.' '证书文件必须使用持久路径，例如 /etc/letsencrypt。')" >&2
+        return 1
+        ;;
+    esac
+  done
 }
 
 hash_password() {
@@ -302,11 +390,11 @@ StateDirectory=tapx
 LogsDirectory=tapx
 ReadWritePaths=$sysconfdir /run/tapx /var/lib/tapx /var/log/tapx
 ProtectSystem=full
-ProtectHome=true
+ProtectHome=read-only
 PrivateTmp=true
 NoNewPrivileges=false
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SETPCAP CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETPCAP CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
 
 [Install]
 WantedBy=multi-user.target
@@ -326,22 +414,51 @@ open_firewall_port() {
 
 public_host() {
   local host=""
+  if [[ -n "${TAPX_PUBLIC_HOST:-}" ]]; then
+    printf '%s' "$TAPX_PUBLIC_HOST"
+    return
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    host="$(curl -4 -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  elif command -v wget >/dev/null 2>&1; then
+    host="$(wget -4 -qO- -T 4 https://api.ipify.org 2>/dev/null || true)"
+  fi
   if command -v hostname >/dev/null 2>&1; then
-    host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    host="${host:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
   fi
   printf '%s' "${host:-SERVER_IP}"
 }
 
 panel_url() {
   load_env
-  local scheme=http
+  local scheme=http host
   [[ "${TAPX_PANEL_HTTPS:-0}" == "1" ]] && scheme=https
-  printf '%s://%s:%s%s/\n' "$scheme" "$(public_host)" "${TAPX_PANEL_LISTEN##*:}" "${TAPX_PANEL_BASE_PATH%/}"
+  host="$(public_host)"
+  if [[ "$host" == *:* && "$host" != \[*\] ]]; then host="[$host]"; fi
+  printf '%s://%s:%s%s/\n' "$scheme" "$host" "${TAPX_PANEL_LISTEN##*:}" "${TAPX_PANEL_BASE_PATH%/}"
+}
+
+wait_for_service() {
+  local stable=0 attempt
+  for attempt in {1..20}; do
+    sleep 0.5
+    if "$systemctl_cmd" is-active --quiet "$service_name"; then
+      stable=$((stable + 1))
+      if [[ "$stable" -ge 4 ]]; then return 0; fi
+    else
+      stable=0
+    fi
+  done
+  printf '%s\n' "$(text 'TapX failed to remain running after installation.' 'TapX 安装后未能保持运行。')" >&2
+  "$systemctl_cmd" status "$service_name" --no-pager -l >&2 || true
+  journalctl -u "$service_name" -n 20 --no-pager >&2 || true
+  return 1
 }
 
 install_wizard() {
   need_root
   need_systemd
+  ensure_runtime_dependencies
   require_bundle
   if "$systemctl_cmd" is-active --quiet "$service_name" 2>/dev/null; then
     "$systemctl_cmd" stop "$service_name"
@@ -357,10 +474,14 @@ install_wizard() {
     PANEL_CERT_FILE="${TAPX_PANEL_CERT_FILE:-}"
     PANEL_KEY_FILE="${TAPX_PANEL_KEY_FILE:-}"
     PANEL_HTTPS=0
-    [[ -n "$PANEL_CERT_FILE" ]] && PANEL_HTTPS=1
+    if [[ -n "$PANEL_CERT_FILE" ]]; then
+      PANEL_HTTPS=1
+    fi
   else
     choose_first_install_settings
   fi
+
+  validate_certificate_paths "$PANEL_CERT_FILE" "$PANEL_KEY_FILE"
 
   if [[ "$DB_DRIVER" != "sqlite" && "$DB_DRIVER" != "postgres" ]]; then
     printf '%s\n' "$(text 'Database must be sqlite or postgres.' '数据库必须为 SQLite 或 PostgreSQL。')" >&2
@@ -389,12 +510,83 @@ install_wizard() {
   "$systemctl_cmd" daemon-reload
   "$systemctl_cmd" enable "$service_name" >/dev/null
   "$systemctl_cmd" restart "$service_name"
+  wait_for_service
 
   printf '\n%b%s%b\n' "$green" "$(text 'TapX installation completed.' 'TapX 安装完成。')" "$plain"
   printf '%s %s\n' "$(text 'Panel:' '面板：')" "$(panel_url)"
   printf '%s %s\n' "$(text 'Username:' '用户名：')" "$ADMIN_USERNAME"
   printf '%s %s\n' "$(text 'Password:' '密码：')" "$ADMIN_PASSWORD"
-  printf '%b%s%b\n' "$yellow" "$(text 'The generated password is shown only once.' '随机生成的密码只显示这一次。')" "$plain"
+  printf '%b%s%b\n' "$yellow" "$(text 'The password is shown only once; store it securely.' '密码只显示这一次，请妥善保存。')" "$plain"
+}
+
+upgrade_bundle() {
+  need_root
+  need_systemd
+  require_bundle
+  if ! is_installed; then
+    printf '%s\n' "$(text 'TapX is not installed; run the installer first.' 'TapX 尚未安装，请先执行安装。')" >&2
+    return 1
+  fi
+
+  local backup_dir was_active=0 had_unit=0 candidate_core candidate_panel
+  backup_dir="$(mktemp -d /tmp/tapx-upgrade.XXXXXX)"
+  candidate_core="$backup_dir/tapx-core.new"
+  candidate_panel="$backup_dir/tapx-panel.new"
+  install -m 0755 "$build_dir/tapx-core" "$candidate_core"
+  install -m 0755 "$build_dir/tapx-panel" "$candidate_panel"
+  "$candidate_core" -version >/dev/null
+  "$candidate_panel" -version >/dev/null
+
+  cp -a "$prefix/bin/tapx-core" "$backup_dir/tapx-core"
+  cp -a "$prefix/bin/tapx-panel" "$backup_dir/tapx-panel"
+  cp -a "$prefix/bin/tapx" "$backup_dir/tapx"
+  if [[ -f "$unit_dir/$service_name" ]]; then
+    cp -a "$unit_dir/$service_name" "$backup_dir/$service_name"
+    had_unit=1
+  fi
+  if "$systemctl_cmd" is-active --quiet "$service_name"; then
+    was_active=1
+    "$systemctl_cmd" stop "$service_name"
+  fi
+
+  if ! install -m 0755 "$candidate_core" "$prefix/bin/tapx-core" ||
+     ! install -m 0755 "$candidate_panel" "$prefix/bin/tapx-panel"; then
+    install -m 0755 "$backup_dir/tapx-core" "$prefix/bin/tapx-core"
+    install -m 0755 "$backup_dir/tapx-panel" "$prefix/bin/tapx-panel"
+    ((was_active)) && "$systemctl_cmd" start "$service_name" || true
+    rm -rf "$backup_dir"
+    return 1
+  fi
+
+  if ! install_service_file || ! "$systemctl_cmd" daemon-reload; then
+    install -m 0755 "$backup_dir/tapx-core" "$prefix/bin/tapx-core"
+    install -m 0755 "$backup_dir/tapx-panel" "$prefix/bin/tapx-panel"
+    if ((had_unit)); then install -m 0644 "$backup_dir/$service_name" "$unit_dir/$service_name"; fi
+    "$systemctl_cmd" daemon-reload || true
+    ((was_active)) && "$systemctl_cmd" start "$service_name" || true
+    rm -rf "$backup_dir"
+    return 1
+  fi
+
+  if ((was_active)); then
+    "$systemctl_cmd" start "$service_name" || true
+    if ! wait_for_service; then
+      "$systemctl_cmd" stop "$service_name" || true
+      install -m 0755 "$backup_dir/tapx-core" "$prefix/bin/tapx-core"
+      install -m 0755 "$backup_dir/tapx-panel" "$prefix/bin/tapx-panel"
+      if ((had_unit)); then install -m 0644 "$backup_dir/$service_name" "$unit_dir/$service_name"; fi
+      "$systemctl_cmd" daemon-reload || true
+      "$systemctl_cmd" start "$service_name" || true
+      rm -rf "$backup_dir"
+      printf '%s\n' "$(text 'Upgrade failed; the previous binaries were restored.' '升级失败，已恢复原二进制文件。')" >&2
+      return 1
+    fi
+  fi
+
+  install -m 0755 "${BASH_SOURCE[0]}" "$prefix/bin/tapx"
+  rm -rf "$backup_dir"
+  printf '%s\n' "$(text 'TapX was upgraded without changing its database or settings.' 'TapX 已升级，数据库和现有设置保持不变。')"
+  show_status
 }
 
 is_installed() {
@@ -420,6 +612,44 @@ show_settings() {
     printf '%s\n' "$(text 'PostgreSQL DSN: configured' 'PostgreSQL 连接地址：已配置')"
   fi
   printf '%s %s\n' "$(text 'Public URL:' '公网地址：')" "$(panel_url)"
+}
+
+check_installation() {
+  need_systemd
+  load_env
+  local failures=0 command mode
+  for command in "$prefix/bin/tapx-core" "$prefix/bin/tapx-panel" "$prefix/bin/tapx" "$(env_file)"; do
+    if [[ -e "$command" ]]; then
+      printf '%bOK%b  %s\n' "$green" "$plain" "$command"
+    else
+      printf '%bFAIL%b  %s\n' "$red" "$plain" "$command"
+      failures=$((failures + 1))
+    fi
+  done
+  if [[ -f "$(env_file)" ]]; then
+    mode="$(stat -c '%a' "$(env_file)" 2>/dev/null || true)"
+    if [[ "$mode" != "600" ]]; then
+      printf '%bFAIL%b  %s (%s)\n' "$red" "$plain" "$(text 'Environment file permission' '环境文件权限')" "${mode:-unknown}"
+      failures=$((failures + 1))
+    fi
+  fi
+  if ! TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" "$prefix/bin/tapx-panel" -check >/dev/null; then
+    printf '%bFAIL%b  %s\n' "$red" "$plain" "$(text 'Database and panel configuration' '数据库与面板配置')"
+    failures=$((failures + 1))
+  else
+    printf '%bOK%b  %s\n' "$green" "$plain" "$(text 'Database and panel configuration' '数据库与面板配置')"
+  fi
+  if "$systemctl_cmd" is-active --quiet "$service_name"; then
+    printf '%bOK%b  %s\n' "$green" "$plain" "$(text 'Panel service is running' '面板服务正在运行')"
+  else
+    printf '%bFAIL%b  %s\n' "$red" "$plain" "$(text 'Panel service is not running' '面板服务未运行')"
+    failures=$((failures + 1))
+  fi
+  if ((failures)); then
+    printf '%s %d\n' "$(text 'Failed checks:' '失败检查：')" "$failures" >&2
+    return 1
+  fi
+  printf '%s\n' "$(text 'All installation checks passed.' '安装自检全部通过。')"
 }
 
 modify_endpoint() {
@@ -451,11 +681,10 @@ modify_endpoint() {
     2)
       read_value cert "$(text 'Certificate path: ' '证书路径：')"
       read_value key "$(text 'Private key path: ' '私钥路径：')"
-      [[ -r "$cert" && -r "$key" ]] || {
-        printf '%s\n' "$(text 'The certificate or private key cannot be read.' '证书或私钥无法读取。')" >&2
+      if ! validate_certificate_paths "$cert" "$key"; then
         "$systemctl_cmd" start "$service_name" || true
         return 1
-      }
+      fi
       tls_args=( -panel-cert-file="$cert" -panel-key-file="$key" )
       PANEL_HTTPS=1
       ;;
@@ -476,18 +705,21 @@ modify_endpoint() {
   write_env_file "0.0.0.0:$PANEL_PORT" "$PANEL_PATH" "${TAPX_DB_DRIVER:-sqlite}" "${TAPX_DB_SOURCE:-$db_path_default}" "$PANEL_HTTPS"
   open_firewall_port "$PANEL_PORT"
   "$systemctl_cmd" restart "$service_name"
+  wait_for_service
   show_settings
 }
 
 reset_credentials() {
   need_root
   load_env
-  local username="" password="" hash
-  read_value username "$(text 'Username: ' '用户名：')"
-  username="${username:-tapx_$(random_token 6)}"
-  read_value password "$(text 'Password: ' '密码：')" 1
-  password="${password:-$(random_token 21)}"
+  local confirm="" username password hash
+  read_value confirm "$(text 'Generate a new random administrator username and password? [y/N]: ' '随机重置面板用户名和密码？[y/N]：')"
+  is_yes "$confirm" || return
+  username="tapx_$(random_token 6)"
+  password="$(random_token 21)"
   hash="$(hash_password "$prefix/bin/tapx-panel" "$password")"
+  TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" \
+  TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" \
   "$prefix/bin/tapx-panel" \
     -listen="${TAPX_PANEL_LISTEN}" \
     -base-path="${TAPX_PANEL_BASE_PATH}" \
@@ -495,7 +727,10 @@ reset_credentials() {
     -admin-username="$username" \
     -admin-password-hash="$hash"
   "$systemctl_cmd" restart "$service_name"
+  wait_for_service
+  printf '\n%b%s%b\n' "$green" "$(text 'Administrator credentials were reset.' '面板用户名和密码已重置。')" "$plain"
   printf '%s %s\n%s %s\n' "$(text 'Username:' '用户名：')" "$username" "$(text 'Password:' '密码：')" "$password"
+  printf '%b%s%b\n' "$yellow" "$(text 'The generated credentials are shown only once.' '随机生成的用户名和密码只显示这一次。')" "$plain"
 }
 
 change_database() {
@@ -529,6 +764,48 @@ show_logs() {
   journalctl -u "$service_name" -n 150 --no-pager
 }
 
+backup_database() {
+  need_root
+  load_env
+  local default_path destination
+  default_path="${PWD}/tapx-backup-$(date +%Y%m%d-%H%M%S).db"
+  read_value destination "$(text "Backup file [$default_path]: " "备份文件 [$default_path]：")"
+  destination="${destination:-$default_path}"
+  install -d -m 0700 "$(dirname "$destination")"
+  umask 077
+  TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" \
+    TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" \
+    "$prefix/bin/tapx-panel" -export-backup "$destination" >/dev/null
+  chmod 0600 "$destination"
+  printf '%s %s\n' "$(text 'Backup created:' '备份已创建：')" "$destination"
+}
+
+restore_database() {
+  need_root
+  load_env
+  local source confirm was_active=0
+  read_value source "$(text 'TapX .db backup file: ' 'TapX .db 备份文件：')"
+  if [[ -z "$source" || ! -r "$source" ]]; then
+    printf '%s\n' "$(text 'The backup file cannot be read.' '无法读取备份文件。')" >&2
+    return 1
+  fi
+  read_value confirm "$(text 'Replace the current TapX database? [y/N]: ' '替换当前 TapX 数据库？[y/N]：')"
+  is_yes "$confirm" || return
+  if "$systemctl_cmd" is-active --quiet "$service_name"; then
+    was_active=1
+    "$systemctl_cmd" stop "$service_name"
+  fi
+  if ! TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" \
+      TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" \
+      "$prefix/bin/tapx-panel" -restore-backup "$source" >/dev/null; then
+    ((was_active)) && "$systemctl_cmd" start "$service_name" || true
+    printf '%s\n' "$(text 'Database restore failed; the current database was preserved.' '数据库恢复失败，当前数据库已保留。')" >&2
+    return 1
+  fi
+  ((was_active)) && "$systemctl_cmd" start "$service_name" || true
+  printf '%s\n' "$(text 'Database restored.' '数据库恢复完成。')"
+}
+
 download_file() {
   local url="$1" destination="$2"
   if command -v curl >/dev/null 2>&1; then
@@ -541,14 +818,39 @@ download_file() {
   fi
 }
 
-self_update() {
+update_tapx() {
   need_root
   local script
   script="$(mktemp /tmp/tapx-install.XXXXXX.sh)"
   download_file "https://raw.githubusercontent.com/${repo}/main/scripts/install/install.sh" "$script"
   chmod 0700 "$script"
-  TAPX_LANG="$TAPX_LANG" bash "$script" install
+  TAPX_BOOTSTRAP_FORCE=1 TAPX_LANG="$TAPX_LANG" bash "$script" upgrade
   rm -f "$script"
+}
+
+update_management_script() {
+  need_root
+  local target="$prefix/bin/tapx" candidate script_url
+  [[ -x "$target" ]] || {
+    printf '%s\n' "$(text 'TapX management script is not installed.' 'TapX 管理脚本尚未安装。')" >&2
+    return 1
+  }
+  candidate="$(mktemp "${target}.update.XXXXXX")"
+  script_url="${TAPX_SCRIPT_URL:-https://raw.githubusercontent.com/${repo}/main/scripts/install/linux-install.sh}"
+  if ! download_file "$script_url" "$candidate"; then
+    rm -f "$candidate"
+    return 1
+  fi
+  if ! bash -n "$candidate" || \
+     ! grep -Fq 'main "$@"' "$candidate" || \
+     ! grep -Fq 'TapX' "$candidate"; then
+    rm -f "$candidate"
+    printf '%s\n' "$(text 'Downloaded management script is invalid.' '下载的管理脚本无效。')" >&2
+    return 1
+  fi
+  chmod 0755 "$candidate"
+  mv -f "$candidate" "$target"
+  printf '%s\n' "$(text 'TapX management script updated.' 'TapX 管理脚本已升级。')"
 }
 
 uninstall_tapx() {
@@ -572,13 +874,18 @@ show_menu() {
     printf '  4. %s\n' "$(text 'Restart' '重启面板')"
     printf '  5. %s\n' "$(text 'Show settings' '查看设置')"
     printf '  6. %s\n' "$(text 'Change panel endpoint and certificate' '修改面板入口和证书')"
-    printf '  7. %s\n' "$(text 'Reset administrator credentials' '重置管理员账号密码')"
+    printf '  7. %s\n' "$(text 'Reset random administrator credentials' '随机重置面板用户名和密码')"
     printf '  8. %s\n' "$(text 'Change database' '更换数据库')"
-    printf '  9. %s\n' "$(text 'Logs' '查看日志')"
-    printf ' 10. %s\n' "$(text 'Enable autostart' '启用开机启动')"
-    printf ' 11. %s\n' "$(text 'Disable autostart' '关闭开机启动')"
-    printf ' 12. %s\n' "$(text 'Update or reinstall' '更新或重新安装')"
-    printf ' 13. %s\n' "$(text 'Uninstall' '卸载')"
+    printf '  9. %s\n' "$(text 'Backup database' '备份数据库')"
+    printf ' 10. %s\n' "$(text 'Restore database' '恢复数据库')"
+    printf ' 11. %s\n' "$(text 'Logs' '查看日志')"
+    printf ' 12. %s\n' "$(text 'Enable autostart' '启用开机启动')"
+    printf ' 13. %s\n' "$(text 'Disable autostart' '关闭开机启动')"
+    printf ' 14. %s\n' "$(text 'Update or reinstall TapX' '更新或重新安装 TapX')"
+    printf ' 15. %s\n' "$(text 'Update management script' '升级管理脚本')"
+    printf ' 16. %s\n' "$(text 'Language' '语言设置')"
+    printf ' 17. %s\n' "$(text 'Check installation' '安装自检')"
+    printf ' 18. %s\n' "$(text 'Uninstall' '卸载')"
     printf '  0. %s\n' "$(text 'Exit' '退出')"
     local choice=""
     read_value choice '> '
@@ -591,11 +898,16 @@ show_menu() {
       6) modify_endpoint ;;
       7) reset_credentials ;;
       8) change_database ;;
-      9) show_logs ;;
-      10) need_root; "$systemctl_cmd" enable "$service_name" ;;
-      11) need_root; "$systemctl_cmd" disable "$service_name" ;;
-      12) self_update; return ;;
-      13) uninstall_tapx; return ;;
+      9) backup_database ;;
+      10) restore_database ;;
+      11) show_logs ;;
+      12) need_root; "$systemctl_cmd" enable "$service_name" ;;
+      13) need_root; "$systemctl_cmd" disable "$service_name" ;;
+      14) update_tapx; return ;;
+      15) update_management_script ;;
+      16) set_language ;;
+      17) check_installation ;;
+      18) uninstall_tapx; return ;;
       0) return ;;
       *) printf '%s\n' "$(text 'Invalid option.' '无效选项。')" ;;
     esac
@@ -603,17 +915,19 @@ show_menu() {
 }
 
 usage() {
-  cat <<EOF
-tapx [menu|status|start|stop|restart|settings|set-panel|set-auth|set-database|logs|enable|disable|update|uninstall]
-EOF
+  printf '%s\n' "$(text \
+    'tapx [menu|status|start|stop|restart|settings|set-panel|reset-password|set-database|backup|restore|logs|enable|disable|update|update-script|language|check|uninstall]' \
+    'tapx [菜单|状态|启动|停止|重启|设置|面板设置|重置密码|数据库|备份|恢复|日志|启用自启|禁用自启|更新|更新脚本|语言|自检|卸载]')"
 }
 
 main() {
+  load_env
   choose_language
   local command="${1:-}"
   case "$command" in
     "") if is_installed; then show_menu; else install_wizard; fi ;;
     install|reinstall) install_wizard ;;
+    upgrade) upgrade_bundle ;;
     menu) show_menu ;;
     status) show_status ;;
     start) need_root; "$systemctl_cmd" start "$service_name" ;;
@@ -621,12 +935,17 @@ main() {
     restart) need_root; "$systemctl_cmd" restart "$service_name" ;;
     settings) show_settings ;;
     set-panel) modify_endpoint ;;
-    set-auth) reset_credentials ;;
+    set-auth|reset-password) reset_credentials ;;
     set-database) change_database ;;
+    backup) backup_database ;;
+    restore) restore_database ;;
     logs) show_logs ;;
     enable) need_root; "$systemctl_cmd" enable "$service_name" ;;
     disable) need_root; "$systemctl_cmd" disable "$service_name" ;;
-    update) self_update ;;
+    update) update_tapx ;;
+    update-script) update_management_script ;;
+    language) set_language ;;
+    check) check_installation ;;
     uninstall) uninstall_tapx ;;
     help|-h|--help) usage ;;
     *) usage >&2; return 2 ;;

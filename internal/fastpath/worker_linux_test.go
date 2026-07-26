@@ -88,6 +88,371 @@ func TestStartUDPPipeBidirectional(t *testing.T) {
 	}
 }
 
+func TestDeviceSwitchTAPLearnsMACAndPreservesFrame(t *testing.T) {
+	physical := mustUnixDatagramPair(t)
+	first := mustUnixDatagramPair(t)
+	second := mustUnixDatagramPair(t)
+	worker, err := StartDeviceSwitch(DeviceSwitchConfig{
+		DeviceFD: physical[0], FrameKind: FrameTAP, MaxFrameSize: 2048,
+		Ports: []DeviceSwitchPortConfig{{FD: first[0]}, {FD: second[0]}},
+	})
+	if err != nil {
+		t.Fatalf("StartDeviceSwitch: %v", err)
+	}
+	defer worker.Stop()
+
+	broadcast := ethernetFrame(
+		[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		[]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
+		0x8863,
+	)
+	if _, err := unix.Write(first[1], broadcast); err != nil {
+		t.Fatalf("write broadcast: %v", err)
+	}
+	if got := readUnixDatagram(t, physical[1]); !bytes.Equal(got, broadcast) {
+		t.Fatalf("physical broadcast = %x, want %x", got, broadcast)
+	}
+	if got := readUnixDatagram(t, second[1]); !bytes.Equal(got, broadcast) {
+		t.Fatalf("second broadcast = %x, want %x", got, broadcast)
+	}
+
+	reply := ethernetFrame(
+		[]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
+		[]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02},
+		0x8864,
+	)
+	if _, err := unix.Write(second[1], reply); err != nil {
+		t.Fatalf("write learned unicast: %v", err)
+	}
+	if got := readUnixDatagram(t, first[1]); !bytes.Equal(got, reply) {
+		t.Fatalf("learned PPPoE frame = %x, want %x", got, reply)
+	}
+	expectNoUnixData(t, physical[1])
+}
+
+func TestDeviceSwitchTUNUsesLongestPrefixRoute(t *testing.T) {
+	physical := mustUnixDatagramPair(t)
+	first := mustUnixDatagramPair(t)
+	second := mustUnixDatagramPair(t)
+	worker, err := StartDeviceSwitch(DeviceSwitchConfig{
+		DeviceFD: physical[0], FrameKind: FrameTUN, MaxFrameSize: 2048,
+		Ports: []DeviceSwitchPortConfig{
+			{FD: first[0], Routes: AddressGuard{IPv4Prefixes: []netip.Prefix{netip.MustParsePrefix("10.20.0.0/24")}}},
+			{FD: second[0], Routes: AddressGuard{IPv4Prefixes: []netip.Prefix{netip.MustParsePrefix("10.20.0.128/25")}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartDeviceSwitch: %v", err)
+	}
+	defer worker.Stop()
+
+	packet := switchIPv4Packet([4]byte{10, 20, 0, 200})
+	if _, err := unix.Write(physical[1], packet); err != nil {
+		t.Fatalf("write physical packet: %v", err)
+	}
+	if got := readUnixDatagram(t, second[1]); !bytes.Equal(got, packet) {
+		t.Fatalf("longest-prefix packet = %x, want %x", got, packet)
+	}
+	expectNoUnixData(t, first[1])
+
+	remote := switchIPv4Packet([4]byte{203, 0, 113, 1})
+	if _, err := unix.Write(first[1], remote); err != nil {
+		t.Fatalf("write remote packet: %v", err)
+	}
+	if got := readUnixDatagram(t, physical[1]); !bytes.Equal(got, remote) {
+		t.Fatalf("remote packet = %x, want %x", got, remote)
+	}
+}
+
+func mustUnixDatagramPair(t *testing.T) [2]int {
+	t.Helper()
+	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = unix.Close(pair[0])
+		_ = unix.Close(pair[1])
+	})
+	return pair
+}
+
+func readUnixDatagram(t *testing.T, fd int) []byte {
+	t.Helper()
+	ready := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	if n, err := unix.Poll(ready, 500); err != nil || n != 1 {
+		t.Fatalf("poll datagram: ready=%d err=%v", n, err)
+	}
+	buffer := make([]byte, 2048)
+	n, err := unix.Read(fd, buffer)
+	if err != nil {
+		t.Fatalf("read datagram: %v", err)
+	}
+	return buffer[:n]
+}
+
+func ethernetFrame(destination, source []byte, etherType uint16) []byte {
+	frame := make([]byte, 64)
+	copy(frame[0:6], destination)
+	copy(frame[6:12], source)
+	binary.BigEndian.PutUint16(frame[12:14], etherType)
+	copy(frame[14:], []byte("tapx-l2-payload"))
+	return frame
+}
+
+func switchIPv4Packet(destination [4]byte) []byte {
+	packet := make([]byte, 20)
+	packet[0] = 0x45
+	packet[2] = 0
+	packet[3] = 20
+	copy(packet[16:20], destination[:])
+	return packet
+}
+
+func TestStartUDPPipeKeepAliveIsNotInjectedIntoTUN(t *testing.T) {
+	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	defer syscall.Close(tun[0])
+	defer syscall.Close(tun[1])
+
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer udp.Close()
+	udpFile, err := udp.File()
+	if err != nil {
+		t.Fatalf("udp file: %v", err)
+	}
+	defer udpFile.Close()
+
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen peer: %v", err)
+	}
+	defer peer.Close()
+	peerAddr := peer.LocalAddr().(*net.UDPAddr)
+	key := []byte("keepalive-key")
+
+	worker, err := StartUDPPipe(UDPConfig{
+		TUNFD: tun[0], UDPFD: int(udpFile.Fd()), FrameKind: FrameTUN,
+		MaxFrameSize: 2048, PeerMode: UDPPeerFixed,
+		Peer: netip.MustParseAddrPort(peerAddr.String()), VKey: key,
+		KeepAliveInterval: 20,
+	})
+	if err != nil {
+		t.Fatalf("StartUDPPipe: %v", err)
+	}
+	defer worker.Stop()
+
+	want := vkeyPayload(key, []byte{'T', 'X', 'K', 'E', 'E', 'P', '1', 0})
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	buffer := make([]byte, 128)
+	n, _, err := peer.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatalf("read keepalive: %v", err)
+	}
+	if !bytes.Equal(buffer[:n], want) {
+		t.Fatalf("keepalive = %v, want %v", buffer[:n], want)
+	}
+
+	udpAddr := udp.LocalAddr().(*net.UDPAddr)
+	if _, err := peer.WriteToUDP(want, udpAddr); err != nil {
+		t.Fatalf("return keepalive: %v", err)
+	}
+	expectNoUnixData(t, tun[1])
+}
+
+func TestStartUDPPipeInitialHandshakeWithoutPeriodicKeepAlive(t *testing.T) {
+	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	defer syscall.Close(tun[0])
+	defer syscall.Close(tun[1])
+
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer udp.Close()
+	udpFile, err := udp.File()
+	if err != nil {
+		t.Fatalf("udp file: %v", err)
+	}
+	defer udpFile.Close()
+
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen peer: %v", err)
+	}
+	defer peer.Close()
+	peerAddr := peer.LocalAddr().(*net.UDPAddr)
+
+	worker, err := StartUDPPipe(UDPConfig{
+		TUNFD: tun[0], UDPFD: int(udpFile.Fd()), FrameKind: FrameTUN,
+		MaxFrameSize: 2048, PeerMode: UDPPeerFixed,
+		Peer: netip.MustParseAddrPort(peerAddr.String()), InitialHandshake: true,
+	})
+	if err != nil {
+		t.Fatalf("StartUDPPipe: %v", err)
+	}
+	defer worker.Stop()
+
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set initial handshake deadline: %v", err)
+	}
+	buffer := make([]byte, 64)
+	n, _, err := peer.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatalf("read initial handshake: %v", err)
+	}
+	want := []byte{'T', 'X', 'K', 'E', 'E', 'P', '1', 0}
+	if !bytes.Equal(buffer[:n], want) {
+		t.Fatalf("initial handshake = %v, want %v", buffer[:n], want)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(80 * time.Millisecond)); err != nil {
+		t.Fatalf("set periodic keepalive deadline: %v", err)
+	}
+	if _, _, err := peer.ReadFromUDP(buffer); err == nil {
+		t.Fatal("received periodic keepalive with interval disabled")
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("second read error = %v, want timeout", err)
+	}
+}
+
+func TestStartUDPPipeLearnedPeerExpiresAndCanBeRelearned(t *testing.T) {
+	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	defer syscall.Close(tun[0])
+	defer syscall.Close(tun[1])
+
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer udp.Close()
+	udpFile, err := udp.File()
+	if err != nil {
+		t.Fatalf("udp file: %v", err)
+	}
+	defer udpFile.Close()
+
+	first, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen first peer: %v", err)
+	}
+	defer first.Close()
+	second, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen second peer: %v", err)
+	}
+	defer second.Close()
+
+	worker, err := StartUDPPipe(UDPConfig{
+		TUNFD: tun[0], UDPFD: int(udpFile.Fd()), FrameKind: FrameTUN,
+		MaxFrameSize: 2048, PeerMode: UDPPeerLearn, IdleTimeout: 50,
+	})
+	if err != nil {
+		t.Fatalf("StartUDPPipe: %v", err)
+	}
+	defer worker.Stop()
+
+	destination := udp.LocalAddr().(*net.UDPAddr)
+	firstPacket := []byte{0x45, 0, 0, 20}
+	if _, err := first.WriteToUDP(firstPacket, destination); err != nil {
+		t.Fatalf("write first peer: %v", err)
+	}
+	buf := make([]byte, 64)
+	ready := []unix.PollFd{{Fd: int32(tun[1]), Events: unix.POLLIN}}
+	if n, err := unix.Poll(ready, 500); err != nil || n != 1 {
+		t.Fatalf("poll first packet: ready=%d err=%v", n, err)
+	}
+	if _, err := syscall.Read(tun[1], buf); err != nil {
+		t.Fatalf("read first packet: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	secondPacket := []byte{0x60, 0, 0, 0}
+	if _, err := second.WriteToUDP(secondPacket, destination); err != nil {
+		t.Fatalf("write second peer: %v", err)
+	}
+	ready[0].Revents = 0
+	if n, err := unix.Poll(ready, 500); err != nil || n != 1 {
+		t.Fatalf("poll relearned packet: ready=%d err=%v", n, err)
+	}
+	n, err := syscall.Read(tun[1], buf)
+	if err != nil {
+		t.Fatalf("read relearned packet: %v", err)
+	}
+	if !bytes.Equal(buf[:n], secondPacket) {
+		t.Fatalf("relearned packet = %v, want %v", buf[:n], secondPacket)
+	}
+}
+
+func TestStartUDPPipeAddressRequestReturnsCachedLease(t *testing.T) {
+	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	defer syscall.Close(tun[0])
+	defer syscall.Close(tun[1])
+
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer udp.Close()
+	udpFile, err := udp.File()
+	if err != nil {
+		t.Fatalf("udp file: %v", err)
+	}
+	defer udpFile.Close()
+
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen peer: %v", err)
+	}
+	defer peer.Close()
+	key := []byte("lease-vkey")
+	lease := []byte{'T', 'X', 'A', 'D', 'D', 'R', '1', 1, '{', '}', '\n'}
+	worker, err := StartUDPPipe(UDPConfig{
+		TUNFD: tun[0], UDPFD: int(udpFile.Fd()), FrameKind: FrameTUN,
+		MaxFrameSize: 2048, PeerMode: UDPPeerLearn, VKey: key,
+		AddressResponse: lease,
+	})
+	if err != nil {
+		t.Fatalf("StartUDPPipe: %v", err)
+	}
+	defer worker.Stop()
+
+	request := vkeyPayload(key, []byte{'T', 'X', 'A', 'D', 'D', 'R', '1', 0})
+	if _, err := peer.WriteToUDP(request, udp.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("write address request: %v", err)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	buffer := make([]byte, 128)
+	length, _, err := peer.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatalf("read address response: %v", err)
+	}
+	if want := vkeyPayload(key, lease); !bytes.Equal(buffer[:length], want) {
+		t.Fatalf("address response = %v, want %v", buffer[:length], want)
+	}
+	expectNoUnixData(t, tun[1])
+	if snapshot := worker.Counters(); snapshot.RXPackets != 0 || snapshot.TXPackets != 0 {
+		t.Fatalf("control exchange counted as user traffic: %+v", snapshot)
+	}
+}
+
 func TestStartUDPPipeVKey(t *testing.T) {
 	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -629,6 +994,38 @@ func TestStartTCPPipeBidirectional(t *testing.T) {
 	}
 }
 
+func TestStartTCPPipeIdleTimeoutClosesStream(t *testing.T) {
+	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair tun: %v", err)
+	}
+	defer syscall.Close(tun[0])
+	defer syscall.Close(tun[1])
+	tcp, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair tcp: %v", err)
+	}
+	defer syscall.Close(tcp[0])
+	defer syscall.Close(tcp[1])
+
+	worker, err := StartTCPPipe(TCPConfig{
+		TUNFD: tun[0], TCPFD: tcp[0], FrameKind: FrameTUN,
+		MaxFrameSize: 2048, LengthMode: TCPLength16, IdleTimeout: 50,
+	})
+	if err != nil {
+		t.Fatalf("StartTCPPipe: %v", err)
+	}
+	defer worker.Stop()
+
+	pollFDs := []unix.PollFd{{Fd: int32(tcp[1]), Events: unix.POLLRDHUP}}
+	if _, err := unix.Poll(pollFDs, 500); err != nil {
+		t.Fatalf("poll idle stream: %v", err)
+	}
+	if pollFDs[0].Revents&(unix.POLLRDHUP|unix.POLLHUP) == 0 {
+		t.Fatalf("idle stream events = %#x, want peer shutdown", pollFDs[0].Revents)
+	}
+}
+
 func TestStartTCPPipeBackpressurePreservesFrames(t *testing.T) {
 	tun, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -882,7 +1279,14 @@ func testSegmentPayloads(sequence uint32, frame []byte, maxDatagramPayload int) 
 func expectNoUnixData(t *testing.T, fd int) {
 	t.Helper()
 	pollFDs := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-	n, err := unix.Poll(pollFDs, 100)
+	var n int
+	var err error
+	for {
+		n, err = unix.Poll(pollFDs, 100)
+		if err != unix.EINTR {
+			break
+		}
+	}
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}

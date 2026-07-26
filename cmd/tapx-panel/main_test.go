@@ -55,6 +55,24 @@ func TestRunInitAdminWritesPanelAuthSettings(t *testing.T) {
 	}
 }
 
+func TestRestoreStoredRuntimeAppliesDatabaseConfig(t *testing.T) {
+	store, err := panel.OpenStore(filepath.Join(t.TempDir(), "tapx.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	manager := panel.NewRuntimeManager()
+	t.Cleanup(func() { _, _ = manager.Stop() })
+	if err := restoreStoredRuntime(context.Background(), store, manager); err != nil {
+		t.Fatalf("restore stored runtime: %v", err)
+	}
+	state := manager.State()
+	if !state.Running || state.Generation != 1 {
+		t.Fatalf("unexpected runtime state: %+v", state)
+	}
+}
+
 func TestRunInitAdminConfiguresPanelCertificate(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "tapx.db")

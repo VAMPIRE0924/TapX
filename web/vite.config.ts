@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
 const backendTarget = process.env.TAPX_BACKEND_TARGET || 'http://127.0.0.1:8080';
+const backendOrigin = new URL(backendTarget).origin;
 
 function sharedVendorChunk(id: string): string | undefined {
   const normalized = id.replace(/\\/g, '/');
@@ -28,6 +29,7 @@ export default defineConfig({
       '^/api(?:/|$)': {
         target: backendTarget,
         changeOrigin: true,
+        headers: { Origin: backendOrigin },
       },
     },
   },

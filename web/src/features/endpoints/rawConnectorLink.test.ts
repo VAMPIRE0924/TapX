@@ -35,16 +35,6 @@ describe('TapX Raw connector links', () => {
     expect(parseRawConnectorLink(buildRawConnectorLink(input))).toEqual(input);
   });
 
-  it('accepts the legacy username vKey form', () => {
-    expect(parseRawConnectorLink('raw://legacy-key@edge.example.com:45000?network=tcp&security=none#edge')).toMatchObject({
-      protocol: 'raw-tcp',
-      vkey: 'legacy-key',
-      address: 'edge.example.com',
-      port: 45000,
-      lengthMode: 'uint16',
-    });
-  });
-
   it('returns undefined for non-Raw links', () => {
     expect(parseRawConnectorLink('vless://uuid@example.com:443')).toBeUndefined();
   });

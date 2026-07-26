@@ -93,7 +93,7 @@ cat >"${BUILD_DIR}/tapx-bridge.json" <<JSON
       "BindHost": "127.0.0.1",
       "BindPort": 45101,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "any"},
+      "RawUDP": {},
       "Binding": {"RouteID": "route-a"}
     }
   ]

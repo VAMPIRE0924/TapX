@@ -60,7 +60,7 @@ function New-TapXServerConfig {
       "BindHost": "127.0.0.1",
       "BindPort": $TapXLocalPort,
       "Transport": "tcp",
-      "RawTCP": {"LengthMode": "uint16", "ReceiveBuffer": 1048576, "SendBuffer": 1048576, "NoDelay": true, "KeepAliveSecond": 30, "ConnectTimeout": 5},
+      "RawTCP": {"LengthMode": "uint16", "QueueSize": 2048, "ZeroCopy": true, "NoDelay": true, "KeepAliveSecond": 30, "ConnectTimeout": 5},
       "Binding": {"RouteID": "route-a"}
     }
   ]
@@ -84,7 +84,7 @@ function New-TapXClientConfig {
       "Remote": "127.0.0.1",
       "Port": $ClientXrayPort,
       "Transport": "tcp",
-      "RawTCP": {"LengthMode": "uint16", "ReceiveBuffer": 1048576, "SendBuffer": 1048576, "NoDelay": true, "KeepAliveSecond": 30, "ConnectTimeout": 5},
+      "RawTCP": {"LengthMode": "uint16", "QueueSize": 2048, "ZeroCopy": true, "NoDelay": true, "KeepAliveSecond": 30, "ConnectTimeout": 5},
       "Binding": {"RouteID": "route-a"}
     }
   ]

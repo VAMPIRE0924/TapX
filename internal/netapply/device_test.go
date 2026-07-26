@@ -14,7 +14,6 @@ func TestNeedsApply(t *testing.T) {
 		{name: "bridge", cfg: DeviceConfig{Bridge: BridgeConfig{Enabled: true}}, want: true},
 		{name: "route", cfg: DeviceConfig{Routes: []RouteConfig{{Enabled: true}}}, want: true},
 		{name: "disabled route", cfg: DeviceConfig{Routes: []RouteConfig{{Enabled: false}}}, want: false},
-		{name: "dns", cfg: DeviceConfig{DNS: DNSConfig{Enabled: true}}, want: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

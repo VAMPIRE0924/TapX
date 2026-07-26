@@ -14,8 +14,10 @@ import { useI18n } from '../i18n/I18nProvider';
 import { SecuritySettings } from '../features/security/SecuritySettings';
 import './SettingsPage.css';
 import { hashFromPath } from '../app/hash-route';
+import { applyPanelTitle } from '../app/panel-name';
 
 interface PanelSettings extends Record<string, unknown> {
+  panelName?: string;
   listenIP?: string;
   listenDomain?: string;
   listenPort?: number;
@@ -36,6 +38,7 @@ interface PanelSettings extends Record<string, unknown> {
 type SettingsSection = 'general' | 'certificate' | 'security' | 'timezone';
 
 const defaultSettings: PanelSettings = {
+  panelName: 'TapX-UI',
   listenIP: '',
   listenDomain: '',
   listenPort: 2053,
@@ -104,6 +107,7 @@ export function SettingsPage({ currentPath }: { currentPath: string }) {
       setConfig(saved);
       form.setFieldsValue(savedValues);
       if (savedValues.language) setLanguage(savedValues.language);
+      applyPanelTitle(savedValues.panelName);
       setDirty(false);
       messageApi.success(t('settings.saved'));
     } catch (err) {
@@ -238,6 +242,9 @@ function GeneralSettingsFields({ config }: { config: RuntimeConfig }) {
   ];
   return (
     <>
+      <Form.Item name="panelName" label={t('settings.panelName')} tooltip={t('settings.panelNameHelp')}>
+        <Input allowClear maxLength={64} placeholder="TapX-UI" />
+      </Form.Item>
       <Form.Item name="listenIP" label={t('settings.listenIP')} tooltip={t('settings.listenIPHelp')}>
         <Input allowClear placeholder="0.0.0.0" />
       </Form.Item>

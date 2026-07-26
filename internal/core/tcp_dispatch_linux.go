@@ -64,7 +64,7 @@ func (c *bufferedDispatchConn) Read(payload []byte) (int, error) {
 	return c.reader.Read(payload)
 }
 
-func startTCPDispatch(dispatch config.RuntimeTCPDispatch, pipes []config.RuntimeTCPPipe, devices []config.RuntimeDevice) (*TCPDispatchHandle, []*TCPPipeHandle, error) {
+func startTCPDispatch(dispatch config.RuntimeTCPDispatch, pipes []config.RuntimeTCPPipe, devices []config.RuntimeDevice, fabric *deviceFabric) (*TCPDispatchHandle, []*TCPPipeHandle, error) {
 	if dispatch.ID == "" || dispatch.EndpointID == "" {
 		return nil, nil, errors.New("core: TCP dispatch ID and endpoint are required")
 	}
@@ -113,12 +113,18 @@ func startTCPDispatch(dispatch config.RuntimeTCPDispatch, pipes []config.Runtime
 			closeChildren()
 			return nil, nil, fmt.Errorf("core: TCP dispatch %s policy %s references missing device %s", dispatch.ID, pipe.DispatchPolicyID, pipe.DeviceID)
 		}
-		child, err := prepareTCPPipeHandle(pipe, device, sharedDevices[pipe.DeviceID])
+		shared := sharedDevices[pipe.DeviceID]
+		if fabric != nil {
+			if port := fabric.Port(tcpFabricKey(pipe)); port != nil {
+				shared = port
+			}
+		}
+		child, err := prepareTCPPipeHandle(pipe, device, shared)
 		if err != nil {
 			closeChildren()
 			return nil, nil, err
 		}
-		if child.owner {
+		if child.owner && shared == nil {
 			sharedDevices[pipe.DeviceID] = child.shared
 		}
 		frameKind, err := fastpath.FrameKindFromDevice(device.Type)
@@ -245,7 +251,7 @@ func (h *TCPDispatchHandle) dispatchConn(conn *net.TCPConn) {
 		return
 	}
 	if probe.Diagnostic {
-		_ = linkdiag.ServeStream(context.Background(), stream, probe.VKey)
+		_ = serveAddressControl(context.Background(), stream, probe.VKey, policy.handle.address)
 		return
 	}
 	remote, err := tcpAddrPort(conn.RemoteAddr())

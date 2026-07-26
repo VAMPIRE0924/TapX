@@ -44,15 +44,13 @@ func TestServerVlessEncryptionAPI(t *testing.T) {
 	store := newTestStore(t)
 	server := httptest.NewServer(NewServer(store).Handler())
 	t.Cleanup(server.Close)
-	for _, path := range []string{"/api/xray/vless-encryption", "/panel/api/server/getNewVlessEnc"} {
-		resp := getJSON(t, server.URL+path, http.StatusOK)
-		if resp["success"] != true {
-			t.Fatalf("GET %s missing success: %+v", path, resp)
-		}
-		obj, ok := resp["obj"].(map[string]any)
-		if !ok || len(obj["auths"].([]any)) != 6 {
-			t.Fatalf("GET %s returned invalid auths: %+v", path, resp)
-		}
+	resp := getJSON(t, server.URL+"/api/xray/vless-encryption", http.StatusOK)
+	if resp["success"] != true {
+		t.Fatalf("GET missing success: %+v", resp)
+	}
+	obj, ok := resp["obj"].(map[string]any)
+	if !ok || len(obj["auths"].([]any)) != 6 {
+		t.Fatalf("GET returned invalid auths: %+v", resp)
 	}
 }
 

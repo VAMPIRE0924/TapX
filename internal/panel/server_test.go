@@ -18,6 +18,7 @@ import (
 	"tapx/internal/config"
 	"tapx/internal/core"
 	"tapx/internal/model"
+	"tapx/internal/netguard"
 )
 
 func TestServerConfigRuntimeAndObjectAPI(t *testing.T) {
@@ -107,6 +108,37 @@ func TestServerRuntimeApplyStateAndStop(t *testing.T) {
 	}
 }
 
+func TestServerSavesHostConflictButRejectsRuntimeApply(t *testing.T) {
+	store := newTestStore(t)
+	manager := NewRuntimeManager()
+	manager.SetNetworkValidator(func(config.RuntimeConfig) error {
+		return &netguard.ConflictError{Problems: []string{
+			"Device[tun-a].TUNDHCP.IPv4CIDR 192.168.1.2/24 conflicts with host route 192.168.1.0/24 dev br-lan",
+		}}
+	})
+	server := httptest.NewServer(NewServer(store, manager).Handler())
+	t.Cleanup(server.Close)
+
+	putJSON(t, server.URL+"/api/config", mustJSON(t, sampleConfig()), http.StatusOK)
+	saved := getJSON(t, server.URL+"/api/config", http.StatusOK)
+	if _, ok := saved["config"].(map[string]any); !ok {
+		t.Fatalf("conflicting configuration was not saved: %+v", saved)
+	}
+
+	resp := postJSON(t, server.URL+"/api/runtime/apply", nil, http.StatusConflict)
+	if resp["code"] != "network_conflict" {
+		t.Fatalf("apply error code = %+v, want network_conflict", resp)
+	}
+	conflicts, ok := resp["conflicts"].([]any)
+	if !ok || len(conflicts) != 1 || !strings.Contains(conflicts[0].(string), "br-lan") {
+		t.Fatalf("apply conflicts = %+v, want host route detail", resp["conflicts"])
+	}
+	state := getJSON(t, server.URL+"/api/runtime/state", http.StatusOK)["state"].(map[string]any)
+	if state["running"] == true {
+		t.Fatalf("runtime started despite network conflict: %+v", state)
+	}
+}
+
 func TestServerRuntimeComponentActions(t *testing.T) {
 	store := newTestStore(t)
 	controller := &fakeRuntimeController{}
@@ -191,19 +223,17 @@ func TestServerDashboardAPI(t *testing.T) {
 	}
 }
 
-func TestServerSystemInterfacesAliases(t *testing.T) {
+func TestServerSystemInterfaces(t *testing.T) {
 	store := newTestStore(t)
 	server := httptest.NewServer(NewServer(store).Handler())
 	t.Cleanup(server.Close)
 
-	for _, path := range []string{"/api/server/interfaces", "/api/system/interfaces", "/panel/api/server/interfaces"} {
-		resp := getJSON(t, server.URL+path, http.StatusOK)
-		if resp["success"] != true {
-			t.Fatalf("%s success = %+v, want true", path, resp["success"])
-		}
-		if _, ok := resp["obj"].([]any); !ok {
-			t.Fatalf("%s obj = %+v, want array", path, resp["obj"])
-		}
+	resp := getJSON(t, server.URL+"/api/server/interfaces", http.StatusOK)
+	if resp["success"] != true {
+		t.Fatalf("success = %+v, want true", resp["success"])
+	}
+	if _, ok := resp["obj"].([]any); !ok {
+		t.Fatalf("obj = %+v, want array", resp["obj"])
 	}
 }
 
@@ -233,7 +263,7 @@ func TestServerClientShareAPI(t *testing.T) {
 	store := newTestStore(t)
 	cfg := sampleConfig()
 	cfg.Clients = []model.Client{{
-		ID: "client-a", Enabled: true, Name: "Alice", CredentialType: "vkey", CredentialValue: "vk-secret",
+		ID: "client-a", Enabled: true, Name: "Alice",
 		Binding: model.Binding{RouteID: "route-a"}, AddressID: "addr-a",
 	}}
 	cfg.Routes[0].ClientID = "client-a"
@@ -341,6 +371,7 @@ func TestServerPanelAuthSessionFlow(t *testing.T) {
 	cfg.Settings = []model.Settings{{
 		ID:                 "global",
 		Enabled:            true,
+		PanelName:          "Edge Panel",
 		PanelAuthEnabled:   true,
 		AdminUsername:      "admin",
 		AdminPasswordHash:  hash,
@@ -360,6 +391,9 @@ func TestServerPanelAuthSessionFlow(t *testing.T) {
 	session := getJSON(t, server.URL+"/api/auth/session", http.StatusOK)
 	if session["authEnabled"] != true || session["authenticated"] != false {
 		t.Fatalf("unexpected unauthenticated session: %+v", session)
+	}
+	if session["panelName"] != "Edge Panel" {
+		t.Fatalf("panel name = %v, want Edge Panel", session["panelName"])
 	}
 
 	postJSON(t, server.URL+"/api/auth/login", []byte(`{"username":"admin","password":"wrong"}`), http.StatusUnauthorized)
@@ -573,6 +607,10 @@ func TestServerDiagnostics(t *testing.T) {
 	if diag["version"] == "" {
 		t.Fatalf("diagnostic version is empty: %+v", diag)
 	}
+	components := diag["components"].(map[string]any)
+	if components["panel"] == "" || components["tapx"] == "" || components["embeddedXray"] == "" {
+		t.Fatalf("diagnostic component versions are incomplete: %+v", components)
+	}
 	counts := diag["objectCounts"].(map[string]any)
 	if counts["devices"].(float64) != 1 || counts["listeners"].(float64) != 1 || counts["xrayProfiles"].(float64) != 1 || counts["settings"].(float64) != 1 {
 		t.Fatalf("diagnostic counts = %+v, want one device/listener/xray/settings", counts)
@@ -606,7 +644,7 @@ func TestServerStaticUI(t *testing.T) {
 		t.Fatalf("app script missing current panel entry markers")
 	}
 	dashboardChunk := getRaw(t, server.URL+"/assets/"+firstImportedChunk(t, app, "DashboardPage"), http.StatusOK)
-	if !bytes.Contains(dashboardChunk, []byte("app.brand")) || !bytes.Contains(dashboardChunk, []byte("dashboard.management")) || !bytes.Contains(dashboardChunk, []byte("dashboard.realtimeTransport")) || !bytes.Contains(dashboardChunk, []byte("dashboard.policyProtection")) {
+	if !bytes.Contains(dashboardChunk, []byte("app.brand")) || !bytes.Contains(dashboardChunk, []byte("dashboard.management")) || !bytes.Contains(dashboardChunk, []byte("dashboard.realtimeTransport")) || !bytes.Contains(dashboardChunk, []byte("dashboard.linkProtection")) {
 		t.Fatalf("dashboard chunk missing approved status card markers")
 	}
 	login := getRaw(t, server.URL+"/login.html", http.StatusOK)

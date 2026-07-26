@@ -41,7 +41,6 @@ func (h *UDPPipeHandle) Diagnose(ctx context.Context, kind string, duration time
 	}
 	pipe := h.Pipe
 	pipe.BindPort = 0
-	pipe.ReuseAddr = false
 	pipe.ReusePort = false
 	packetConn, _, err := openUDPPacketConn(pipe, peer)
 	if err != nil {
@@ -61,8 +60,8 @@ func (h *UDPPipeHandle) Diagnose(ctx context.Context, kind string, duration time
 	switch kind {
 	case "channel":
 		result.Delay, err = client.ping(ctx)
-	case "throughput":
-		result, err = client.throughput(ctx, duration)
+	case "throughput", "throughput-upload", "throughput-download":
+		result, err = client.throughput(ctx, duration, kind)
 		result.Kind = kind
 		result.Transport = "udp"
 		result.Target = peer.String()
@@ -81,7 +80,6 @@ func (h *UDPPipeHandle) diagnoseDTLS(ctx context.Context, kind string, duration 
 	}
 	pipe := h.Pipe
 	pipe.BindPort = 0
-	pipe.ReuseAddr = false
 	pipe.ReusePort = false
 	packetConn, _, err := openUDPPacketConn(pipe, peer)
 	if err != nil {
@@ -111,7 +109,7 @@ func (h *UDPPipeHandle) diagnoseDTLS(ctx context.Context, kind string, duration 
 	switch kind {
 	case "channel":
 		result.Delay, err = linkdiag.Ping(ctx, conn, credential)
-	case "throughput":
+	case "throughput", "throughput-upload", "throughput-download":
 		recordOverhead, overheadErr := dtlsRecordOverhead(conn)
 		if overheadErr != nil {
 			return ConnectorDiagnostic{}, overheadErr
@@ -124,7 +122,15 @@ func (h *UDPPipeHandle) diagnoseDTLS(ctx context.Context, kind string, duration 
 		if chunkSize < 64 {
 			return ConnectorDiagnostic{}, fmt.Errorf("core: DTLS diagnostic MTU %d leaves no usable payload", dtlsMTU)
 		}
-		measured, measureErr := linkdiag.ThroughputWithChunkSize(ctx, conn, credential, duration, chunkSize)
+		var measured linkdiag.Result
+		var measureErr error
+		if kind == "throughput-upload" {
+			measured, measureErr = linkdiag.ThroughputOneWayWithChunkSize(ctx, conn, credential, duration, chunkSize, true)
+		} else if kind == "throughput-download" {
+			measured, measureErr = linkdiag.ThroughputOneWayWithChunkSize(ctx, conn, credential, duration, chunkSize, false)
+		} else {
+			measured, measureErr = linkdiag.ThroughputWithChunkSize(ctx, conn, credential, duration, chunkSize)
+		}
 		err = measureErr
 		result.Delay = measured.Delay
 		result.UploadBytes = measured.UploadBytes
@@ -192,7 +198,7 @@ func (c *udpDiagnosticClient) ping(ctx context.Context) (time.Duration, error) {
 	return 0, errors.New("core: UDP TapX diagnostic acknowledgement timed out")
 }
 
-func (c *udpDiagnosticClient) throughput(ctx context.Context, duration time.Duration) (ConnectorDiagnostic, error) {
+func (c *udpDiagnosticClient) throughput(ctx context.Context, duration time.Duration, kind string) (ConnectorDiagnostic, error) {
 	if duration <= 0 {
 		duration = 2 * time.Second
 	}
@@ -207,84 +213,93 @@ func (c *udpDiagnosticClient) throughput(ctx context.Context, duration time.Dura
 	if bodySize < 64 {
 		return ConnectorDiagnostic{}, fmt.Errorf("core: UDP diagnostic wire size %d is too small", c.wireSize)
 	}
-	uploadPacket, err := c.packet(udpDiagUploadData, session, 0, uint32(duration/time.Millisecond), 0, bodySize)
-	if err != nil {
-		return ConnectorDiagnostic{}, err
-	}
-	uploadStarted := time.Now()
-	var sent uint64
-	var sequence uint32
-	for time.Since(uploadStarted) < duration {
-		binary.BigEndian.PutUint32(uploadPacket[c.vkeyHeaderSize()+16:], sequence)
-		written, writeErr := c.conn.WriteTo(uploadPacket, c.peer)
-		if writeErr != nil {
-			if netErr, ok := writeErr.(net.Error); ok && netErr.Timeout() {
-				continue
-			}
-			if errors.Is(writeErr, syscall.EINTR) || errors.Is(writeErr, syscall.EAGAIN) ||
-				errors.Is(writeErr, syscall.EWOULDBLOCK) || errors.Is(writeErr, syscall.ENOBUFS) {
-				continue
-			}
-			return ConnectorDiagnostic{}, writeErr
-		}
-		if written == len(uploadPacket) {
-			sent += uint64(bodySize)
-		}
-		sequence++
-	}
-	finish, err := c.packet(udpDiagUploadFinish, session, sequence, uint32(duration/time.Millisecond), sent, 0)
-	if err != nil {
-		return ConnectorDiagnostic{}, err
-	}
+	measureUpload := kind != "throughput-download"
+	measureDownload := kind != "throughput-upload"
 	var acknowledged uint64
-	for attempt := 0; attempt < 3 && acknowledged == 0; attempt++ {
-		if _, err := c.conn.WriteTo(finish, c.peer); err != nil {
+	if measureUpload {
+		uploadPacket, err := c.packet(udpDiagUploadData, session, 0, uint32(duration/time.Millisecond), 0, bodySize)
+		if err != nil {
 			return ConnectorDiagnostic{}, err
 		}
-		response, readErr := c.read(ctx, time.Second)
-		if readErr == nil && response.op == udpDiagUploadAck && response.session == session {
-			acknowledged = response.value
+		uploadStarted := time.Now()
+		var sent uint64
+		var sequence uint32
+		for time.Since(uploadStarted) < duration {
+			binary.BigEndian.PutUint32(uploadPacket[c.vkeyHeaderSize()+16:], sequence)
+			written, writeErr := c.conn.WriteTo(uploadPacket, c.peer)
+			if writeErr != nil {
+				if netErr, ok := writeErr.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				if errors.Is(writeErr, syscall.EINTR) || errors.Is(writeErr, syscall.EAGAIN) ||
+					errors.Is(writeErr, syscall.EWOULDBLOCK) || errors.Is(writeErr, syscall.ENOBUFS) {
+					continue
+				}
+				return ConnectorDiagnostic{}, writeErr
+			}
+			if written == len(uploadPacket) {
+				sent += uint64(bodySize)
+			}
+			sequence++
 		}
-	}
-	if acknowledged == 0 && sent > 0 {
-		return ConnectorDiagnostic{}, errors.New("core: UDP upload diagnostic acknowledgement timed out")
+		finish, err := c.packet(udpDiagUploadFinish, session, sequence, uint32(duration/time.Millisecond), sent, 0)
+		if err != nil {
+			return ConnectorDiagnostic{}, err
+		}
+		for attempt := 0; attempt < 3 && acknowledged == 0; attempt++ {
+			if _, err := c.conn.WriteTo(finish, c.peer); err != nil {
+				return ConnectorDiagnostic{}, err
+			}
+			response, readErr := c.read(ctx, time.Second)
+			if readErr == nil && response.op == udpDiagUploadAck && response.session == session {
+				acknowledged = response.value
+			}
+		}
+		if acknowledged == 0 && sent > 0 {
+			return ConnectorDiagnostic{}, errors.New("core: UDP upload diagnostic acknowledgement timed out")
+		}
 	}
 
-	downloadSession, err := randomDiagnosticSession()
-	if err != nil {
-		return ConnectorDiagnostic{}, err
-	}
-	downloadRequest, err := c.packet(udpDiagDownloadRequest, downloadSession, 0, uint32(duration/time.Millisecond), uint64(bodySize), 0)
-	if err != nil {
-		return ConnectorDiagnostic{}, err
-	}
-	if _, err := c.conn.WriteTo(downloadRequest, c.peer); err != nil {
-		return ConnectorDiagnostic{}, err
-	}
-	downloadStarted := time.Now()
 	var downloaded uint64
-	for {
-		response, readErr := c.read(ctx, duration+3*time.Second)
-		if readErr != nil {
-			return ConnectorDiagnostic{}, readErr
+	var downloadElapsed time.Duration
+	if measureDownload {
+		downloadSession, err := randomDiagnosticSession()
+		if err != nil {
+			return ConnectorDiagnostic{}, err
 		}
-		if response.session != downloadSession {
-			continue
+		downloadRequest, err := c.packet(udpDiagDownloadRequest, downloadSession, 0, uint32(duration/time.Millisecond), uint64(bodySize), 0)
+		if err != nil {
+			return ConnectorDiagnostic{}, err
 		}
-		switch response.op {
-		case udpDiagDownloadData:
-			downloaded += uint64(response.bodySize)
-		case udpDiagDownloadFinish:
-			elapsed := time.Since(downloadStarted)
-			return ConnectorDiagnostic{
-				UploadBytes:   acknowledged,
-				DownloadBytes: downloaded,
-				UploadBPS:     diagnosticBitsPerSecond(acknowledged, duration),
-				DownloadBPS:   diagnosticBitsPerSecond(downloaded, elapsed),
-				Duration:      duration,
-			}, nil
+		if _, err := c.conn.WriteTo(downloadRequest, c.peer); err != nil {
+			return ConnectorDiagnostic{}, err
+		}
+		downloadStarted := time.Now()
+		for {
+			response, readErr := c.read(ctx, duration+3*time.Second)
+			if readErr != nil {
+				return ConnectorDiagnostic{}, readErr
+			}
+			if response.session != downloadSession {
+				continue
+			}
+			switch response.op {
+			case udpDiagDownloadData:
+				downloaded += uint64(response.bodySize)
+			case udpDiagDownloadFinish:
+				downloadElapsed = time.Since(downloadStarted)
+				goto downloadComplete
+			}
 		}
 	}
+downloadComplete:
+	return ConnectorDiagnostic{
+		UploadBytes:   acknowledged,
+		DownloadBytes: downloaded,
+		UploadBPS:     diagnosticBitsPerSecond(acknowledged, duration),
+		DownloadBPS:   diagnosticBitsPerSecond(downloaded, downloadElapsed),
+		Duration:      duration,
+	}, nil
 }
 
 type udpDiagnosticMessage struct {

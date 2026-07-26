@@ -20,7 +20,7 @@ export function exportUserBundle(clients: TapxClient[], config: RuntimeConfig): 
   )));
   return {
     Version: 1,
-    Clients: clients.map(sanitizeUserCredentials),
+    Clients: structuredClone(clients),
     Addresses: (config.Addresses || []).filter((item) => addressIDs.has(`${nodeIDOf(item)}:${item.ID}`)),
     VKeys: (config.VKeys || []).filter((item) => vkeyIDs.has(`${nodeIDOf(item)}:${item.ID}`)),
   };
@@ -48,7 +48,7 @@ export function importUserBundle(value: string, current: RuntimeConfig, targetNo
       continue;
     }
     const sourceNodeID = nodeIDOf(source);
-    const client = { ...sanitizeUserCredentials(source), ...managedNodeField(targetNodeID) } as TapxClient & NodeOwned;
+    const client = { ...structuredClone(source), ...managedNodeField(targetNodeID) } as TapxClient & NodeOwned;
     const oldAddressID = client.AddressID || client.Binding?.AddressID || '';
     if (oldAddressID) {
       const importedAddress = incomingAddresses.get(`${sourceNodeID}:${oldAddressID}`);
@@ -73,18 +73,6 @@ export function importUserBundle(value: string, current: RuntimeConfig, targetNo
     if (email) emails.add(email);
   }
   return { clients: currentClients, addresses: currentAddresses, vkeys: currentVKeys, skipped };
-}
-
-export function sanitizeUserCredentials(client: TapxClient): TapxClient {
-  const sanitized = structuredClone(client);
-  delete sanitized.Security;
-  delete sanitized.ReverseTag;
-  delete sanitized.Flow;
-  delete sanitized.WireguardPrivateKey;
-  delete sanitized.WireguardPublicKey;
-  delete sanitized.WireguardPreSharedKey;
-  delete sanitized.WireguardAllowedIPs;
-  return sanitized;
 }
 
 function normalizeBundle(value: unknown, t?: Translate): UserTransferBundle {

@@ -169,7 +169,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 			tapx BIGINT NOT NULL,
 			rx BIGINT NOT NULL,
 			tx BIGINT NOT NULL,
-			drops BIGINT NOT NULL
+			drops BIGINT NOT NULL,
+			details TEXT NOT NULL DEFAULT '{}'
 		)`,
 	)
 	for _, stmt := range stmts {
@@ -177,23 +178,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	if err := s.ensureMetricDetailsColumn(ctx); err != nil {
-		return fmt.Errorf("migrate metric details: %w", err)
-	}
 	return nil
-}
-
-func (s *Store) ensureMetricDetailsColumn(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT details FROM tapx_metrics LIMIT 0`)
-	if err == nil {
-		return rows.Close()
-	}
-	statement := `ALTER TABLE tapx_metrics ADD COLUMN details TEXT NOT NULL DEFAULT '{}'`
-	if s.dialect == DatabasePostgres {
-		statement = `ALTER TABLE tapx_metrics ADD COLUMN IF NOT EXISTS details TEXT NOT NULL DEFAULT '{}'`
-	}
-	_, alterErr := s.db.ExecContext(ctx, statement)
-	return alterErr
 }
 
 func (s *Store) bind(query string) string {
@@ -715,7 +700,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 	switch kind {
 	case KindDevices:
 		var item model.Device
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -724,7 +709,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 		return marshalObject(item.ID, item)
 	case KindListeners:
 		var item model.Listener
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -733,7 +718,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 		return marshalObject(item.ID, item)
 	case KindConnectors:
 		var item model.Connector
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -742,7 +727,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 		return marshalObject(item.ID, item)
 	case KindClients:
 		var item model.Client
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -751,7 +736,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 		return marshalObject(item.ID, item)
 	case KindRoutes:
 		var item model.Route
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -760,7 +745,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 		return marshalObject(item.ID, item)
 	case KindVKeys:
 		var item model.VKey
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -769,7 +754,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 		return marshalObject(item.ID, item)
 	case KindAddresses:
 		var item model.AddressLimit
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -778,7 +763,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 		return marshalObject(item.ID, item)
 	case KindXray:
 		var item model.XrayProfile
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -787,7 +772,7 @@ func normalizeObject(kind, fallbackID string, raw []byte) (string, json.RawMessa
 		return marshalObject(item.ID, item)
 	case KindSettings:
 		var item model.Settings
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := strictUnmarshal(raw, &item); err != nil {
 			return "", nil, err
 		}
 		if item.ID == "" {
@@ -811,55 +796,55 @@ func appendObject(cfg *config.RuntimeConfig, kind string, payload []byte) error 
 	switch kind {
 	case KindDevices:
 		var item model.Device
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.Devices = append(cfg.Devices, item)
 	case KindListeners:
 		var item model.Listener
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.Listeners = append(cfg.Listeners, item)
 	case KindConnectors:
 		var item model.Connector
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.Connectors = append(cfg.Connectors, item)
 	case KindClients:
 		var item model.Client
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.Clients = append(cfg.Clients, item)
 	case KindRoutes:
 		var item model.Route
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.Routes = append(cfg.Routes, item)
 	case KindVKeys:
 		var item model.VKey
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.VKeys = append(cfg.VKeys, item)
 	case KindAddresses:
 		var item model.AddressLimit
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.Addresses = append(cfg.Addresses, item)
 	case KindXray:
 		var item model.XrayProfile
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.XrayProfiles = append(cfg.XrayProfiles, item)
 	case KindSettings:
 		var item model.Settings
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		cfg.Settings = append(cfg.Settings, item)
@@ -873,7 +858,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 	switch kind {
 	case KindDevices:
 		var item model.Device
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false
@@ -889,7 +874,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 		}
 	case KindListeners:
 		var item model.Listener
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false
@@ -905,7 +890,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 		}
 	case KindConnectors:
 		var item model.Connector
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false
@@ -921,7 +906,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 		}
 	case KindClients:
 		var item model.Client
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false
@@ -937,7 +922,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 		}
 	case KindRoutes:
 		var item model.Route
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false
@@ -953,7 +938,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 		}
 	case KindVKeys:
 		var item model.VKey
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false
@@ -969,7 +954,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 		}
 	case KindAddresses:
 		var item model.AddressLimit
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false
@@ -985,7 +970,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 		}
 	case KindXray:
 		var item model.XrayProfile
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false
@@ -1001,7 +986,7 @@ func replaceObject(cfg *config.RuntimeConfig, kind string, payload json.RawMessa
 		}
 	case KindSettings:
 		var item model.Settings
-		if err := json.Unmarshal(payload, &item); err != nil {
+		if err := strictUnmarshal(payload, &item); err != nil {
 			return err
 		}
 		replaced := false

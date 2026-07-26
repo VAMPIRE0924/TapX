@@ -82,7 +82,7 @@ func TestLoginLimiterBlocksAndResets(t *testing.T) {
 	}
 }
 
-func TestAuthBypassProtectsNativeAndCompatibilityAPIs(t *testing.T) {
+func TestAuthBypassProtectsAPIs(t *testing.T) {
 	tests := []struct {
 		path   string
 		bypass bool
@@ -90,8 +90,6 @@ func TestAuthBypassProtectsNativeAndCompatibilityAPIs(t *testing.T) {
 		{path: "/api/health", bypass: true},
 		{path: "/api/auth/login", bypass: true},
 		{path: "/api/config", bypass: false},
-		{path: "/panel/api/server/interfaces", bypass: false},
-		{path: "/panel/api/server/getNewX25519Cert", bypass: false},
 		{path: "/panel/", bypass: true},
 		{path: "/assets/panel.js", bypass: true},
 	}

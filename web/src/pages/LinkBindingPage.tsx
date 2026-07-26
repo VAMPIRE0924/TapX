@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
   Button,
-  Card,
   Col,
   Dropdown,
   Form,
@@ -85,6 +84,7 @@ import {
 } from '../features/links/linkDiagnostics';
 import { useI18n } from '../i18n/I18nProvider';
 import { isManagedLinkAddressRemark, managedLinkAddressRemark } from '../shared/managed-objects';
+import { clearBindingReferences, relationKey } from '../shared/config-relations';
 import './LinkBindingPage.css';
 
 type RouteAction = 'bind-device' | 'allow' | 'drop';
@@ -131,9 +131,6 @@ interface RuleRow {
   allowedMACs: string;
 }
 
-let linkBindingDraftCache: RuntimeConfig | null = null;
-let linkBindingDraftDirty = false;
-
 function tabLabel(icon: ReactNode, text: string, hint?: string): ReactNode {
   const label = (
     <span className="link-tab-label">
@@ -154,7 +151,6 @@ export function LinkBindingPage() {
   const [config, setConfig] = useState<RuntimeConfig>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(linkBindingDraftDirty);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState<RouteDraft | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -225,30 +221,12 @@ export function LinkBindingPage() {
     void refresh();
   }, []);
 
-  useEffect(() => {
-    const preventAccidentalReload = (event: BeforeUnloadEvent) => {
-      if (!dirty) return;
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', preventAccidentalReload);
-    return () => window.removeEventListener('beforeunload', preventAccidentalReload);
-  }, [dirty]);
-
   async function refresh() {
     setLoading(true);
     setError('');
     try {
       const stored = await getRuntimeConfig();
-      if (linkBindingDraftDirty && linkBindingDraftCache) {
-        setConfig(linkBindingDraftCache);
-        setDirty(true);
-      } else {
-        linkBindingDraftCache = null;
-        linkBindingDraftDirty = false;
-        setConfig(stored);
-        setDirty(false);
-      }
+      setConfig(stored);
     } catch (err) {
       setError(err instanceof Error ? err.message : t('link.loadFailed'));
     } finally {
@@ -256,34 +234,26 @@ export function LinkBindingPage() {
     }
   }
 
-  function stageConfig(next: RuntimeConfig, successText?: string) {
-    linkBindingDraftCache = next;
-    linkBindingDraftDirty = true;
-    setConfig(next);
-    setDirty(true);
-    if (successText) messageApi.info(t('link.saveRequired', { action: successText }));
-  }
-
-  async function persistStagedConfig() {
-    if (!dirty) return;
+  async function stageConfig(next: RuntimeConfig, successText?: string): Promise<boolean> {
     setSaving(true);
     setError('');
     try {
-      const saved = await saveRuntimeConfig(config);
-      setConfig(saved);
-      linkBindingDraftCache = null;
-      linkBindingDraftDirty = false;
-      setDirty(false);
+      const saved = await saveRuntimeConfig(next);
       try {
         await applyRuntimeConfig();
-        messageApi.success(t('link.savedAndReloaded'));
-      } catch (err) {
-        messageApi.warning(t('link.reloadFailed', { error: err instanceof Error ? err.message : String(err) }));
+      } catch (applyError) {
+        await saveRuntimeConfig(config);
+        await applyRuntimeConfig().catch(() => undefined);
+        throw applyError;
       }
+      setConfig(saved);
+      if (successText) messageApi.success(successText);
+      return true;
     } catch (err) {
       const messageText = err instanceof Error ? err.message : t('link.saveFailed');
       setError(messageText);
       messageApi.error(messageText);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -376,8 +346,8 @@ export function LinkBindingPage() {
       : undefined;
     const namedDraft = { ...editing, AddressName: editing.AddressName || t('link.sourceLimitName', { id }) };
     const sanitized = selectedDevice?.Type === 'tun' ? { ...namedDraft, MACs: '' } : namedDraft;
-    stageConfig(mergeDraftIntoConfig(config, sanitized), editing.Mode === 'edit' ? t('link.updated') : t('link.created'));
-    setEditing(null);
+    const committed = await stageConfig(mergeDraftIntoConfig(config, sanitized), editing.Mode === 'edit' ? t('link.updated') : t('link.created'));
+    if (committed) setEditing(null);
   }
 
   function confirmDelete(route: RouteRecord) {
@@ -521,10 +491,11 @@ export function LinkBindingPage() {
   const tableColumns = useMemo<TableColumnsType<RuleRow>>(
     () => [
       {
-        title: '#',
+        title: 'ID',
         align: 'center',
         width: 60,
         key: 'index',
+        fixed: 'left',
         render: (_value, _record, index) => (
           <div className="action-cell" style={{ justifyContent: 'center' }}>
             <HolderOutlined
@@ -541,6 +512,7 @@ export function LinkBindingPage() {
         title: t('node.sourceNode'),
         key: 'ManagedNodeID',
         width: 150,
+        fixed: 'left',
         render: (_value, record) => <NodeSourceTag value={record.route} />,
       },
       {
@@ -548,6 +520,7 @@ export function LinkBindingPage() {
         align: 'center',
         width: 80,
         key: 'actions',
+        fixed: 'left',
         render: (_value, record, index) => (
           <div className="action-buttons" style={{ justifyContent: 'center', margin: 0 }}>
             <Button shape="circle" size="small" icon={<EditOutlined />} aria-label={t('link.edit')} onClick={() => openEdit(record.route)} />
@@ -557,6 +530,7 @@ export function LinkBindingPage() {
                 items: [
                   { key: 'up', label: <><ArrowUpOutlined /> {t('common.moveUp')}</>, disabled: index === 0, onClick: () => moveRoute(index, index - 1) },
                   { key: 'down', label: <><ArrowDownOutlined /> {t('common.moveDown')}</>, disabled: index === routes.length - 1, onClick: () => moveRoute(index, index + 1) },
+                  { key: 'export', label: <><ExportOutlined /> {t('link.export')}</>, onClick: () => exportRules([record.route]) },
                   { key: 'delete', danger: true, label: <><DeleteOutlined /> {t('common.delete')}</>, onClick: () => confirmDelete(record.route) },
                 ],
               }}
@@ -606,7 +580,7 @@ export function LinkBindingPage() {
         render: (value: string) => value ? <Tag color="blue">{value}</Tag> : emptyDash(),
       },
       {
-        title: 'ID',
+        title: t('link.matchId'),
         width: 140,
         dataIndex: 'id',
         render: (value: string) => <Tooltip title={value}><span className="criterion-chip-value">{value}</span></Tooltip>,
@@ -675,13 +649,6 @@ export function LinkBindingPage() {
       {messageContextHolder}
       {modalContextHolder}
       <div className="link-binding-page">
-        <Card hoverable className="link-save-card">
-          <Space wrap>
-            <Button type="primary" loading={saving} disabled={!dirty} onClick={() => void persistStagedConfig()}>
-              {t('common.save')}
-            </Button>
-          </Space>
-        </Card>
         {error ? <Alert type="error" showIcon title={error} /> : null}
         <Tabs
           defaultActiveKey="rules"
@@ -911,7 +878,12 @@ function RouteEditor({
       mask={{ closable: false }}
     >
       {draft ? (
-        <Form colon={false} labelCol={{ md: { span: 8 } }} wrapperCol={{ md: { span: 14 } }}>
+        <Tabs items={[
+          {
+            key: 'basic',
+            label: t('common.basicConfig'),
+            forceRender: true,
+            children: <Form colon={false} labelCol={{ md: { span: 8 } }} wrapperCol={{ md: { span: 14 } }}>
           <Form.Item label={t('node.targetNode')} tooltip={t('node.targetNodeHelp')}>
             <Select
               value={draft.ManagedNodeID}
@@ -1032,9 +1004,53 @@ function RouteEditor({
               />
             </Form.Item>
           )}
-        </Form>
+            </Form>,
+          },
+          {
+            key: 'advanced',
+            label: t('common.advancedConfig'),
+            forceRender: true,
+            children: <RouteAdvancedEditor draft={draft} onChange={onChange} />,
+          },
+        ]} />
       ) : null}
     </Modal>
+  );
+}
+
+function RouteAdvancedEditor({ draft, onChange }: { draft: RouteDraft; onChange: (draft: RouteDraft) => void }) {
+  const lastWritten = useRef('');
+  const serialize = (value: RouteDraft) => {
+    const { Mode: _mode, OriginalID: _originalID, ...configurable } = value;
+    return JSON.stringify(configurable, null, 2);
+  };
+  const [text, setText] = useState(() => serialize(draft));
+
+  useEffect(() => {
+    const next = serialize(draft);
+    if (next === lastWritten.current) return;
+    lastWritten.current = next;
+    setText(next);
+  }, [draft]);
+
+  return (
+    <Input.TextArea
+      value={text}
+      rows={16}
+      spellCheck={false}
+      onChange={(event) => {
+        const next = event.target.value;
+        setText(next);
+        try {
+          const parsed = JSON.parse(next) as Record<string, unknown>;
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+          onChange({ ...draft, ...parsed, Mode: draft.Mode, OriginalID: draft.OriginalID } as RouteDraft);
+          lastWritten.current = next;
+        } catch {
+          // Preserve incomplete JSON until it becomes valid.
+        }
+      }}
+    />
   );
 }
 
@@ -1148,7 +1164,15 @@ function removeRouteFromConfig(config: RuntimeConfig, route: RouteRecord): Runti
   const addresses = (config.Addresses || []).filter((item) => (
     item.ID !== route.AddressID || nodeIDOf(item) !== nodeIDOf(route) || !isManagedLinkAddress(item)
   ));
-  return { ...config, Routes: routes, Addresses: addresses };
+  const removed = new Set([relationKey(route, route.ID)]);
+  return {
+    ...config,
+    Routes: routes,
+    Addresses: addresses,
+    Listeners: clearBindingReferences(config.Listeners || [], 'RouteID', removed),
+    Connectors: clearBindingReferences(config.Connectors || [], 'RouteID', removed),
+    Clients: clearBindingReferences(config.Clients || [], 'RouteID', removed),
+  };
 }
 
 function uniqueAddressID(base: string, existing: Set<string>): string {

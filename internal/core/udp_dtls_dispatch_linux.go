@@ -15,7 +15,6 @@ import (
 
 	"tapx/internal/config"
 	"tapx/internal/fastpath"
-	"tapx/internal/linkdiag"
 	"tapx/internal/pathmtu"
 )
 
@@ -42,7 +41,7 @@ type DTLSDispatchHandle struct {
 	lastErr error
 }
 
-func startDTLSDispatch(dispatch config.RuntimeUDPDispatch, pipes []config.RuntimeUDPPipe, devices []config.RuntimeDevice, pathCache *pathmtu.Cache) (*DTLSDispatchHandle, []*UDPPipeHandle, error) {
+func startDTLSDispatch(dispatch config.RuntimeUDPDispatch, pipes []config.RuntimeUDPPipe, devices []config.RuntimeDevice, pathCache *pathmtu.Cache, fabric *deviceFabric) (*DTLSDispatchHandle, []*UDPPipeHandle, error) {
 	var prototype *config.RuntimeUDPPipe
 	for index := range pipes {
 		if pipes[index].DispatchGroup == dispatch.ID {
@@ -99,7 +98,11 @@ func startDTLSDispatch(dispatch config.RuntimeUDPDispatch, pipes []config.Runtim
 			closeChildren()
 			return nil, nil, fmt.Errorf("core: DTLS dispatch %s references missing device %s", dispatch.ID, pipe.DeviceID)
 		}
-		child, err := prepareUDPPipeHandle(pipe, device, pathCache)
+		var shared *sharedRuntimeDevice
+		if fabric != nil {
+			shared = fabric.Port(udpFabricKey(pipe))
+		}
+		child, err := prepareUDPPipeHandle(pipe, device, pathCache, shared)
 		if err != nil {
 			_ = listener.Close()
 			closeChildren()
@@ -148,7 +151,7 @@ func startDTLSDispatch(dispatch config.RuntimeUDPDispatch, pipes []config.Runtim
 }
 
 func dtlsDispatchListenAddr(pipe config.RuntimeUDPPipe) (*net.UDPAddr, string, error) {
-	host := firstNonEmpty(pipe.BindAddress, pipe.BindHost, "0.0.0.0")
+	host := firstNonEmpty(pipe.BindHost, "0.0.0.0")
 	addr, err := netip.ParseAddr(host)
 	if err != nil {
 		return nil, "", fmt.Errorf("core: parse DTLS dispatch bind address %q: %w", host, err)
@@ -216,7 +219,7 @@ func (h *DTLSDispatchHandle) dispatchConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 	if hello.diagnostic {
-		if err := linkdiag.ServeStream(ctx, conn, hello.vkey); err != nil && ctx.Err() == nil &&
+		if err := serveAddressControl(ctx, conn, hello.vkey, policy.handle.address); err != nil && ctx.Err() == nil &&
 			!errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 			h.setErr(fmt.Errorf("core: serve DTLS diagnostic %s: %w", h.Dispatch.ID, err))
 		}

@@ -54,8 +54,6 @@ type ShareClient struct {
 	ID                string `json:"id"`
 	Name              string `json:"name,omitempty"`
 	Email             string `json:"email,omitempty"`
-	CredentialType    string `json:"credentialType,omitempty"`
-	CredentialValue   string `json:"credentialValue,omitempty"`
 	UUID              string `json:"uuid,omitempty"`
 	Password          string `json:"password,omitempty"`
 	Auth              string `json:"auth,omitempty"`
@@ -107,8 +105,6 @@ func BuildClientShare(cfg config.RuntimeConfig, clientID string) (ClientShare, e
 			ID:                client.ID,
 			Name:              client.Name,
 			Email:             client.Email,
-			CredentialType:    client.CredentialType,
-			CredentialValue:   client.CredentialValue,
 			UUID:              client.UUID,
 			Password:          client.Password,
 			Auth:              client.Auth,
@@ -456,9 +452,6 @@ func buildRawShareLink(payload SharePayload) (string, []string, error) {
 	if payload.VKey != nil {
 		vkey = payload.VKey.Value
 	}
-	if vkey == "" && strings.EqualFold(payload.Client.CredentialType, "vkey") {
-		vkey = payload.Client.CredentialValue
-	}
 	if vkey != "" {
 		values.Set("vkey", vkey)
 	}
@@ -572,13 +565,13 @@ func shareName(client ShareClient) string {
 func clientCredential(client ShareClient, protocol string) string {
 	switch protocol {
 	case "vless", "vmess":
-		return firstNonEmpty(client.UUID, client.CredentialValue)
+		return strings.TrimSpace(client.UUID)
 	case "trojan", "shadowsocks":
-		return firstNonEmpty(client.Password, client.CredentialValue)
+		return strings.TrimSpace(client.Password)
 	case "hysteria", "hysteria2":
-		return firstNonEmpty(client.Auth, client.Password, client.CredentialValue)
+		return strings.TrimSpace(client.Auth)
 	default:
-		return client.CredentialValue
+		return ""
 	}
 }
 

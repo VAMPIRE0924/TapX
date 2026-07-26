@@ -10,6 +10,7 @@ import { getAuthSession, loginPanel } from '../shared/api';
 import { errorMessage } from '../shared/localized-error';
 import './LoginPage.css';
 import { panelPath } from '../app/runtime-path';
+import { applyPanelTitle, defaultPanelName, panelDisplayName } from '../app/panel-name';
 
 interface LoginValues {
   username: string;
@@ -23,6 +24,7 @@ export function LoginPage() {
   const [checking, setChecking] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
+  const [panelName, setPanelName] = useState(defaultPanelName);
   const [headlineIndex, setHeadlineIndex] = useState(0);
   const [messageApi, messageContextHolder] = message.useMessage();
   const headlines = useMemo(() => [t('login.hello'), t('login.welcome')], [t]);
@@ -47,6 +49,9 @@ export function LoginPage() {
     getAuthSession()
       .then((session) => {
         if (!active) return;
+        const nextPanelName = panelDisplayName(session.panelName);
+        setPanelName(nextPanelName);
+        applyPanelTitle(nextPanelName);
         if (!session.authEnabled || session.authenticated) window.location.replace(panelPath('/'));
         setTwoFactorEnabled(session.twoFactorEnabled === true);
       })
@@ -101,7 +106,7 @@ export function LoginPage() {
         <section className="login-panel" aria-labelledby="login-title">
           <header className="login-header">
             <div className="login-brand">
-              <h1 id="login-title">{t('app.brand')}</h1>
+              <h1 id="login-title">{panelName}</h1>
               <span aria-hidden="true" />
             </div>
             <p className="login-headline" aria-live="polite">

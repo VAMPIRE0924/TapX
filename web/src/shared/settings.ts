@@ -2,6 +2,7 @@ export type SettingRow = {
   ID?: string;
   Enabled?: boolean;
   Name?: string;
+  PanelName?: string;
   PanelListen?: string;
   PanelDomain?: string;
   PanelBasePath?: string;
@@ -25,27 +26,18 @@ export type SettingRow = {
   OpenWrtBuildTarget?: string;
   AdvancedJSON?: string;
   Remark?: string;
-  Key?: string;
-  key?: string;
-  Value?: unknown;
-  value?: unknown;
 };
 
 export function settingsToObject<T extends Record<string, unknown> = Record<string, unknown>>(settings: unknown): Partial<T> {
   if (!Array.isArray(settings)) return {};
-  const output: Record<string, unknown> = {};
-
-  for (const item of settings as SettingRow[]) {
-    const legacyKey = item.Key || item.key;
-    if (legacyKey) output[legacyKey] = item.Value ?? item.value;
-  }
-
   const row = (settings as SettingRow[]).find((item) => isTypedSettingsRow(item));
-  if (!row) return output as Partial<T>;
+  if (!row) return {};
+  const output: Record<string, unknown> = {};
   Object.assign(output, parseAdvancedSettings(row.AdvancedJSON));
 
   output.settingsID = row.ID || 'settings';
   output.settingsName = row.Name || 'TapX';
+  output.panelName = row.PanelName || 'TapX-UI';
   output.settingsEnabled = row.Enabled !== false;
   output.panelHTTPS = row.PanelHTTPS === true;
   output.panelAuthEnabled = row.PanelAuthEnabled === true;
@@ -81,6 +73,7 @@ export function objectToSettings(values: Record<string, unknown>): SettingRow[] 
   for (const key of [
     'settingsID',
     'settingsName',
+    'panelName',
     'settingsEnabled',
     'panelHTTPS',
     'listenDomain',
@@ -117,6 +110,7 @@ export function objectToSettings(values: Record<string, unknown>): SettingRow[] 
     ID: stringValue(values.settingsID) || 'settings',
     Enabled: values.settingsEnabled !== false,
     Name: stringValue(values.settingsName) || 'TapX',
+    PanelName: stringValue(values.panelName).trim(),
     PanelListen: joinPanelListen(listenIP, listenPort),
     PanelDomain: stringValue(values.listenDomain),
     PanelBasePath: stringValue(values.uriPath) || '/',

@@ -45,7 +45,7 @@ func TestRefreshLimitConfigResetsDueListenerAndClient(t *testing.T) {
 	cfg := config.RuntimeConfig{
 		Listeners: []model.Listener{{
 			ID: "listener-a", Enabled: true, BindHost: "127.0.0.1", BindPort: 44000,
-			Transport: model.TransportUDP, RawUDP: model.RawUDPSettings{PeerMode: model.UDPPeerAny}, TrafficReset: "hourly",
+			Transport: model.TransportUDP, RawUDP: model.RawUDPSettings{}, TrafficReset: "hourly",
 		}},
 		Clients: []model.Client{{ID: "client-a", Enabled: true, TrafficReset: "daily"}},
 	}

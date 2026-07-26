@@ -6,7 +6,7 @@ version="${TAPX_VERSION:-latest}"
 
 read_tty() {
   local __name="$1" __prompt="$2" __value=""
-  if [[ -r /dev/tty ]]; then
+  if [[ ( -t 0 || -t 1 || -t 2 ) && -r /dev/tty ]]; then
     read -r -p "$__prompt" __value </dev/tty
   else
     read -r -p "$__prompt" __value
@@ -36,6 +36,17 @@ message() {
   fi
 }
 
+load_saved_language() {
+  local file="${TAPX_SYSCONFDIR:-/etc/tapx}/tapx.env" saved=""
+  if [[ -z "${TAPX_LANG:-}" && -r "$file" ]]; then
+    saved="$(. "$file"; printf '%s' "${TAPX_LANG:-}")"
+    if [[ "$saved" == "en" || "$saved" == "zh" ]]; then
+      TAPX_LANG="$saved"
+      export TAPX_LANG
+    fi
+  fi
+}
+
 detect_architecture() {
   case "$(uname -m)" in
     x86_64|amd64) printf 'amd64' ;;
@@ -59,8 +70,6 @@ download() {
   fi
 }
 
-choose_language
-
 if [[ "$(uname -s)" != "Linux" ]]; then
   printf '%s\n' "$(message 'TapX supports Linux installation only.' 'TapX 一键安装仅支持 Linux。')" >&2
   exit 1
@@ -70,16 +79,20 @@ if [[ "$(id -u)" != "0" ]]; then
   exit 1
 fi
 
+load_saved_language
+
+if [[ -x /usr/local/bin/tapx && "${TAPX_BOOTSTRAP_FORCE:-0}" != "1" && "${1:-}" != "install" && "${1:-}" != "reinstall" ]]; then
+  exec /usr/local/bin/tapx "$@"
+fi
+
+choose_language
+
 arch="$(detect_architecture)" || {
   printf '%s %s\n' "$(message 'Unsupported architecture:' '不支持的系统架构：')" "$(uname -m)" >&2
   exit 1
 }
 asset="tapx-linux-${arch}.tar.gz"
 package_dir="tapx-linux-${arch}"
-
-if [[ -x /usr/local/bin/tapx && "${1:-}" != "install" && "${1:-}" != "reinstall" ]]; then
-  exec env TAPX_LANG="$TAPX_LANG" /usr/local/bin/tapx "$@"
-fi
 
 if [[ -n "${TAPX_RELEASE_BASE_URL:-}" ]]; then
   base_url="${TAPX_RELEASE_BASE_URL%/}"

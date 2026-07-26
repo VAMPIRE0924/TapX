@@ -126,10 +126,11 @@ func TestGenerateRuntimeResolvesVKeyRouteAndAddressLimit(t *testing.T) {
 			BindPort:  4000,
 			Transport: model.TransportUDP,
 			RawUDP: model.RawUDPSettings{
-				QueueSize:      2048,
-				ZeroCopy:       true,
-				ConnectTimeout: 7,
-				IdleTimeout:    60,
+				KeepAliveSecond: 15,
+				QueueSize:       2048,
+				ZeroCopy:        true,
+				ConnectTimeout:  7,
+				IdleTimeout:     60,
 			},
 			Binding: model.Binding{
 				RouteID: "route1",
@@ -186,7 +187,7 @@ func TestGenerateRuntimeResolvesVKeyRouteAndAddressLimit(t *testing.T) {
 	if !pipe.LinkAutoOptimize {
 		t.Fatal("raw UDP pipe did not inherit automatic link optimization")
 	}
-	if pipe.QueueSize != 2048 || !pipe.ZeroCopy || pipe.ConnectTimeout != 7 || pipe.IdleTimeout != 60 {
+	if pipe.KeepAliveSecond != 15 || pipe.QueueSize != 2048 || !pipe.ZeroCopy || pipe.ConnectTimeout != 7 || pipe.IdleTimeout != 60 {
 		t.Fatalf("pipe fastpath controls = %+v, want queue/zero-copy/timeouts", pipe)
 	}
 	if len(pipe.AddressGuard.IPv4CIDRs) != 1 || pipe.AddressGuard.IPv4CIDRs[0] != "10.30.0.2/32" {
@@ -209,7 +210,7 @@ func TestGenerateRuntimeSortsRoutesAndResolvesClientPolicy(t *testing.T) {
 			UploadRateLimit:  4_000_000, DownloadRateLimit: 8_000_000,
 		}},
 		Routes: []model.Route{
-			{ID: "later", Enabled: true, Priority: 90, Action: model.RouteActionBindDevice, DeviceID: "tun-a"},
+			{ID: "later", Enabled: true, Priority: 90, Action: model.RouteActionBindDevice, ClientID: "client-a", DeviceID: "tun-a"},
 			{ID: "first", Enabled: true, Priority: 10, Action: model.RouteActionBindDevice, ClientID: "client-a", DeviceID: "tun-a"},
 			{ID: "same-priority", Enabled: true, Priority: 10, Action: model.RouteActionAllow, ClientID: "client-a"},
 		},
@@ -320,7 +321,7 @@ func TestValidateRejectsRouteWithoutMatchOrBindDeviceTarget(t *testing.T) {
 	})
 }
 
-func TestGenerateRuntimeCopiesRawUDPSocketSettings(t *testing.T) {
+func TestGenerateRuntimeDerivesRawUDPListenerStrategy(t *testing.T) {
 	cfg := RuntimeConfig{
 		Devices: []model.Device{{
 			ID:      "tun0",
@@ -341,19 +342,10 @@ func TestGenerateRuntimeCopiesRawUDPSocketSettings(t *testing.T) {
 			BindPort:  4000,
 			Transport: model.TransportUDP,
 			RawUDP: model.RawUDPSettings{
-				PeerMode:      model.UDPPeerFixed,
-				FixedPeer:     "127.0.0.1:5000",
-				BindInterface: "lo",
-				BindAddress:   "127.0.0.1",
-				ReceiveBuffer: 65536,
-				SendBuffer:    131072,
-				ReuseAddr:     true,
-				ReusePort:     true,
 				DTLS: model.RawDTLSSettings{
 					Enabled:      true,
 					CertFile:     "/etc/tapx/dtls/server.crt",
 					KeyFile:      "/etc/tapx/dtls/server.key",
-					ALPN:         []string{"tapx"},
 					MTU:          1200,
 					ReplayWindow: 64,
 				},
@@ -378,17 +370,8 @@ func TestGenerateRuntimeCopiesRawUDPSocketSettings(t *testing.T) {
 	if pipe.DispatchGroup == "" {
 		t.Fatal("DTLS listener pipe has no dispatch group")
 	}
-	if pipe.BindInterface != "lo" {
-		t.Fatalf("pipe bind interface = %q, want lo", pipe.BindInterface)
-	}
-	if pipe.BindAddress != "127.0.0.1" {
-		t.Fatalf("pipe bind address = %q, want 127.0.0.1", pipe.BindAddress)
-	}
-	if pipe.ReceiveBuffer != 65536 || pipe.SendBuffer != 131072 {
-		t.Fatalf("pipe buffers = %d/%d, want 65536/131072", pipe.ReceiveBuffer, pipe.SendBuffer)
-	}
-	if !pipe.ReuseAddr || !pipe.ReusePort {
-		t.Fatalf("pipe reuse flags = %v/%v, want true/true", pipe.ReuseAddr, pipe.ReusePort)
+	if pipe.PeerMode != RuntimeUDPPeerLearn || !pipe.ReusePort {
+		t.Fatalf("pipe strategy = peer:%q reuse-port:%v, want learned peer with dispatcher reuse", pipe.PeerMode, pipe.ReusePort)
 	}
 	if !pipe.DTLS.Enabled || pipe.DTLS.MTU != 1200 || pipe.DTLS.ReplayWindow != 64 {
 		t.Fatalf("pipe dtls = %+v, want copied DTLS settings", pipe.DTLS)
@@ -433,13 +416,6 @@ func TestGenerateRuntimeCopiesEnabledDeviceRoutes(t *testing.T) {
 			Type:     model.DeviceTUN,
 			IfName:   "tapx0",
 			MSSClamp: 1360,
-			DNS: &model.DNSConfig{
-				Enabled:       true,
-				Nameservers:   []string{"1.1.1.1", "2606:4700:4700::1111"},
-				SearchDomains: []string{"example.com"},
-				Options:       []string{"timeout:1"},
-				OutputPath:    "/run/tapx/resolv/tapx0.conf",
-			},
 			Routes: []model.DeviceRoute{
 				{
 					Enabled:     true,
@@ -468,10 +444,6 @@ func TestGenerateRuntimeCopiesEnabledDeviceRoutes(t *testing.T) {
 	if runtime.Devices[0].MSSClamp != 1360 {
 		t.Fatalf("runtime mss clamp = %d, want 1360", runtime.Devices[0].MSSClamp)
 	}
-	dns := runtime.Devices[0].DNS
-	if !dns.Enabled || len(dns.Nameservers) != 2 || dns.Nameservers[0] != "1.1.1.1" || dns.OutputPath != "/run/tapx/resolv/tapx0.conf" {
-		t.Fatalf("runtime DNS = %+v, want copied DNS", dns)
-	}
 	routes := runtime.Devices[0].Routes
 	if len(routes) != 1 {
 		t.Fatalf("runtime device routes = %+v, want one enabled route", routes)
@@ -479,55 +451,6 @@ func TestGenerateRuntimeCopiesEnabledDeviceRoutes(t *testing.T) {
 	route := routes[0]
 	if route.Destination != "10.50.0.0/24" || route.Gateway != "10.10.0.2" || route.Source != "10.10.0.1" || route.IfName != "tapx0" || route.Metric != 20 || route.Table != "100" {
 		t.Fatalf("runtime device route = %+v, want copied route", route)
-	}
-}
-
-func TestValidateRejectsInvalidRawUDPAddresses(t *testing.T) {
-	cfg := RuntimeConfig{
-		Listeners: []model.Listener{{
-			ID:        "listener-udp",
-			Enabled:   true,
-			BindPort:  4000,
-			Transport: model.TransportUDP,
-			RawUDP: model.RawUDPSettings{
-				PeerMode:    model.UDPPeerFixed,
-				FixedPeer:   "not-an-addr",
-				BindAddress: "not-an-ip",
-			},
-		}},
-	}
-
-	err := ValidateForSave(cfg)
-	if err == nil {
-		t.Fatal("ValidateForSave() error = nil, want address errors")
-	}
-	if !strings.Contains(err.Error(), "RawUDP.FixedPeer") {
-		t.Fatalf("ValidateForSave() error = %v, want fixed peer message", err)
-	}
-	if !strings.Contains(err.Error(), "RawUDP.BindAddress") {
-		t.Fatalf("ValidateForSave() error = %v, want bind address message", err)
-	}
-}
-
-func TestValidateRejectsInvalidRawTCPBindAddress(t *testing.T) {
-	cfg := RuntimeConfig{
-		Listeners: []model.Listener{{
-			ID:        "listener-tcp",
-			Enabled:   true,
-			BindPort:  5000,
-			Transport: model.TransportTCP,
-			RawTCP: model.RawTCPSettings{
-				BindAddress: "not-an-ip",
-			},
-		}},
-	}
-
-	err := ValidateForSave(cfg)
-	if err == nil {
-		t.Fatal("ValidateForSave() error = nil, want bind address error")
-	}
-	if !strings.Contains(err.Error(), "RawTCP.BindAddress") {
-		t.Fatalf("ValidateForSave() error = %v, want bind address message", err)
 	}
 }
 
@@ -544,9 +467,7 @@ func TestValidateAllowsApplyingRawTLSDTLS(t *testing.T) {
 					Enabled:       true,
 					CertFile:      "/etc/tapx/tls/server.crt",
 					KeyFile:       "/etc/tapx/tls/server.key",
-					CAFile:        "/etc/tapx/tls/ca.crt",
 					ServerName:    "tapx.example",
-					ALPN:          []string{"tapx"},
 					MinVersion:    "1.2",
 					MaxVersion:    "1.3",
 					AllowInsecure: false,
@@ -558,13 +479,11 @@ func TestValidateAllowsApplyingRawTLSDTLS(t *testing.T) {
 			BindPort:  4401,
 			Transport: model.TransportUDP,
 			RawUDP: model.RawUDPSettings{
-				PeerMode: model.UDPPeerLearn,
 				DTLS: model.RawDTLSSettings{
 					Enabled:    true,
 					CertFile:   "/etc/tapx/dtls/server.crt",
 					KeyFile:    "/etc/tapx/dtls/server.key",
 					ServerName: "tapx.example",
-					ALPN:       []string{"tapx"},
 					MinVersion: "1.2",
 					MaxVersion: "1.3",
 					MTU:        1200,
@@ -603,7 +522,7 @@ func TestValidateRawTLSRequiresListenerCertificatePair(t *testing.T) {
 	}
 }
 
-func TestValidateRawSecurityRejectsInvalidVersionRangeAndALPN(t *testing.T) {
+func TestValidateRawSecurityRejectsInvalidVersionRange(t *testing.T) {
 	cfg := RuntimeConfig{
 		Connectors: []model.Connector{{
 			ID:        "tcp-tls",
@@ -614,7 +533,6 @@ func TestValidateRawSecurityRejectsInvalidVersionRangeAndALPN(t *testing.T) {
 			RawTCP: model.RawTCPSettings{
 				TLS: model.RawTLSSettings{
 					Enabled:    true,
-					ALPN:       []string{"bad proto"},
 					MinVersion: "1.3",
 					MaxVersion: "1.2",
 				},
@@ -627,12 +545,53 @@ func TestValidateRawSecurityRejectsInvalidVersionRangeAndALPN(t *testing.T) {
 		t.Fatal("ValidateForSave() error = nil, want raw TLS validation problems")
 	}
 	text := err.Error()
-	if !strings.Contains(text, "RawTCP.TLS.ALPN[0]") || !strings.Contains(text, "RawTCP.TLS.MaxVersion") {
-		t.Fatalf("ValidateForSave() error = %v, want ALPN and version problems", err)
+	if !strings.Contains(text, "RawTCP.TLS.MaxVersion") {
+		t.Fatalf("ValidateForSave() error = %v, want version problem", err)
 	}
 }
 
-func TestValidateClientCredentialsAndConnectorBinding(t *testing.T) {
+func TestValidateRawSecurityEnforcesEndpointRoles(t *testing.T) {
+	cfg := RuntimeConfig{
+		Listeners: []model.Listener{{
+			ID: "listener", Enabled: true, BindPort: 4400, Transport: model.TransportTCP,
+			RawTCP: model.RawTCPSettings{TLS: model.RawTLSSettings{
+				Enabled: true, CertFile: "server.crt", KeyFile: "server.key", AllowInsecure: true,
+			}},
+		}},
+		Connectors: []model.Connector{{
+			ID: "connector", Enabled: true, Remote: "tapx.example", Port: 4400, Transport: model.TransportTCP,
+			RawTCP: model.RawTCPSettings{TLS: model.RawTLSSettings{
+				Enabled: true, CertFile: "client.crt", KeyFile: "client.key",
+			}},
+		}},
+	}
+
+	err := ValidateForSave(cfg)
+	if err == nil {
+		t.Fatal("ValidateForSave() error = nil, want endpoint-role errors")
+	}
+	text := err.Error()
+	if !strings.Contains(text, "Listener[listener].RawTCP.TLS.AllowInsecure") ||
+		!strings.Contains(text, "Connector[connector].RawTCP.TLS.CertFile") {
+		t.Fatalf("ValidateForSave() error = %v, want listener/client TLS role errors", err)
+	}
+}
+
+func TestValidateDTLSVersionRangeMustIncludeDTLS12(t *testing.T) {
+	cfg := RuntimeConfig{Connectors: []model.Connector{{
+		ID: "connector", Enabled: true, Remote: "tapx.example", Port: 4400, Transport: model.TransportUDP,
+		RawUDP: model.RawUDPSettings{DTLS: model.RawDTLSSettings{
+			Enabled: true, MinVersion: "1.3", MaxVersion: "1.3",
+		}},
+	}}}
+
+	err := ValidateForSave(cfg)
+	if err == nil || !strings.Contains(err.Error(), "current DTLS transport uses DTLS 1.2") {
+		t.Fatalf("ValidateForSave() error = %v, want DTLS 1.2 range error", err)
+	}
+}
+
+func TestValidateClientAndConnectorBinding(t *testing.T) {
 	cfg := RuntimeConfig{
 		Devices: []model.Device{{ID: "tun-a", Enabled: true, Type: model.DeviceTUN, IfName: "tapx0"}},
 		Connectors: []model.Connector{{
@@ -641,12 +600,55 @@ func TestValidateClientCredentialsAndConnectorBinding(t *testing.T) {
 		}},
 		Routes: []model.Route{{ID: "route-a", Enabled: true, DeviceID: "tun-a", ConnectorID: "conn-a"}},
 		Clients: []model.Client{{
-			ID: "client-a", Enabled: true, CredentialType: "uuid", CredentialValue: "11111111-1111-4111-8111-111111111111",
+			ID: "client-a", Enabled: true, UUID: "11111111-1111-4111-8111-111111111111",
 			Binding: model.Binding{RouteID: "route-a", ConnectorID: "conn-a"},
 		}},
 	}
 	if err := ValidateForApply(cfg); err != nil {
 		t.Fatalf("ValidateForApply() error = %v", err)
+	}
+}
+
+func TestGenerateRuntimeUsesConnectorLinkBindingDevice(t *testing.T) {
+	cfg := RuntimeConfig{
+		Devices: []model.Device{{ID: "tap-a", Enabled: true, Type: model.DeviceTAP, IfName: "tapx-a", MTU: 1500}},
+		Connectors: []model.Connector{{
+			ID: "conn-a", Enabled: true, Remote: "192.0.2.10", Port: 46000, Transport: model.TransportUDP,
+		}},
+		Routes: []model.Route{{
+			ID: "route-a", Enabled: true, Priority: 10, Action: model.RouteActionBindDevice,
+			DeviceID: "tap-a", ConnectorID: "conn-a",
+		}},
+	}
+
+	runtime, err := GenerateRuntime(cfg)
+	if err != nil {
+		t.Fatalf("GenerateRuntime() error = %v", err)
+	}
+	if len(runtime.UDPPipes) != 1 || runtime.UDPPipes[0].DeviceID != "tap-a" || runtime.UDPPipes[0].RouteID != "route-a" {
+		t.Fatalf("connector pipes = %+v, want route-bound tap-a", runtime.UDPPipes)
+	}
+	if len(runtime.Connectors) != 1 || runtime.Connectors[0].Binding.DeviceID != "tap-a" {
+		t.Fatalf("connector runtime binding = %+v, want tap-a", runtime.Connectors)
+	}
+}
+
+func TestValidateRejectsConnectorRoutesToDifferentDevices(t *testing.T) {
+	cfg := RuntimeConfig{
+		Devices: []model.Device{
+			{ID: "tap-a", Enabled: true, Type: model.DeviceTAP, IfName: "tapx-a"},
+			{ID: "tap-b", Enabled: true, Type: model.DeviceTAP, IfName: "tapx-b"},
+		},
+		Connectors: []model.Connector{{ID: "conn-a", Enabled: true, Remote: "192.0.2.10", Port: 46000, Transport: model.TransportUDP}},
+		Routes: []model.Route{
+			{ID: "route-a", Enabled: true, Priority: 10, Action: model.RouteActionBindDevice, DeviceID: "tap-a", ConnectorID: "conn-a"},
+			{ID: "route-b", Enabled: true, Priority: 20, Action: model.RouteActionBindDevice, DeviceID: "tap-b", ConnectorID: "conn-a"},
+		},
+	}
+
+	err := ValidateForSave(cfg)
+	if err == nil || !strings.Contains(err.Error(), "conflicts with Route[route-b].DeviceID") {
+		t.Fatalf("ValidateForSave() error = %v, want connector route conflict", err)
 	}
 }
 
@@ -659,7 +661,7 @@ func TestValidateAcceptsProtocolClientAndMultipleListeners(t *testing.T) {
 		},
 		XrayProfiles: []model.XrayProfile{{ID: "xr-a", Enabled: true, Runtime: model.XrayEmbedded, InboundProtocol: "vless", InboundSettingsJSON: `{}`}},
 		Clients: []model.Client{{
-			ID: "client-a", Enabled: true, CredentialType: "vless", CredentialValue: "11111111-1111-4111-8111-111111111111",
+			ID: "client-a", Enabled: true,
 			UUID: "11111111-1111-4111-8111-111111111111", ListenerID: "listener-xray", ListenerIDs: []string{"listener-xray", "listener-raw"},
 			AllowedDeviceIDs: []string{"tun-a"},
 		}},
@@ -744,7 +746,7 @@ func TestValidateRejectsInvalidTrafficReset(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsInvalidClientCredentialAndConnectorConflict(t *testing.T) {
+func TestValidateRejectsInvalidClientUUIDAndConnectorConflict(t *testing.T) {
 	cfg := RuntimeConfig{
 		Devices: []model.Device{{ID: "tun-a", Enabled: true, Type: model.DeviceTUN, IfName: "tapx0"}},
 		Connectors: []model.Connector{
@@ -753,7 +755,7 @@ func TestValidateRejectsInvalidClientCredentialAndConnectorConflict(t *testing.T
 		},
 		Routes: []model.Route{{ID: "route-a", Enabled: true, DeviceID: "tun-a", ConnectorID: "conn-a"}},
 		Clients: []model.Client{{
-			ID: "client-a", Enabled: true, CredentialType: "uuid", CredentialValue: "not-a-uuid",
+			ID: "client-a", Enabled: true, UUID: "not-a-uuid",
 			Binding: model.Binding{RouteID: "route-a", ConnectorID: "conn-b"},
 		}},
 	}
@@ -762,8 +764,8 @@ func TestValidateRejectsInvalidClientCredentialAndConnectorConflict(t *testing.T
 		t.Fatalf("ValidateForApply() error = nil, want validation errors")
 	}
 	text := err.Error()
-	if !strings.Contains(text, "CredentialValue") || !strings.Contains(text, "Binding.ConnectorID") {
-		t.Fatalf("ValidateForApply() error = %v, want credential and connector conflict", err)
+	if !strings.Contains(text, "UUID") || !strings.Contains(text, "Binding.ConnectorID") {
+		t.Fatalf("ValidateForApply() error = %v, want UUID and connector conflict", err)
 	}
 }
 
@@ -1026,7 +1028,7 @@ func TestValidateRejectsInvalidXrayProfileComposition(t *testing.T) {
 			ID:                 "global",
 			Enabled:            true,
 			LogLevel:           "verbose",
-			OpenWrtBuildTarget: "mt7986",
+			OpenWrtBuildTarget: "invalid target",
 		}},
 	}
 
@@ -1055,6 +1057,27 @@ func TestValidateRejectsInvalidPanelHostPathCertificateAndTimezone(t *testing.T)
 	}
 	for _, want := range []string{"PanelDomain", "PanelBasePath", "PanelHTTPS", "Timezone"} {
 		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("ValidateForSave() error = %v, want %s", err, want)
+		}
+	}
+}
+
+func TestValidateRejectsRoutesWithoutEffectiveTrafficSelector(t *testing.T) {
+	cfg := RuntimeConfig{
+		Devices:    []model.Device{{ID: "tun-a", Enabled: true, Type: model.DeviceTUN, IfName: "tun-a"}},
+		Connectors: []model.Connector{{ID: "connector-a", Enabled: true, Transport: model.TransportUDP, Remote: "192.0.2.1", Port: 44000, Binding: model.Binding{DeviceID: "tun-a"}}},
+		Routes: []model.Route{
+			{ID: "device-only", Enabled: true, Action: model.RouteActionBindDevice, DeviceID: "tun-a"},
+			{ID: "connector-drop", Enabled: true, Action: model.RouteActionDrop, ConnectorID: "connector-a"},
+		},
+	}
+	err := ValidateForSave(cfg)
+	if err == nil {
+		t.Fatal("ValidateForSave() error = nil, want ineffective route errors")
+	}
+	text := err.Error()
+	for _, want := range []string{"Route[device-only].Match", "Route[connector-drop].Match"} {
+		if !strings.Contains(text, want) {
 			t.Fatalf("ValidateForSave() error = %v, want %s", err, want)
 		}
 	}
@@ -1298,31 +1321,21 @@ func TestValidateRejectsDisabledXrayQUICPathMTUWithAutomaticDevice(t *testing.T)
 	}
 }
 
-func TestValidateRejectsInvalidDeviceDNS(t *testing.T) {
-	cfg := RuntimeConfig{
-		Devices: []model.Device{{
-			ID:      "tun0",
-			Enabled: true,
-			Type:    model.DeviceTUN,
-			IfName:  "tapx0",
-			DNS: &model.DNSConfig{
-				Enabled:       true,
-				Nameservers:   []string{"bad-ip"},
-				SearchDomains: []string{"bad domain"},
-				Options:       []string{"bad option"},
-				OutputPath:    "relative/path",
-			},
+func TestValidateRejectsFinalMaskWithReality(t *testing.T) {
+	err := ValidateForSave(RuntimeConfig{
+		XrayProfiles: []model.XrayProfile{{
+			ID:                   "xr-reality-finalmask",
+			Enabled:              true,
+			Runtime:              model.XrayEmbedded,
+			InboundProtocol:      "vless",
+			OutboundProtocol:     "vless",
+			StreamSettingsJSON:   `{"network":"tcp","security":"reality","finalmask":{"tcp":[{"type":"noise"}]}}`,
+			InboundSettingsJSON:  `{}`,
+			OutboundSettingsJSON: `{}`,
 		}},
-	}
-
-	err := ValidateForSave(cfg)
-	if err == nil {
-		t.Fatal("ValidateForSave() error = nil, want DNS errors")
-	}
-	for _, want := range []string{"DNS.Nameservers", "DNS.SearchDomains", "DNS.Options", "DNS.OutputPath"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("ValidateForSave() error = %v, want %s", err, want)
-		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "Final Mask cannot be combined with REALITY") {
+		t.Fatalf("ValidateForSave() error = %v, want Final Mask/REALITY conflict", err)
 	}
 }
 
@@ -1558,10 +1571,6 @@ func TestGenerateRuntimeBuildsTCPPipe(t *testing.T) {
 			Transport: model.TransportTCP,
 			RawTCP: model.RawTCPSettings{
 				LengthMode:      model.TCPLength32,
-				BindInterface:   "lo",
-				BindAddress:     "127.0.0.1",
-				ReceiveBuffer:   65536,
-				SendBuffer:      131072,
 				NoDelay:         true,
 				KeepAliveSecond: 30,
 				FastOpen:        true,
@@ -1573,7 +1582,6 @@ func TestGenerateRuntimeBuildsTCPPipe(t *testing.T) {
 				TLS: model.RawTLSSettings{
 					Enabled:       true,
 					ServerName:    "tapx.example",
-					ALPN:          []string{"tapx"},
 					MinVersion:    "1.2",
 					MaxVersion:    "1.3",
 					AllowInsecure: true,
@@ -1596,22 +1604,13 @@ func TestGenerateRuntimeBuildsTCPPipe(t *testing.T) {
 	if pipe.LengthMode != model.TCPLength32 {
 		t.Fatalf("pipe length mode = %q, want uint32", pipe.LengthMode)
 	}
-	if pipe.BindInterface != "lo" {
-		t.Fatalf("pipe bind interface = %q, want lo", pipe.BindInterface)
-	}
-	if pipe.BindAddress != "127.0.0.1" {
-		t.Fatalf("pipe bind address = %q, want 127.0.0.1", pipe.BindAddress)
-	}
-	if pipe.ReceiveBuffer != 65536 || pipe.SendBuffer != 131072 {
-		t.Fatalf("pipe buffers = %d/%d, want 65536/131072", pipe.ReceiveBuffer, pipe.SendBuffer)
-	}
 	if !pipe.NoDelay || pipe.KeepAliveSecond != 30 || !pipe.FastOpen || pipe.ConnectTimeout != 3 || pipe.ReconnectSecond != 2 {
 		t.Fatalf("pipe tcp flags = nodelay:%v keepalive:%d fastopen:%v timeout:%d reconnect:%d", pipe.NoDelay, pipe.KeepAliveSecond, pipe.FastOpen, pipe.ConnectTimeout, pipe.ReconnectSecond)
 	}
 	if pipe.QueueSize != 4096 || !pipe.ZeroCopy || pipe.IdleTimeout != 90 {
 		t.Fatalf("pipe fastpath controls = %+v, want queue/zero-copy/idle timeout", pipe)
 	}
-	if !pipe.TLS.Enabled || pipe.TLS.ServerName != "tapx.example" || len(pipe.TLS.ALPN) != 1 || pipe.TLS.ALPN[0] != "tapx" {
+	if !pipe.TLS.Enabled || pipe.TLS.ServerName != "tapx.example" {
 		t.Fatalf("pipe tls = %+v, want copied TLS settings", pipe.TLS)
 	}
 	if pipe.MaxFrameSize != 1400 {
@@ -1700,6 +1699,76 @@ func TestValidateRejectsEndpointOutsideClientAllowedDevices(t *testing.T) {
 	err := ValidateForSave(cfg)
 	if err == nil || !strings.Contains(err.Error(), "AllowedDeviceIDs") {
 		t.Fatalf("ValidateForSave() error = %v, want client device restriction error", err)
+	}
+}
+
+func TestGenerateRuntimePreservesAdvancedDeviceNetworkConfig(t *testing.T) {
+	cfg := RuntimeConfig{Devices: []model.Device{{
+		ID: "tap-shared", Enabled: true, Type: model.DeviceTAP, IfName: "tapx0", MTU: 1500,
+		TapMode: model.TapModeSharedIP, AccessRole: model.AccessRoleServer,
+		DHCP: &model.DHCPConfig{Mode: model.DHCPModeMirror},
+		SharedIP: &model.SharedIPConfig{
+			Role: model.SharedIPRoleService, UplinkInterface: "eth0", AddressSource: "auto",
+			FirewallBackend: model.FirewallNFTables, HostPortPriority: true,
+			ReservedTCPPorts: []string{"22", "80-81"}, ReservedUDPPorts: []string{"53"},
+		},
+	}}}
+	runtime, err := GenerateRuntime(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.Devices) != 1 {
+		t.Fatalf("devices = %d, want 1", len(runtime.Devices))
+	}
+	device := runtime.Devices[0]
+	if device.TapMode != model.TapModeSharedIP || device.SharedIP.UplinkInterface != "eth0" {
+		t.Fatalf("advanced device config was not preserved: %+v", device)
+	}
+	device.SharedIP.ReservedTCPPorts[0] = "443"
+	if cfg.Devices[0].SharedIP.ReservedTCPPorts[0] != "22" {
+		t.Fatal("generated runtime aliases source shared-IP slices")
+	}
+}
+
+func TestValidateAdvancedDeviceModes(t *testing.T) {
+	tests := map[string]model.Device{
+		"tun rejects tap config": {
+			ID: "tun0", Enabled: true, Type: model.DeviceTUN, IfName: "tapx0",
+			DHCP: &model.DHCPConfig{Mode: model.DHCPModeOff},
+		},
+		"one arm needs rollback": {
+			ID: "tap0", Enabled: true, Type: model.DeviceTAP, IfName: "tapx0",
+			TapMode: model.TapModeOneArm, AccessRole: model.AccessRoleServer,
+			Bridge: &model.BridgeConfig{Enabled: true, Name: "br-tapx", IfName: "eth0"},
+		},
+		"dhcp pool must be ordered": {
+			ID: "tap0", Enabled: true, Type: model.DeviceTAP, IfName: "tapx0",
+			TapMode: model.TapModeTransparent, AccessRole: model.AccessRoleServer,
+			DHCP: &model.DHCPConfig{
+				Mode: model.DHCPModeServer, IPv4CIDR: "10.20.0.1/24",
+				PoolStart: "10.20.0.200", PoolEnd: "10.20.0.2", LeaseSeconds: 3600,
+			},
+		},
+		"shared service needs uplink": {
+			ID: "tap0", Enabled: true, Type: model.DeviceTAP, IfName: "tapx0",
+			TapMode: model.TapModeSharedIP, AccessRole: model.AccessRoleServer,
+			SharedIP: &model.SharedIPConfig{Role: model.SharedIPRoleService, AddressSource: "auto"},
+		},
+		"tun client cannot run relay": {
+			ID: "tun0", Enabled: true, Type: model.DeviceTUN, IfName: "tapx0",
+			AccessRole: model.AccessRoleClient,
+			TUNDHCP: &model.TUNDHCPConfig{
+				Mode: model.TUNDHCPModeClient, RelayEnabled: true,
+				RelayDownstreamInterfaces: []string{"br-lan"}, RelayServers: []string{"10.20.0.1"},
+			},
+		},
+	}
+	for name, device := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateForSave(RuntimeConfig{Devices: []model.Device{device}}); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 

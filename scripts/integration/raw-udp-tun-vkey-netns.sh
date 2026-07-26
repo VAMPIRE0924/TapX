@@ -126,7 +126,7 @@ cat >"${BUILD_DIR}/tapx-a.json" <<JSON
       "BindHost": "172.31.253.1",
       "BindPort": 44300,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "172.31.253.2:44300"},
+      "RawUDP": {},
       "Binding": {"RouteID": "route-a"}
     }
   ]
@@ -144,14 +144,14 @@ cat >"${BUILD_DIR}/tapx-b.json" <<JSON
   "Routes": [
     {"ID": "route-b", "Enabled": true, "DeviceID": "tun-b", "VKeyID": "vk-b"}
   ],
-  "Listeners": [
+  "Connectors": [
     {
       "ID": "udp-b",
       "Enabled": true,
-      "BindHost": "172.31.253.2",
-      "BindPort": 44300,
+      "Remote": "172.31.253.1",
+      "Port": 44300,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "172.31.253.1:44300"},
+      "RawUDP": {},
       "Binding": {"RouteID": "route-b"}
     }
   ]

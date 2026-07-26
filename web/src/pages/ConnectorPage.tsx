@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -73,11 +73,12 @@ import { parseObjectJSON } from '../shared/json';
 import { removeUnusedXrayProfiles, upsertXrayProfile } from '../shared/xray-profiles';
 import { booleanValue, numberValue, stringValue } from '../shared/values';
 import { safeID as safeId, uniqueID as uniqueId } from '../shared/ids';
+import { isManagedLinkAddressRemark } from '../shared/managed-objects';
+import { clearBindingReferences, relationKey } from '../shared/config-relations';
 import { TapxConnectorDtlsFields, TapxConnectorFastPathFields, TapxConnectorTlsFields } from '../features/endpoints/TapxEndpointFields';
 import { EndpointBindingFields } from '../features/endpoints/EndpointBindingFields';
-import { tapxProtocolOptions, type AddressAssignMode, type DeviceBindMode, type EndpointDeviceBinding, type EndpointRuntimeMode, type InterfaceType } from '../features/endpoints/endpoint-types';
+import { runtimeModeChangesTransportFamily, tapxProtocolOptions, type AddressAssignMode, type DeviceBindMode, type EndpointDeviceBinding, type EndpointRuntimeMode, type InterfaceType } from '../features/endpoints/endpoint-types';
 import { resolveTcpLengthMode } from '../features/endpoints/tcpLengthMode';
-import { stripTapxSocketOverrides } from '../features/endpoints/tapxRawSettings';
 import { DeviceTypeConflictError, deviceTypeConflictValues, hydrateSavedDeviceBinding, materializeEndpointAutoDevice, normalizeDeviceBinding } from '../features/endpoints/deviceBinding';
 import { materializeConnectorVKey } from '../features/endpoints/vkeyBinding';
 import { connectorIDConflicts, mergeConnectorJson } from '../features/endpoints/connectorJson';
@@ -129,7 +130,6 @@ type ConnectorRecord = TapxEndpoint & NodeOwned & {
   settings?: Record<string, unknown>;
   streamSettings?: Record<string, unknown>;
   mux?: Record<string, unknown>;
-  FastPath?: Record<string, unknown>;
   TLS?: Record<string, unknown>;
   Binding?: ConnectorBinding;
   JSONText?: string;
@@ -146,6 +146,14 @@ type ConnectorRecord = TapxEndpoint & NodeOwned & {
 type ConnectorStats = {
   rxBytes: number;
   txBytes: number;
+};
+
+type ThroughputDirection = 'upload' | 'download';
+
+type ThroughputSample = {
+  at: number;
+  direction: ThroughputDirection;
+  bps: number;
 };
 
 type ExportModalState = {
@@ -168,6 +176,7 @@ const defaultConnector: ConnectorRecord = {
   settings: defaultOutboundSettings('vless'),
   streamSettings: newStreamSlice('tcp'),
   Binding: {
+    DeviceBindingEnabled: true,
     DeviceBindMode: 'autoCreate',
     AutoCreateDevice: true,
     InterfaceType: 'tun',
@@ -179,15 +188,11 @@ const defaultConnector: ConnectorRecord = {
   },
 };
 
-let connectorDraftCache: RuntimeConfig | null = null;
-let connectorDraftDirty = false;
-
 export function ConnectorPage() {
   const { t } = useI18n();
-  const [config, setConfig] = useState<RuntimeConfig>(() => connectorDraftCache ? hydrateConnectorConfig(connectorDraftCache) : {});
+  const [config, setConfig] = useState<RuntimeConfig>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(connectorDraftDirty);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ConnectorRecord | null>(null);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
@@ -195,6 +200,14 @@ export function ConnectorPage() {
   const [diagnosticTarget, setDiagnosticTarget] = useState<ConnectorRecord | null>(null);
   const [diagnosticResults, setDiagnosticResults] = useState<Partial<Record<TestKind, ConnectorTestResult>>>({});
   const [diagnosticLoading, setDiagnosticLoading] = useState<TestKind | null>(null);
+  const [throughputDuration, setThroughputDuration] = useState(10);
+  const [throughputContinuous, setThroughputContinuous] = useState(false);
+  const [throughputDirection, setThroughputDirection] = useState<ThroughputDirection>('download');
+  const [throughputGaugeLimit, setThroughputGaugeLimit] = useState(0);
+  const [throughputPhase, setThroughputPhase] = useState<ThroughputDirection>('download');
+  const [throughputElapsedMs, setThroughputElapsedMs] = useState(0);
+  const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
+  const throughputAbortRef = useRef<AbortController | null>(null);
   const [exportModal, setExportModal] = useState<ExportModalState>({ open: false, title: '', value: '' });
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
@@ -205,6 +218,7 @@ export function ConnectorPage() {
   const [activeFormTab, setActiveFormTab] = useState('basic');
   const [jsonDirty, setJsonDirty] = useState(false);
   const [connectorStats, setConnectorStats] = useState<Record<string, ConnectorStats>>({});
+  const [activeConnectorKeys, setActiveConnectorKeys] = useState<Set<string>>(() => new Set());
   const [messageApi, messageContextHolder] = message.useMessage();
   const [form] = Form.useForm<ConnectorRecord>();
   const { nodes, scope, setScope } = useNodeScope();
@@ -218,6 +232,8 @@ export function ConnectorPage() {
     const stored = settingsToObject<{ externalXrayEnabled?: boolean; externalXrayPath?: string }>(config.Settings);
     return stored.externalXrayEnabled === true && Boolean(stored.externalXrayPath);
   }, [config.Settings]);
+
+  useEffect(() => () => throughputAbortRef.current?.abort(), []);
 
   const connectors = useMemo(() => ((config.Connectors || []) as ConnectorRecord[]), [config.Connectors]);
   const visibleConnectors = useMemo(() => filterNodeOwned(connectors, scope), [connectors, scope]);
@@ -241,6 +257,7 @@ export function ConnectorPage() {
   const protocol = String(Form.useWatch('Protocol', form) || defaultConnector.Protocol);
   const tapxSecurity = String(Form.useWatch('Security', form) || 'none');
   const bindMode = (Form.useWatch(['Binding', 'DeviceBindMode'], form) || 'autoCreate') as DeviceBindMode;
+  const deviceBindingEnabled = Form.useWatch(['Binding', 'DeviceBindingEnabled'], form) !== false;
   const linkAutoOptimize = Form.useWatch(['Binding', 'LinkAutoOptimize'], form) === true;
   const interfaceType = (Form.useWatch(['Binding', 'InterfaceType'], form) || 'tun') as InterfaceType;
   const addressConfigEnabled = Form.useWatch(['Binding', 'AddressConfigEnabled'], form) === true;
@@ -271,16 +288,6 @@ export function ConnectorPage() {
   }, []);
 
   useEffect(() => {
-    if (!dirty) return;
-    const preventUnsavedExit = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', preventUnsavedExit);
-    return () => window.removeEventListener('beforeunload', preventUnsavedExit);
-  }, [dirty]);
-
-  useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
     const poll = async () => {
@@ -288,15 +295,19 @@ export function ConnectorPage() {
         const report = await getStats();
         if (cancelled) return;
         const next: Record<string, ConnectorStats> = {};
+        const active = new Set<string>();
         for (const bucket of report.byEndpoint || []) {
           if (bucket.kind !== 'connector' && !bucket.id.startsWith('connector:')) continue;
           const id = bucket.name || bucket.id.replace(/^connector:/, '');
-          next[`${nodeIDOf(bucket)}:${id}`] = {
+          const key = `${nodeIDOf(bucket)}:${id}`;
+          active.add(key);
+          next[key] = {
             rxBytes: Number(bucket.counters?.rxBytes || 0),
             txBytes: Number(bucket.counters?.txBytes || 0),
           };
         }
         setConnectorStats(next);
+        setActiveConnectorKeys(active);
       } catch {
         // Preserve the last valid counters while the runtime is restarting.
       } finally {
@@ -314,15 +325,7 @@ export function ConnectorPage() {
     setLoading(true);
     try {
       const stored = hydrateConnectorConfig(await getRuntimeConfig());
-      if (connectorDraftDirty && connectorDraftCache) {
-        setConfig(hydrateConnectorConfig(connectorDraftCache));
-        setDirty(true);
-      } else {
-        connectorDraftCache = null;
-        connectorDraftDirty = false;
-        setConfig(stored);
-        setDirty(false);
-      }
+      setConfig(stored);
     } catch (err) {
       messageApi.error(err instanceof Error ? err.message : t('connector.loadFailed'));
     } finally {
@@ -431,42 +434,33 @@ export function ConnectorPage() {
     }
     const index = connectors.findIndex((item) => sameNodeObject(item, next));
     const nextConnectors = index < 0 ? [...connectors, next] : connectors.map((item) => (sameNodeObject(item, next) ? next : item));
-    await commitConfig({
+    const committed = await commitConfig({
       ...config,
       Devices: materialized.devices,
       Connectors: nextConnectors,
       VKeys: materializedVKey.vkeys,
       XrayProfiles: nextProfiles,
     }, t('connector.saved'));
-    setOpen(false);
+    if (committed) setOpen(false);
   }
 
-  function commitConfig(nextConfig: RuntimeConfig, successMessage?: string) {
-    const hydrated = hydrateConnectorConfig(nextConfig);
-    connectorDraftCache = hydrated;
-    connectorDraftDirty = true;
-    setConfig(hydrated);
-    setDirty(true);
-    if (successMessage) messageApi.info(t('connector.saveRequired', { message: successMessage }));
-  }
-
-  async function persistConfig() {
-    if (!dirty) return;
+  async function commitConfig(nextConfig: RuntimeConfig, successMessage?: string): Promise<boolean> {
     setSaving(true);
     try {
-      const saved = await saveRuntimeConfig(config);
-      setConfig(hydrateConnectorConfig(saved));
-      connectorDraftCache = null;
-      connectorDraftDirty = false;
-      setDirty(false);
+      const saved = await saveRuntimeConfig(nextConfig);
       try {
         await applyRuntimeConfig();
-        messageApi.success(t('connector.savedAndReloaded'));
-      } catch (err) {
-        messageApi.warning(t('connector.reloadFailed', { error: err instanceof Error ? err.message : String(err) }));
+      } catch (applyError) {
+        await saveRuntimeConfig(config);
+        await applyRuntimeConfig().catch(() => undefined);
+        throw applyError;
       }
+      setConfig(hydrateConnectorConfig(saved));
+      if (successMessage) messageApi.success(successMessage);
+      return true;
     } catch (err) {
       messageApi.error(err instanceof Error ? err.message : t('connector.saveFailed'));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -485,26 +479,15 @@ export function ConnectorPage() {
     const nextProfiles = profiles.some((item) => sameNodeObject(item, profile))
       ? profiles.map((item) => sameNodeObject(item, profile) ? profile : item)
       : [...profiles, profile];
-    commitConfig({ ...config, Connectors: nextConnectors, XrayProfiles: nextProfiles }, successMessage);
+    await commitConfig({ ...config, Connectors: nextConnectors, XrayProfiles: nextProfiles }, successMessage);
   }
 
   async function removeIntegrationConnector(current: ConnectorRecord | undefined, successMessage: string) {
     if (!current) return;
-    const owner = nodeIDOf(current);
-    const nextConnectors = connectors.filter((item) => !sameNodeObject(item, current));
-    const nextRoutes = (config.Routes || []).filter((route) => !(
-      route.ConnectorID === current.ID && nodeIDOf(route) === owner
-    ));
-    const profileInUse = [...(config.Listeners || []), ...nextConnectors].some((endpoint) => (
-      endpoint.XrayProfileID === current.XrayProfileID && nodeIDOf(endpoint) === owner
-    ));
-    const nextProfiles = (config.XrayProfiles || []).filter((profile) => !(
-      !profileInUse && profile.ID === current.XrayProfileID && nodeIDOf(profile) === owner
-    ));
-    commitConfig({ ...config, Connectors: nextConnectors, Routes: nextRoutes, XrayProfiles: nextProfiles }, successMessage);
+    await deleteConnectors([current], successMessage);
   }
 
-  function deleteConnectors(records: ConnectorRecord[]) {
+  async function deleteConnectors(records: ConnectorRecord[], successMessage = t('connector.deleted')) {
     if (records.length === 0) return;
     const keys = new Set(records.map(nodeObjectKey));
     const nextConnectors = connectors.filter((item) => !keys.has(nodeObjectKey(item)));
@@ -516,27 +499,74 @@ export function ConnectorPage() {
     const nextProfiles = (config.XrayProfiles || []).filter((profile) => (
       !removedProfileKeys.has(`${nodeIDOf(profile)}:${profile.ID}`) || profileInUse(profile)
     ));
-    const nextRoutes = (config.Routes || []).filter((route) => (
-      !route.ConnectorID || !keys.has(`${nodeIDOf(route)}:${route.ConnectorID}`)
+    const removedRoutes = (config.Routes || []).filter((route) => (
+      Boolean(route.ConnectorID && keys.has(`${nodeIDOf(route)}:${route.ConnectorID}`))
     ));
-    commitConfig({ ...config, Connectors: nextConnectors, Routes: nextRoutes, XrayProfiles: nextProfiles }, t('connector.deleted'));
-    setSelectedRowKeys([]);
+    const removedRouteKeys = new Set(removedRoutes.map((route) => relationKey(route, route.ID)));
+    const removedConnectorKeys = new Set(records.map((record) => relationKey(record, record.ID)));
+    const removedAddressKeys = new Set(removedRoutes
+      .filter((route) => route.AddressID)
+      .map((route) => `${nodeIDOf(route)}:${route.AddressID}`));
+    const nextRoutes = (config.Routes || []).filter((route) => !removedRoutes.includes(route));
+    const nextAddresses = (config.Addresses || []).filter((address) => (
+      !removedAddressKeys.has(`${nodeIDOf(address)}:${address.ID}`) || !isManagedLinkAddressRemark(address.Remark)
+    ));
+    const nextDevices = devices;
+    const nextListeners = clearBindingReferences(
+      clearBindingReferences(config.Listeners || [], 'ConnectorID', removedConnectorKeys),
+      'RouteID',
+      removedRouteKeys,
+    );
+    const nextClients = clearBindingReferences(
+      clearBindingReferences(config.Clients || [], 'ConnectorID', removedConnectorKeys),
+      'RouteID',
+      removedRouteKeys,
+    );
+    const cleanedConnectors = clearBindingReferences(
+      clearBindingReferences(nextConnectors, 'ConnectorID', removedConnectorKeys),
+      'RouteID',
+      removedRouteKeys,
+    );
+    if (await commitConfig({
+      ...config,
+      Devices: nextDevices,
+      Listeners: nextListeners,
+      Connectors: cleanedConnectors,
+      Clients: nextClients,
+      Routes: nextRoutes,
+      Addresses: nextAddresses,
+      XrayProfiles: nextProfiles,
+    }, successMessage)) {
+      setSelectedRowKeys([]);
+    }
   }
 
-  function setSelectedConnectorsEnabled(enabled: boolean) {
+  async function setSelectedConnectorsEnabled(enabled: boolean) {
     if (selectedConnectors.length === 0) return;
     const selected = new Set(selectedConnectors.map(nodeObjectKey));
     const selectedProfiles = new Set(selectedConnectors
       .filter((item) => item.XrayProfileID)
       .map((item) => `${nodeIDOf(item)}:${item.XrayProfileID}`));
-    commitConfig({
+    if (await commitConfig({
       ...config,
       Connectors: connectors.map((item) => selected.has(nodeObjectKey(item)) ? { ...item, Enabled: enabled } : item),
       XrayProfiles: (config.XrayProfiles || []).map((profile) => (
         selectedProfiles.has(`${nodeIDOf(profile)}:${profile.ID}`) ? { ...profile, Enabled: enabled } : profile
       )),
-    }, enabled ? t('connector.batchEnabled') : t('connector.batchDisabled'));
-    setSelectedRowKeys([]);
+    }, enabled ? t('connector.batchEnabled') : t('connector.batchDisabled'))) {
+      setSelectedRowKeys([]);
+    }
+  }
+
+  async function toggleEnable(record: ConnectorRecord, enabled: boolean) {
+    const profileKey = record.XrayProfileID ? `${nodeIDOf(record)}:${record.XrayProfileID}` : '';
+    await commitConfig({
+      ...config,
+      Connectors: connectors.map((item) => sameNodeObject(item, record) ? { ...item, Enabled: enabled } : item),
+      XrayProfiles: (config.XrayProfiles || []).map((profile) => (
+        profileKey && `${nodeIDOf(profile)}:${profile.ID}` === profileKey ? { ...profile, Enabled: enabled } : profile
+      )),
+    }, enabled ? t('connector.enabled') : t('connector.disabled'));
   }
 
   function exportConnectors(records: ConnectorRecord[]) {
@@ -616,6 +646,7 @@ export function ConnectorPage() {
   }
 
   function handleRuntimeModeChange(mode: RuntimeMode) {
+    if (!runtimeModeChangesTransportFamily(runtimeMode, mode)) return;
     if (mode === 'tapx') {
       form.setFieldValue('Protocol', 'raw-udp');
       form.setFieldValue('Network', 'udp');
@@ -700,8 +731,8 @@ export function ConnectorPage() {
       if (failures.length > 0) messageApi.warning(failures.join('；'));
       if (successful.size === 1) {
         const result = [...successful.values()][0];
-        if (result.confirmed) messageApi.success(result.message);
-        else messageApi.info(result.message);
+        if (result.confirmed) messageApi.success(diagnosticResultMessage(result));
+        else messageApi.info(diagnosticResultMessage(result));
       } else if (successful.size > 1) {
         messageApi.success(t('connector.testCompletedCount', { count: successful.size }));
       }
@@ -711,6 +742,9 @@ export function ConnectorPage() {
   }
 
   function openDiagnostics(record: ConnectorRecord) {
+    throughputAbortRef.current?.abort();
+    setThroughputElapsedMs(0);
+    setThroughputSamples([]);
     setDiagnosticTarget(record);
     setDiagnosticResults(record.LastTestResult ? { [record.LastTestResult.kind]: record.LastTestResult } : {});
     setDiagnosticOpen(true);
@@ -735,12 +769,87 @@ export function ConnectorPage() {
           }
           : item),
       }));
-      messageApi.success(result.message);
     } catch (err) {
       messageApi.error(errorMessage(err, t, 'connector.testFailed'));
     } finally {
       setDiagnosticLoading(null);
     }
+  }
+
+  function diagnosticResultMessage(result: ConnectorTestResult) {
+    switch (result.messageCode) {
+      case 'channel-confirmed': return t('connector.diagnosticResult.channel-confirmed');
+      case 'udp-channel-confirmed': return t('connector.diagnosticResult.udp-channel-confirmed');
+      case 'tcp-path-measured': return t('connector.diagnosticResult.tcp-path-measured');
+      case 'tcp-mss-measured': return t('connector.diagnosticResult.tcp-mss-measured');
+      case 'stream-frame-confirmed': return t('connector.diagnosticResult.stream-frame-confirmed');
+      case 'udp-path-confirmed': return t('connector.diagnosticResult.udp-path-confirmed');
+      case 'throughput-measured': return t('connector.diagnosticResult.throughput-measured');
+      default:
+        if (result.kind === 'throughput') return t('connector.diagnosticResult.throughput-measured');
+        return result.message;
+    }
+  }
+
+  async function runThroughputDiagnostic() {
+    if (!diagnosticTarget) return;
+    const controller = new AbortController();
+    throughputAbortRef.current?.abort();
+    throughputAbortRef.current = controller;
+    setDiagnosticLoading('throughput');
+    setThroughputElapsedMs(0);
+    setThroughputSamples([]);
+    let elapsedMs = 0;
+    let uploadBytes = 0;
+    let downloadBytes = 0;
+    let latestUploadBps = 0;
+    let latestDownloadBps = 0;
+    try {
+      const directions: ThroughputDirection[] = throughputContinuous ? [throughputDirection] : ['download', 'upload'];
+      for (const direction of directions) {
+        setThroughputPhase(direction);
+        let phaseElapsedMs = 0;
+        while (!controller.signal.aborted && (throughputContinuous || phaseElapsedMs < throughputDuration * 1000)) {
+          const remainingSeconds = throughputContinuous ? 1 : Math.max(0.25, Math.min(1, (throughputDuration * 1000 - phaseElapsedMs) / 1000));
+          const sample = await testConnector(
+            diagnosticTarget.ID,
+            'throughput',
+            remainingSeconds,
+            nodeIDOf(diagnosticTarget),
+            controller.signal,
+            direction,
+          );
+          const sampleDuration = Math.max(1, sample.durationMs || Math.round(remainingSeconds * 1000));
+          phaseElapsedMs += sampleDuration;
+          elapsedMs += sampleDuration;
+          uploadBytes += sample.uploadBytes || 0;
+          downloadBytes += sample.downloadBytes || 0;
+          if (direction === 'upload') latestUploadBps = sample.uploadBps || 0;
+          else latestDownloadBps = sample.downloadBps || 0;
+          const result: ConnectorTestResult = {
+            ...sample,
+            uploadBps: latestUploadBps,
+            downloadBps: latestDownloadBps,
+            uploadBytes,
+            downloadBytes,
+            durationMs: elapsedMs,
+          };
+          setThroughputElapsedMs(elapsedMs);
+          setThroughputSamples((current) => [...current.slice(-239), { at: Date.now(), direction, bps: direction === 'upload' ? latestUploadBps : latestDownloadBps }]);
+          setDiagnosticResults((current) => ({ ...current, throughput: result }));
+        }
+        if (throughputContinuous) break;
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) messageApi.error(errorMessage(err, t, 'connector.testFailed'));
+    } finally {
+      if (throughputAbortRef.current === controller) throughputAbortRef.current = null;
+      setDiagnosticLoading(null);
+    }
+  }
+
+  function stopThroughputDiagnostic() {
+    throughputAbortRef.current?.abort();
   }
 
   const moreItems: MenuProps['items'] = selectedConnectors.length > 0 ? [
@@ -829,7 +938,6 @@ export function ConnectorPage() {
           } : item;
           }),
         };
-        if (connectorDraftDirty) connectorDraftCache = next;
         return next;
       });
       setConnectorStats((current) => ({
@@ -867,33 +975,33 @@ export function ConnectorPage() {
   }
 
   const columns = useMemo<TableColumnsType<ConnectorRecord>>(() => [
-    { title: t('node.sourceNode'), key: 'ManagedNodeID', width: 150, render: (_, record) => <NodeSourceTag value={record} /> },
+    { title: 'ID', key: 'Index', width: 64, align: 'center', fixed: 'left', render: (_, _record, index) => index + 1 },
+    { title: t('node.sourceNode'), key: 'ManagedNodeID', width: 150, fixed: 'left', render: (_, record) => <NodeSourceTag value={record} /> },
     {
-      title: '#',
-      key: 'Index',
-      width: 100,
+      title: t('connector.actions'),
+      key: 'actions',
+      width: 80,
       align: 'center',
+      fixed: 'left',
       render: (_, record, index) => (
-        <div className="connector-action-cell">
-          <span>{index + 1}</span>
-          <Space size={2}>
-            <Button shape="circle" size="small" icon={<EditOutlined />} aria-label={t('connector.edit')} onClick={() => openEdit(record)} />
-            <Dropdown
-              trigger={['click']}
-              menu={{
-                items: [
-                  ...(index > 0 ? [{ key: 'top', icon: <VerticalAlignTopOutlined />, label: t('listener.moveTop'), onClick: () => moveConnector(index, 0) }] : []),
-                  { key: 'up', icon: <ArrowUpOutlined />, label: t('common.moveUp'), disabled: index === 0, onClick: () => moveConnector(index, index - 1) },
-                  { key: 'down', icon: <ArrowDownOutlined />, label: t('common.moveDown'), disabled: index === visibleConnectors.length - 1, onClick: () => moveConnector(index, index + 1) },
-                  { key: 'reset', icon: <RetweetOutlined />, label: t('connector.resetTraffic'), onClick: () => void resetTraffic([record]) },
-                  { key: 'delete', icon: <DeleteOutlined />, label: t('common.delete'), danger: true, onClick: () => confirmDelete(record) },
-                ],
-              }}
-            >
-              <Button shape="circle" size="small" icon={<MoreOutlined />} aria-label={t('connector.more')} />
-            </Dropdown>
-          </Space>
-        </div>
+        <Space size={2}>
+          <Button shape="circle" size="small" icon={<EditOutlined />} aria-label={t('connector.edit')} onClick={() => openEdit(record)} />
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: [
+                ...(index > 0 ? [{ key: 'top', icon: <VerticalAlignTopOutlined />, label: t('listener.moveTop'), onClick: () => moveConnector(index, 0) }] : []),
+                { key: 'up', icon: <ArrowUpOutlined />, label: t('common.moveUp'), disabled: index === 0, onClick: () => moveConnector(index, index - 1) },
+                { key: 'down', icon: <ArrowDownOutlined />, label: t('common.moveDown'), disabled: index === visibleConnectors.length - 1, onClick: () => moveConnector(index, index + 1) },
+                { key: 'export', icon: <ExportOutlined />, label: t('connector.export'), onClick: () => exportConnectors([record]) },
+                { key: 'reset', icon: <RetweetOutlined />, label: t('connector.resetTraffic'), onClick: () => void resetTraffic([record]) },
+                { key: 'delete', icon: <DeleteOutlined />, label: t('common.delete'), danger: true, onClick: () => confirmDelete(record) },
+              ],
+            }}
+          >
+            <Button shape="circle" size="small" icon={<MoreOutlined />} aria-label={t('connector.more')} />
+          </Dropdown>
+        </Space>
       ),
     },
     {
@@ -901,6 +1009,13 @@ export function ConnectorPage() {
       key: 'Name',
       width: 190,
       render: (_, record) => <span>{record.Name || record.ID}</span>,
+    },
+    {
+      title: t('common.enabled'),
+      key: 'Enabled',
+      align: 'center',
+      width: 80,
+      render: (_, record) => <Switch size="small" checked={record.Enabled !== false} onChange={(checked) => void toggleEnable(record, checked)} />,
     },
     {
       title: t('connector.runtimeMode'),
@@ -986,12 +1101,26 @@ export function ConnectorPage() {
         </Tooltip>
       ),
     },
-  ], [connectors, connectorStats, devices, runtimeOptions, t, visibleConnectors]);
+    {
+      title: t('common.status'),
+      key: 'Status',
+      align: 'center',
+      width: 92,
+      render: (_, record) => {
+        if (record.Enabled === false) return <Tag>{t('common.stopped')}</Tag>;
+        return activeConnectorKeys.has(nodeObjectKey(record))
+          ? <Tag color="success">{t('common.running')}</Tag>
+          : <Tag color="warning">{t('common.stopped')}</Tag>;
+      },
+    },
+  ], [activeConnectorKeys, connectors, connectorStats, devices, runtimeOptions, t, visibleConnectors]);
 
   const protocolOptions = runtimeMode === 'tapx' ? tapxProtocolOptions : outboundXrayProtocolOptions;
 
   function diagnosticContent(kind: TestKind) {
     const result = diagnosticResults[kind];
+    const isStreamTransport = Boolean(result && (result.network === 'tcp' || result.network === 'tls' || result.network.startsWith('xray')));
+    const unavailable = (value?: number, notApplicable = false) => value || (notApplicable ? t('connector.notApplicable') : t('connector.notDetected'));
     const items = result ? [
       { key: 'status', label: t('connector.diagnosticStatus'), children: <Tag color={result.confirmed ? 'green' : 'gold'}>{result.confirmed ? t('connector.confirmed') : t('connector.unconfirmed')}</Tag> },
       { key: 'target', label: t('connector.diagnosticTarget'), children: result.target || '-' },
@@ -1001,11 +1130,11 @@ export function ConnectorPage() {
         { key: 'delay', label: t('connector.controlLatency'), children: result.delayMs ? `${result.delayMs} ms` : '-' },
       ] : []),
       ...(kind === 'path-mtu' ? [
-        { key: 'pathMtu', label: t('connector.confirmedPathMtu'), children: result.confirmedPathMtu || '-' },
-        { key: 'effectiveMtu', label: t('connector.effectiveNetworkMtu'), children: result.effectiveNetworkMtu || '-' },
-        { key: 'payload', label: t('connector.maxDatagramPayload'), children: result.maxDatagramPayload || '-' },
-        { key: 'mss4', label: 'TCP MSS IPv4', children: result.tcpMssIpv4 || '-' },
-        { key: 'mss6', label: 'TCP MSS IPv6', children: result.tcpMssIpv6 || '-' },
+        { key: 'pathMtu', label: result.pathMtuSource === 'frame' ? t('connector.verifiedFrameMtu') : t('connector.confirmedPathMtu'), children: unavailable(result.confirmedPathMtu) },
+        { key: 'effectiveMtu', label: t('connector.effectiveNetworkMtu'), children: unavailable(result.effectiveNetworkMtu) },
+        { key: 'payload', label: t('connector.maxDatagramPayload'), children: unavailable(result.maxDatagramPayload, isStreamTransport) },
+        { key: 'mss4', label: 'TCP MSS IPv4', children: unavailable(result.tcpMssIpv4, result.addressFamily === 'ipv6' || result.pathMtuSource === 'frame') },
+        { key: 'mss6', label: 'TCP MSS IPv6', children: unavailable(result.tcpMssIpv6, result.addressFamily === 'ipv4' || result.pathMtuSource === 'frame') },
       ] : []),
       ...(kind === 'throughput' ? [
         { key: 'upload', label: t('connector.uploadThroughput'), children: formatBitRate(result.uploadBps || 0) },
@@ -1015,17 +1144,107 @@ export function ConnectorPage() {
         { key: 'duration', label: t('connector.testDuration'), children: result.durationMs ? `${(result.durationMs / 1000).toFixed(1)} s` : '-' },
       ] : []),
     ] : [];
+    if (kind === 'throughput') {
+      const running = diagnosticLoading === 'throughput';
+      const activeDirection = running ? throughputPhase : 'download';
+      const activeSample = running
+        ? [...throughputSamples].reverse().find((sample) => sample.direction === activeDirection)
+        : undefined;
+      const activeBps = activeSample?.bps || 0;
+      const peakBps = Math.max(activeBps, ...throughputSamples.map((sample) => sample.bps));
+      const scale = throughputGaugeLimit || (peakBps > 0 ? throughputGaugeScale(peakBps) : 1_000_000_000);
+      return (
+        <Space orientation="vertical" size="large" style={{ width: '100%' }}>
+          <div className="throughput-controls">
+            <div className="throughput-duration-control">
+              <span>{t('connector.testDuration')}</span>
+              <InputNumber
+                min={1}
+                max={3600}
+                precision={0}
+                value={throughputDuration}
+                disabled={throughputContinuous || running}
+                addonAfter="s"
+                onChange={(value) => setThroughputDuration(Number(value) || 10)}
+              />
+            </div>
+            <div className="throughput-scale-control">
+              <span>{t('connector.testScale')}</span>
+              <Select
+                value={throughputGaugeLimit}
+                disabled={running}
+                options={[
+                  { label: t('connector.autoScale'), value: 0 },
+                  { label: '10 Mbps', value: 10_000_000 },
+                  { label: '100 Mbps', value: 100_000_000 },
+                  { label: '1 Gbps', value: 1_000_000_000 },
+                  { label: '2.5 Gbps', value: 2_500_000_000 },
+                  { label: '10 Gbps', value: 10_000_000_000 },
+                  { label: '100 Gbps', value: 100_000_000_000 },
+                ]}
+                onChange={setThroughputGaugeLimit}
+              />
+            </div>
+            <Space>
+              <Switch checked={throughputContinuous} disabled={running} onChange={setThroughputContinuous} />
+              <span>{t('connector.continuousTest')}</span>
+            </Space>
+            {throughputContinuous && (
+              <Radio.Group
+                optionType="button"
+                buttonStyle="solid"
+                value={throughputDirection}
+                disabled={running}
+                options={[
+                  { label: t('connector.download'), value: 'download' },
+                  { label: t('connector.upload'), value: 'upload' },
+                ]}
+                onChange={(event) => setThroughputDirection(event.target.value as ThroughputDirection)}
+              />
+            )}
+            {running
+              ? <Button danger icon={<StopOutlined />} onClick={stopThroughputDiagnostic}>{t('connector.stopThroughputTest')}</Button>
+              : <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => void runThroughputDiagnostic()}>{t('connector.startThroughputTest')}</Button>}
+          </div>
+          <div className="throughput-speedometer">
+            <ThroughputGauge
+              label={activeDirection === 'upload' ? t('connector.uploadThroughput') : t('connector.downloadThroughput')}
+              direction={activeDirection}
+              value={activeBps}
+              scale={scale}
+            />
+          </div>
+          <div className="throughput-progress-text">
+            {running
+              ? t(activeDirection === 'upload' ? 'connector.testingUploadThroughput' : 'connector.testingDownloadThroughput')
+              : result ? diagnosticResultMessage(result) : t('connector.noDiagnosticResult')}
+            {(running || result) && <span>{t('connector.elapsedTime')}: {(throughputElapsedMs / 1000).toFixed(0)} s</span>}
+          </div>
+          {!running && result && throughputSamples.length > 0 && (
+            <ThroughputHistoryChart
+              samples={throughputSamples}
+              result={result}
+              uploadLabel={t('connector.upload')}
+              downloadLabel={t('connector.download')}
+              durationLabel={t('connector.testDuration')}
+              uploadDataLabel={t('connector.uploadData')}
+              downloadDataLabel={t('connector.downloadData')}
+            />
+          )}
+        </Space>
+      );
+    }
     return (
       <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
         <Alert type="info" showIcon title={kind === 'channel'
           ? t('connector.channelTestHelp')
-          : kind === 'path-mtu' ? t('connector.pathMtuTestHelp') : t('connector.throughputTestHelp')} />
+          : t('connector.pathMtuTestHelp')} />
         <Button type="primary" loading={diagnosticLoading === kind} disabled={diagnosticLoading !== null && diagnosticLoading !== kind} onClick={() => void runDiagnostic(kind)}>
-          {kind === 'throughput' ? t('connector.startThroughputTest') : t('connector.startDiagnostic')}
+          {t('connector.startDiagnostic')}
         </Button>
         {result ? <>
           <Descriptions bordered size="small" column={2} items={items} />
-          <Alert type={result.confirmed ? 'success' : 'warning'} showIcon title={result.message} />
+          <Alert type={result.confirmed ? 'success' : 'warning'} showIcon title={diagnosticResultMessage(result)} />
         </> : <span className="criterion-empty">{t('connector.noDiagnosticResult')}</span>}
       </Space>
     );
@@ -1034,11 +1253,6 @@ export function ConnectorPage() {
   return (
     <div className="connector-page">
       {messageContextHolder}
-      <Card hoverable className="connector-save-card">
-        <Space wrap>
-          <Button type="primary" loading={saving} disabled={!dirty} onClick={() => void persistConfig()}>{t('common.save')}</Button>
-        </Space>
-      </Card>
       <Card hoverable>
         <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
           <Row gutter={[12, 12]} align="middle" justify="space-between">
@@ -1094,7 +1308,10 @@ export function ConnectorPage() {
         footer={null}
         width={760}
         destroyOnHidden
-        onCancel={() => setDiagnosticOpen(false)}
+        onCancel={() => {
+          throughputAbortRef.current?.abort();
+          setDiagnosticOpen(false);
+        }}
       >
         <Tabs
           items={[
@@ -1298,10 +1515,13 @@ export function ConnectorPage() {
   function bindingTab() {
     return (
       <EndpointBindingFields
+        bindingEnabled={deviceBindingEnabled}
         bindMode={bindMode}
         linkAutoOptimize={linkAutoOptimize}
         addressConfigEnabled={addressConfigEnabled}
         addressAssignMode={addressAssignMode}
+        interfaceType={interfaceType}
+        role="connector"
         deviceOptions={deviceOptions}
         addressPlaceholders={{ ipv4: '10.10.0.2/24', ipv6: 'fd00:10:10::2/64', gateway: '10.10.0.1' }}
       />
@@ -1338,10 +1558,9 @@ function normalizeForSave(record: ConnectorRecord): ConnectorRecord {
   const runtime = record.RuntimeMode || 'embedded-xray';
   const stream = runtime === 'tapx' ? undefined : (record.streamSettings || (canEnableStream(record.Protocol || '') ? newStreamSlice(record.Network || 'tcp') : undefined));
   const settings = record.settings || {};
-  const fastPath = record.FastPath || {};
   const tls = record.TLS || {};
-  const rawUDP = stripTapxSocketOverrides(record.RawUDP || {});
-  const rawTCP = stripTapxSocketOverrides(record.RawTCP || {});
+  const rawUDP = record.RawUDP || {};
+  const rawTCP = record.RawTCP || {};
   const now = nowSecond();
   return {
     ...record,
@@ -1355,16 +1574,15 @@ function normalizeForSave(record: ConnectorRecord): ConnectorRecord {
     streamSettings: stream,
     RawUDP: runtime === 'tapx' && record.Protocol === 'raw-udp' ? {
       ...rawUDP,
-      Workers: numberValue(rawUDP.Workers, numberValue(fastPath.WorkerThreads)),
-      QueueSize: numberValue(rawUDP.QueueSize, numberValue(fastPath.QueueSize)),
-      ZeroCopy: booleanValue(rawUDP.ZeroCopy, booleanValue(fastPath.ZeroCopy)),
-      ConnectTimeout: numberValue(rawUDP.ConnectTimeout, numberValue(fastPath.ConnectTimeout)),
-      IdleTimeout: numberValue(rawUDP.IdleTimeout, numberValue(fastPath.IdleTimeout)),
+      Workers: numberValue(rawUDP.Workers),
+      QueueSize: numberValue(rawUDP.QueueSize),
+      ZeroCopy: booleanValue(rawUDP.ZeroCopy),
+      ConnectTimeout: numberValue(rawUDP.ConnectTimeout),
+      IdleTimeout: numberValue(rawUDP.IdleTimeout),
       DTLS: {
         ...rawUDP.DTLS,
         Enabled: record.Security === 'dtls',
         ServerName: stringValue(tls.ServerName, rawUDP.DTLS?.ServerName),
-        ALPN: [],
         MinVersion: stringValue(tls.MinVersion, rawUDP.DTLS?.MinVersion),
         MaxVersion: stringValue(tls.MaxVersion, rawUDP.DTLS?.MaxVersion),
         AllowInsecure: booleanValue(tls.AllowInsecure, rawUDP.DTLS?.AllowInsecure),
@@ -1374,23 +1592,18 @@ function normalizeForSave(record: ConnectorRecord): ConnectorRecord {
     } : rawUDP,
     RawTCP: runtime === 'tapx' && record.Protocol === 'raw-tcp' ? {
       ...rawTCP,
-      LengthMode: resolveTcpLengthMode({
-        mode: rawTCP.LengthMode,
-        legacyPrefix: fastPath.TcpLengthPrefix,
-        stored: fastPath.TcpLengthMode,
-      }),
-      NoDelay: booleanValue(rawTCP.NoDelay, booleanValue(fastPath.TcpNoDelay)),
-      KeepAliveSecond: numberValue(rawTCP.KeepAliveSecond, numberValue(fastPath.KeepAliveInterval)),
-      QueueSize: numberValue(rawTCP.QueueSize, numberValue(fastPath.QueueSize)),
-      ZeroCopy: booleanValue(rawTCP.ZeroCopy, booleanValue(fastPath.ZeroCopy)),
-      IdleTimeout: numberValue(rawTCP.IdleTimeout, numberValue(fastPath.IdleTimeout)),
-      Workers: numberValue(rawTCP.Workers, numberValue(fastPath.WorkerThreads)),
-      ConnectTimeout: numberValue(rawTCP.ConnectTimeout, numberValue(fastPath.ConnectTimeout)),
+      LengthMode: resolveTcpLengthMode({ mode: rawTCP.LengthMode }),
+      NoDelay: booleanValue(rawTCP.NoDelay),
+      KeepAliveSecond: numberValue(rawTCP.KeepAliveSecond),
+      QueueSize: numberValue(rawTCP.QueueSize),
+      ZeroCopy: booleanValue(rawTCP.ZeroCopy),
+      IdleTimeout: numberValue(rawTCP.IdleTimeout),
+      Workers: numberValue(rawTCP.Workers),
+      ConnectTimeout: numberValue(rawTCP.ConnectTimeout),
       TLS: {
         ...rawTCP.TLS,
         Enabled: record.Security === 'tls',
         ServerName: stringValue(tls.ServerName, rawTCP.TLS?.ServerName),
-        ALPN: [],
         MinVersion: stringValue(tls.MinVersion, rawTCP.TLS?.MinVersion),
         MaxVersion: stringValue(tls.MaxVersion, rawTCP.TLS?.MaxVersion),
         AllowInsecure: booleanValue(tls.AllowInsecure, rawTCP.TLS?.AllowInsecure),
@@ -1671,6 +1884,172 @@ function endpointAddress(record: ConnectorRecord): string {
   const port = record.Port || Number(record.settings?.port || 0);
   if (!host) return '-';
   return port ? `${host}:${port}` : host;
+}
+
+function ThroughputGauge({ label, direction, value, scale }: { label: string; direction: ThroughputDirection; value: number; scale: number }) {
+  const progress = speedGaugeProgress(value, scale);
+  const needleAngle = -130 + progress * 260;
+  const needle = gaugeNeedlePoints(130, 124, 68, needleAngle);
+  const marks = speedGaugeMarks(scale);
+  const valueMbps = value / 1_000_000;
+  const speedGradientID = `throughput-speed-gradient-${direction}`;
+  return (
+    <div className="throughput-gauge">
+      <svg className="throughput-dial" viewBox="0 0 260 222" role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={scale} aria-valuenow={value}>
+        <defs>
+          <linearGradient id={speedGradientID} x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor={`var(--speed-${direction}-start)`} />
+            <stop offset="48%" stopColor={`var(--speed-${direction}-middle)`} />
+            <stop offset="100%" stopColor={`var(--speed-${direction}-end)`} />
+          </linearGradient>
+          <linearGradient id="throughput-needle-gradient" x1="0" y1="1" x2="1" y2="0">
+            <stop offset="0%" stopColor="var(--speed-needle-start)" />
+            <stop offset="100%" stopColor="var(--speed-needle-end)" />
+          </linearGradient>
+        </defs>
+        <path d={gaugeArcPath(130, 124, 96, -130, 130)} className="throughput-dial-track" />
+        <path
+          d={gaugeArcPath(130, 124, 96, -130, needleAngle)}
+          className="throughput-dial-spectrum"
+          stroke={`url(#${speedGradientID})`}
+        />
+        {marks.map((mark, index) => {
+          const angle = -130 + index / (marks.length - 1) * 260;
+          const tickOuter = polarPoint(130, 124, 84, angle);
+          const tickInner = polarPoint(130, 124, 79, angle);
+          const textPoint = polarPoint(130, 124, 69, angle);
+          const active = index / (marks.length - 1) <= progress;
+          return <g key={`${mark}-${index}`}>
+            <line x1={tickInner.x} y1={tickInner.y} x2={tickOuter.x} y2={tickOuter.y} className={`throughput-tick major${active ? ' active' : ''}`} />
+            <text x={textPoint.x} y={textPoint.y + 3} textAnchor="middle" className={`throughput-mark-label${active ? ' active' : ''}`}>{formatGaugeMark(mark)}</text>
+          </g>;
+        })}
+        <polygon points={needle} className="throughput-needle" />
+        <text x="130" y="178" textAnchor="middle" className="throughput-dial-number">{formatGaugeSpeed(valueMbps)}</text>
+        <text x="130" y="200" textAnchor="middle" className={`throughput-dial-label ${direction}`}>
+          {direction === 'upload' ? '↑' : '↓'} Mbps
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+function polarPoint(cx: number, cy: number, radius: number, angle: number) {
+  const radians = (angle - 90) * Math.PI / 180;
+  return { x: cx + radius * Math.cos(radians), y: cy + radius * Math.sin(radians) };
+}
+
+function gaugeArcPath(cx: number, cy: number, radius: number, startAngle: number, endAngle: number) {
+  const start = polarPoint(cx, cy, radius, startAngle);
+  const end = polarPoint(cx, cy, radius, endAngle);
+  const largeArc = endAngle - startAngle <= 180 ? 0 : 1;
+  return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArc} 1 ${end.x} ${end.y}`;
+}
+
+function gaugeNeedlePoints(cx: number, cy: number, length: number, angle: number) {
+  const radians = (angle - 90) * Math.PI / 180;
+  const dx = Math.cos(radians);
+  const dy = Math.sin(radians);
+  const px = -dy;
+  const py = dx;
+  const baseX = cx;
+  const baseY = cy;
+  const tipX = cx + dx * length;
+  const tipY = cy + dy * length;
+  return [
+    `${baseX + px * 5},${baseY + py * 5}`,
+    `${tipX + px * 2},${tipY + py * 2}`,
+    `${tipX - px * 2},${tipY - py * 2}`,
+    `${baseX - px * 5},${baseY - py * 5}`,
+  ].join(' ');
+}
+
+function speedGaugeMarks(scale: number) {
+  const scaleMbps = scale / 1_000_000;
+  return [0, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1].map((ratio) => scaleMbps * ratio);
+}
+
+function speedGaugeProgress(value: number, scale: number) {
+  const valueMbps = Math.max(0, value / 1_000_000);
+  const marks = speedGaugeMarks(scale);
+  if (valueMbps >= marks.at(-1)!) return 1;
+  const upperIndex = marks.findIndex((mark) => valueMbps <= mark);
+  if (upperIndex <= 0) return 0;
+  const lower = marks[upperIndex - 1];
+  const upper = marks[upperIndex];
+  return ((upperIndex - 1) + (valueMbps - lower) / Math.max(0.0001, upper - lower)) / (marks.length - 1);
+}
+
+function formatGaugeMark(valueMbps: number) {
+  if (valueMbps > 1000) return `${Number((valueMbps / 1000).toFixed(1))}G`;
+  if (valueMbps >= 10) return valueMbps.toFixed(0);
+  if (valueMbps >= 1) return Number(valueMbps.toFixed(1));
+  return Number(valueMbps.toFixed(2));
+}
+
+function formatGaugeSpeed(valueMbps: number) {
+  if (!Number.isFinite(valueMbps) || valueMbps <= 0) return '0.00';
+  if (valueMbps >= 1000) return valueMbps.toFixed(1);
+  return valueMbps.toFixed(2);
+}
+
+function ThroughputHistoryChart({ samples, result, uploadLabel, downloadLabel, durationLabel, uploadDataLabel, downloadDataLabel }: {
+  samples: ThroughputSample[];
+  result: ConnectorTestResult;
+  uploadLabel: string;
+  downloadLabel: string;
+  durationLabel: string;
+  uploadDataLabel: string;
+  downloadDataLabel: string;
+}) {
+  const renderSeries = (direction: ThroughputDirection, label: string, value: number) => {
+    const series = samples.filter((sample) => sample.direction === direction);
+    const width = 560;
+    const height = 84;
+    const inset = 4;
+    const maximum = Math.max(1, ...series.map((sample) => sample.bps));
+    const points = series.map((sample, index) => {
+      const x = inset + index / Math.max(1, series.length - 1) * (width - inset * 2);
+      const y = height - inset - sample.bps / maximum * (height - inset * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    const area = points ? `${inset},${height - inset} ${points} ${width - inset},${height - inset}` : '';
+    return (
+      <div className={`throughput-result-row ${direction}`}>
+        <div className="throughput-result-value">
+          <span>{label}/Mbps</span>
+          <strong>{formatGaugeSpeed(value / 1_000_000)}</strong>
+        </div>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} throughput history`}>
+          <defs>
+            <linearGradient id={`throughput-area-${direction}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={`var(--speed-${direction}-end)`} stopOpacity="0.28" />
+              <stop offset="100%" stopColor={`var(--speed-${direction}-end)`} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          {[0.25, 0.5, 0.75].map((ratio) => <line key={ratio} x1="0" x2={width} y1={height * ratio} y2={height * ratio} className="throughput-grid" />)}
+          {area && <polygon points={area} fill={`url(#throughput-area-${direction})`} />}
+          {points && <polyline points={points} className={`throughput-line ${direction}`} />}
+        </svg>
+      </div>
+    );
+  };
+  return (
+    <div className="throughput-result">
+      {renderSeries('download', downloadLabel, result.downloadBps || 0)}
+      {renderSeries('upload', uploadLabel, result.uploadBps || 0)}
+      <div className="throughput-result-meta">
+        <span>{downloadDataLabel}<strong>{formatBytes(result.downloadBytes || 0)}</strong></span>
+        <span>{uploadDataLabel}<strong>{formatBytes(result.uploadBytes || 0)}</strong></span>
+        <span>{durationLabel}<strong>{result.durationMs ? `${(result.durationMs / 1000).toFixed(1)} s` : '-'}</strong></span>
+      </div>
+    </div>
+  );
+}
+
+function throughputGaugeScale(value: number): number {
+  const scales = [10_000_000, 100_000_000, 1_000_000_000, 2_500_000_000, 10_000_000_000, 100_000_000_000];
+  return scales.find((scale) => value <= scale) || Math.max(value, scales[scales.length - 1]);
 }
 
 function formatBitRate(bitsPerSecond: number): string {

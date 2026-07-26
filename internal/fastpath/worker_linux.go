@@ -136,11 +136,15 @@ type UDPConfig struct {
 	// headers but excluding the outer IP/UDP headers.
 	MaxDatagramPayload     uint32
 	PeerMode               UDPPeerMode
+	InitialHandshake       bool
+	KeepAliveInterval      uint32
+	IdleTimeout            uint32
 	AddressGuardRemote     bool
 	Peer                   netip.AddrPort
 	DeviceToNetworkRateBPS uint64
 	NetworkToDeviceRateBPS uint64
 	VKey                   []byte
+	AddressResponse        []byte
 	AddressGuard           AddressGuard
 	Counters               *Counters
 }
@@ -151,6 +155,7 @@ type TCPConfig struct {
 	FrameKind              FrameKind
 	MaxFrameSize           uint32
 	LengthMode             TCPLengthMode
+	IdleTimeout            uint32
 	AddressGuardRemote     bool
 	DeviceToNetworkRateBPS uint64
 	NetworkToDeviceRateBPS uint64
@@ -159,8 +164,26 @@ type TCPConfig struct {
 	Counters               *Counters
 }
 
+type DeviceSwitchPortConfig struct {
+	FD     int
+	Routes AddressGuard
+}
+
+type DeviceSwitchConfig struct {
+	DeviceFD     int
+	FrameKind    FrameKind
+	MaxFrameSize uint32
+	Ports        []DeviceSwitchPortConfig
+	Counters     *Counters
+}
+
 type Worker struct {
 	ptr      *C.struct_tapx_worker
+	counters *Counters
+}
+
+type DeviceSwitch struct {
+	ptr      *C.struct_tapx_device_switch
 	counters *Counters
 }
 
@@ -176,19 +199,6 @@ func FrameKindFromDevice(deviceType model.DeviceType) (FrameKind, error) {
 		return FrameTAP, nil
 	default:
 		return 0, fmt.Errorf("fastpath: unsupported device type %q", deviceType)
-	}
-}
-
-func PeerModeFromModel(mode model.UDPPeerMode) (UDPPeerMode, error) {
-	switch mode {
-	case "", model.UDPPeerAny:
-		return UDPPeerAny, nil
-	case model.UDPPeerFixed:
-		return UDPPeerFixed, nil
-	case model.UDPPeerLearn:
-		return UDPPeerLearn, nil
-	default:
-		return 0, fmt.Errorf("fastpath: unsupported udp peer mode %q", mode)
 	}
 }
 
@@ -218,6 +228,11 @@ func StartUDPPipe(cfg UDPConfig) (*Worker, error) {
 	c.max_frame_size = C.uint32_t(cfg.MaxFrameSize)
 	c.max_datagram_payload = C.uint32_t(cfg.MaxDatagramPayload)
 	c.peer_mode = C.uint32_t(cfg.PeerMode)
+	if cfg.InitialHandshake {
+		c.initial_handshake = 1
+	}
+	c.keepalive_interval_ms = C.uint32_t(cfg.KeepAliveInterval)
+	c.idle_timeout_ms = C.uint32_t(cfg.IdleTimeout)
 	if cfg.AddressGuardRemote {
 		c.address_guard_remote = 1
 	}
@@ -239,6 +254,19 @@ func StartUDPPipe(cfg UDPConfig) (*Worker, error) {
 		return nil, err
 	}
 	defer freeVKey()
+	var freeAddressResponse func()
+	if len(cfg.AddressResponse) > 0 {
+		ptr := C.CBytes(cfg.AddressResponse)
+		if ptr == nil {
+			return nil, errors.New("fastpath: allocate UDP address response")
+		}
+		c.address_response = (*C.uint8_t)(ptr)
+		c.address_response_len = C.size_t(len(cfg.AddressResponse))
+		freeAddressResponse = func() { C.free(ptr) }
+	} else {
+		freeAddressResponse = func() {}
+	}
+	defer freeAddressResponse()
 
 	var ptr *C.struct_tapx_worker
 	rc := C.tapx_udp_pipe_start(&c, &ptr)
@@ -262,6 +290,7 @@ func StartTCPPipe(cfg TCPConfig) (*Worker, error) {
 	c.frame_kind = C.uint32_t(cfg.FrameKind)
 	c.max_frame_size = C.uint32_t(cfg.MaxFrameSize)
 	c.length_mode = C.uint32_t(cfg.LengthMode)
+	c.idle_timeout_ms = C.uint32_t(cfg.IdleTimeout)
 	if cfg.AddressGuardRemote {
 		c.address_guard_remote = 1
 	}
@@ -287,6 +316,58 @@ func StartTCPPipe(cfg TCPConfig) (*Worker, error) {
 	return &Worker{ptr: ptr, counters: cfg.Counters}, nil
 }
 
+func StartDeviceSwitch(cfg DeviceSwitchConfig) (*DeviceSwitch, error) {
+	if len(cfg.Ports) == 0 {
+		return nil, errors.New("fastpath: device switch requires at least one port")
+	}
+	if cfg.Counters == nil {
+		cfg.Counters = NewCounters()
+	}
+	if cfg.Counters.ptr == nil {
+		return nil, errors.New("fastpath: counters are closed")
+	}
+	portsPtr := C.calloc(C.size_t(len(cfg.Ports)), C.size_t(C.sizeof_struct_tapx_device_switch_port))
+	if portsPtr == nil {
+		return nil, errors.New("fastpath: allocate device switch ports")
+	}
+	defer C.free(portsPtr)
+	ports := unsafe.Slice((*C.struct_tapx_device_switch_port)(portsPtr), len(cfg.Ports))
+	cleanups := make([]func(), 0, len(cfg.Ports))
+	defer func() {
+		for index := len(cleanups) - 1; index >= 0; index-- {
+			cleanups[index]()
+		}
+	}()
+	for index, port := range cfg.Ports {
+		ports[index].fd = C.int(port.FD)
+		var guard C.struct_tapx_address_guard
+		cleanup, err := fillAddressGuard(&guard, AddressGuard{
+			IPv4Prefixes: port.Routes.IPv4Prefixes,
+			IPv6Prefixes: port.Routes.IPv6Prefixes,
+		})
+		if err != nil {
+			return nil, err
+		}
+		cleanups = append(cleanups, cleanup)
+		ports[index].ipv4_prefixes = guard.ipv4_prefixes
+		ports[index].ipv4_prefix_count = guard.ipv4_prefix_count
+		ports[index].ipv6_prefixes = guard.ipv6_prefixes
+		ports[index].ipv6_prefix_count = guard.ipv6_prefix_count
+	}
+	config := C.struct_tapx_device_switch_config{
+		device_fd: C.int(cfg.DeviceFD), frame_kind: C.uint32_t(cfg.FrameKind),
+		max_frame_size: C.uint32_t(cfg.MaxFrameSize),
+		ports:          (*C.struct_tapx_device_switch_port)(portsPtr), port_count: C.size_t(len(cfg.Ports)),
+		counters: cfg.Counters.ptr,
+	}
+	var ptr *C.struct_tapx_device_switch
+	rc := C.tapx_device_switch_start(&config, &ptr)
+	if rc != 0 {
+		return nil, errnoError("start device switch", rc)
+	}
+	return &DeviceSwitch{ptr: ptr, counters: cfg.Counters}, nil
+}
+
 func (w *Worker) Stop() error {
 	if w == nil || w.ptr == nil {
 		return nil
@@ -304,6 +385,25 @@ func (w *Worker) Counters() CountersSnapshot {
 		return CountersSnapshot{}
 	}
 	return w.counters.Snapshot()
+}
+
+func (s *DeviceSwitch) Stop() error {
+	if s == nil || s.ptr == nil {
+		return nil
+	}
+	rc := C.tapx_device_switch_stop(s.ptr)
+	s.ptr = nil
+	if rc != 0 {
+		return errnoError("stop device switch", rc)
+	}
+	return nil
+}
+
+func (s *DeviceSwitch) Counters() CountersSnapshot {
+	if s == nil || s.counters == nil {
+		return CountersSnapshot{}
+	}
+	return s.counters.Snapshot()
 }
 
 func fillSockaddr(c *C.struct_tapx_udp_pipe_config, peer netip.AddrPort) error {

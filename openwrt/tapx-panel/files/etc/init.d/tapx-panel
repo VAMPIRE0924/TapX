@@ -34,10 +34,10 @@ start_service() {
 		echo "tapx-panel: initial panel setup is incomplete" >&2
 		return 1
 	}
-	[ -n "$listen_interface" ] && [ -e "/sys/class/net/$listen_interface" ] || {
-		echo "tapx-panel: select an existing listen interface" >&2
+	if [ -n "$listen_interface" ] && [ ! -e "/sys/class/net/$listen_interface" ]; then
+		echo "tapx-panel: listen interface does not exist: $listen_interface" >&2
 		return 1
-	}
+	fi
 	case "$listen_port" in
 		''|*[!0-9]*)
 			echo "tapx-panel: listen port must be an integer" >&2

@@ -17,6 +17,7 @@ import (
 	"tapx/internal/config"
 	"tapx/internal/core"
 	"tapx/internal/model"
+	"tapx/internal/netguard"
 )
 
 const (
@@ -103,9 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/dashboard", s.handleDashboard)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("GET /api/server/interfaces", s.handleSystemInterfaces)
-	mux.HandleFunc("GET /api/system/interfaces", s.handleSystemInterfaces)
 	mux.HandleFunc("POST /api/connectors/test", s.handleConnectorTest)
-	mux.HandleFunc("GET /panel/api/server/interfaces", s.handleSystemInterfaces)
 	mux.HandleFunc("GET /api/templates/raw-pair", s.handleRawPairTemplate)
 	mux.HandleFunc("/api/share/clients/", s.handleClientShare)
 	mux.HandleFunc("/api/clients/", s.handleClientTraffic)
@@ -113,21 +112,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/listeners/", s.handleListenerTraffic)
 	mux.HandleFunc("GET /api/xray/external/status", s.handleXrayExternalStatus)
 	mux.HandleFunc("GET /api/xray/vless-encryption", s.handleVlessEncryption)
-	mux.HandleFunc("GET /panel/api/server/getNewVlessEnc", s.handleVlessEncryption)
 	mux.HandleFunc("GET /api/xray/reality/x25519", s.handleRealityX25519)
-	mux.HandleFunc("GET /panel/api/server/getNewX25519Cert", s.handleRealityX25519)
 	mux.HandleFunc("GET /api/xray/reality/mldsa65", s.handleRealityMLDSA65)
-	mux.HandleFunc("GET /panel/api/server/getNewmldsa65", s.handleRealityMLDSA65)
 	mux.HandleFunc("POST /api/xray/tls/ech", s.handleTLSECH)
-	mux.HandleFunc("POST /panel/api/server/getNewEchCert", s.handleTLSECH)
 	mux.HandleFunc("POST /api/xray/tls/cert-hash", s.handleTLSCertHash)
-	mux.HandleFunc("POST /panel/api/server/getCertHash", s.handleTLSCertHash)
 	mux.HandleFunc("POST /api/xray/tls/remote-cert-hash", s.handleTLSRemoteCertHash)
-	mux.HandleFunc("POST /panel/api/server/getRemoteCertHash", s.handleTLSRemoteCertHash)
 	mux.HandleFunc("POST /api/xray/reality/scan", s.handleRealityScanTarget)
-	mux.HandleFunc("POST /panel/api/server/scanRealityTarget", s.handleRealityScanTarget)
 	mux.HandleFunc("POST /api/xray/reality/scan-many", s.handleRealityScanTargets)
-	mux.HandleFunc("POST /panel/api/server/scanRealityTargets", s.handleRealityScanTargets)
 	mux.HandleFunc("/api/integrations/warp/", s.handleWarpIntegration)
 	mux.HandleFunc("/api/integrations/nord/", s.handleNordIntegration)
 	mux.HandleFunc("POST /api/xray/external/upload", s.handleXrayExternalUpload)
@@ -248,6 +239,7 @@ func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               true,
+		"panelName":        auth.PanelName,
 		"authEnabled":      auth.Enabled,
 		"authenticated":    authenticated,
 		"username":         username,
@@ -755,7 +747,7 @@ func decodeConfig(r *http.Request) (config.RuntimeConfig, error) {
 		return config.RuntimeConfig{}, err
 	}
 	var cfg config.RuntimeConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	if err := strictUnmarshal(raw, &cfg); err != nil {
 		return config.RuntimeConfig{}, err
 	}
 	return cfg, nil
@@ -832,6 +824,8 @@ func errorStatus(err error) int {
 		status = http.StatusBadRequest
 	case errors.Is(err, ErrNotFound):
 		status = http.StatusNotFound
+	case isNetworkConflict(err):
+		status = http.StatusConflict
 	case config.IsValidationError(err):
 		status = http.StatusUnprocessableEntity
 	}
@@ -847,7 +841,17 @@ func writeErrorStatus(w http.ResponseWriter, status int, err error) {
 	if errors.As(err, &validation) {
 		payload["problems"] = validation.Problems
 	}
+	var conflict *netguard.ConflictError
+	if errors.As(err, &conflict) {
+		payload["code"] = "network_conflict"
+		payload["conflicts"] = conflict.Problems
+	}
 	writeJSON(w, status, payload)
+}
+
+func isNetworkConflict(err error) bool {
+	var conflict *netguard.ConflictError
+	return errors.As(err, &conflict)
 }
 
 func writeRuntimeApplyError(w http.ResponseWriter, err error, state RuntimeState) {
@@ -855,6 +859,11 @@ func writeRuntimeApplyError(w http.ResponseWriter, err error, state RuntimeState
 		"ok":    false,
 		"error": err.Error(),
 		"state": state,
+	}
+	var conflict *netguard.ConflictError
+	if errors.As(err, &conflict) {
+		payload["code"] = "network_conflict"
+		payload["conflicts"] = conflict.Problems
 	}
 	writeJSON(w, errorStatus(err), payload)
 }

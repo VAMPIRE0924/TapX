@@ -168,28 +168,14 @@ function vlessToWire(input: JsonObject): JsonObject {
 }
 
 function vlessFromWire(input: JsonObject): JsonObject {
-  let address = stringValue(input.address);
-  let port = numberValue(input.port, 443);
-  let id = stringValue(input.id);
-  let flow = stringValue(input.flow);
-  let encryption = stringValue(input.encryption, 'none');
-  const legacy = objectValue(arrayValue(input.vnext)[0]);
-  if (Object.keys(legacy).length > 0) {
-    const user = objectValue(arrayValue(legacy.users)[0]);
-    address = stringValue(legacy.address);
-    port = numberValue(legacy.port, 443);
-    id = stringValue(user.id);
-    flow = stringValue(user.flow);
-    encryption = stringValue(user.encryption, 'none');
-  }
   const reverse = objectValue(input.reverse);
   const testseed = arrayValue(input.testseed).map(Number);
   return {
-    address,
-    port,
-    id,
-    flow,
-    encryption,
+    address: stringValue(input.address),
+    port: numberValue(input.port, 443),
+    id: stringValue(input.id),
+    flow: stringValue(input.flow),
+    encryption: stringValue(input.encryption, 'none'),
     reverseTag: stringValue(reverse.tag),
     reverseSniffing: sniffingFromWire(reverse.sniffing),
     testpre: numberValue(input.testpre, 0),
@@ -318,10 +304,6 @@ function freedomFromWire(input: JsonObject): JsonObject {
       blockDelay: stringValue(rule.blockDelay),
     };
   });
-  if (finalRules.length === 0) {
-    const legacyIPs = arrayValue(input.ipsBlocked).map(String).filter(Boolean);
-    if (legacyIPs.length > 0) finalRules.push({ action: 'block', network: '', port: '', ip: legacyIPs, blockDelay: '' });
-  }
   return {
     domainStrategy: stringValue(input.targetStrategy || input.domainStrategy),
     redirect: stringValue(input.redirect),

@@ -16,8 +16,8 @@ describe('Xray security API', () => {
     await expect(postPanelObject<{ value: number }>('/test', {})).resolves.toEqual({ value: 1 });
   });
 
-  it('accepts boxed and legacy unboxed scan results', async () => {
-    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([{ target: 'example.com:443' }]), { status: 200 }));
+  it('unwraps scan results', async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ success: true, obj: [{ target: 'example.com:443' }] }), { status: 200 }));
     await expect(postPanelResult<Array<{ target: string }>>('/scan', {})).resolves.toEqual([{ target: 'example.com:443' }]);
   });
 

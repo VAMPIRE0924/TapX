@@ -2,9 +2,7 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"net/netip"
-	"strconv"
 	"strings"
 
 	"tapx/internal/model"
@@ -44,8 +42,8 @@ func BuildRawPairTemplate(options RawPairTemplateOptions) (RawPairTemplate, erro
 	var b RuntimeConfig
 	switch options.Transport {
 	case model.TransportUDP:
-		a = rawUDPPeerConfig("a", options.IfNameA, options.TunA, options.HostB, options.Port, options.MTU, options.VKey)
-		b = rawUDPPeerConfig("b", options.IfNameB, options.TunB, options.HostA, options.Port, options.MTU, options.VKey)
+		a = rawUDPListenerConfig(options.IfNameA, options.TunA, options.Port, options.MTU, options.VKey)
+		b = rawUDPConnectorConfig(options.IfNameB, options.TunB, options.HostA, options.Port, options.MTU, options.VKey)
 	case model.TransportTCP:
 		a = rawTCPListenerConfig(options.IfNameA, options.TunA, options.Port, options.MTU, options.VKey)
 		b = rawTCPConnectorConfig(options.IfNameB, options.TunB, options.HostA, options.Port, options.MTU, options.VKey)
@@ -152,27 +150,34 @@ func validateRawPairOptions(options RawPairTemplateOptions) error {
 	return nil
 }
 
-func rawUDPPeerConfig(side, ifName, cidr, peerHost string, port uint16, mtu int, vkey string) RuntimeConfig {
-	deviceID := "tun-" + side
-	routeID := "route-" + side
-	listenerID := "udp-" + side
-	cfg := baseRawTemplateConfig(deviceID, routeID, ifName, cidr, mtu, vkey)
+func rawUDPListenerConfig(ifName, cidr string, port uint16, mtu int, vkey string) RuntimeConfig {
+	cfg := baseRawTemplateConfig("tun-a", "route-a", ifName, cidr, mtu, vkey)
 	cfg.Listeners = []model.Listener{{
-		ID:        listenerID,
+		ID:        "udp-a",
 		Enabled:   true,
-		Name:      "Raw UDP " + strings.ToUpper(side),
+		Name:      "Raw UDP Listener",
 		BindHost:  "0.0.0.0",
 		BindPort:  port,
 		Transport: model.TransportUDP,
 		RawUDP: model.RawUDPSettings{
-			PeerMode:      model.UDPPeerFixed,
-			FixedPeer:     net.JoinHostPort(peerHost, strconv.Itoa(int(port))),
-			ReuseAddr:     true,
-			ReceiveBuffer: 1048576,
-			SendBuffer:    1048576,
-			ZeroCopy:      true,
+			ZeroCopy: true,
 		},
-		Binding: model.Binding{RouteID: routeID},
+		Binding: model.Binding{RouteID: "route-a"},
+	}}
+	return cfg
+}
+
+func rawUDPConnectorConfig(ifName, cidr, remote string, port uint16, mtu int, vkey string) RuntimeConfig {
+	cfg := baseRawTemplateConfig("tun-b", "route-b", ifName, cidr, mtu, vkey)
+	cfg.Connectors = []model.Connector{{
+		ID:        "udp-b",
+		Enabled:   true,
+		Name:      "Raw UDP Connector",
+		Remote:    remote,
+		Port:      port,
+		Transport: model.TransportUDP,
+		RawUDP:    model.RawUDPSettings{ZeroCopy: true},
+		Binding:   model.Binding{RouteID: "route-b"},
 	}}
 	return cfg
 }
@@ -210,13 +215,18 @@ func rawTCPConnectorConfig(ifName, cidr, remote string, port uint16, mtu int, vk
 func baseRawTemplateConfig(deviceID, routeID, ifName, cidr string, mtu int, vkey string) RuntimeConfig {
 	cfg := RuntimeConfig{
 		Devices: []model.Device{{
-			ID:       deviceID,
-			Enabled:  true,
-			Name:     deviceID,
-			Type:     model.DeviceTUN,
-			IfName:   ifName,
-			MTU:      mtu,
-			IPv4CIDR: cidr,
+			ID:         deviceID,
+			Enabled:    true,
+			Name:       deviceID,
+			Type:       model.DeviceTUN,
+			IfName:     ifName,
+			MTU:        mtu,
+			AccessRole: model.AccessRoleClient,
+			TUNDHCP: &model.TUNDHCPConfig{
+				Mode:     model.TUNDHCPModeManual,
+				Protocol: "ipv4",
+				IPv4CIDR: cidr,
+			},
 		}},
 		Routes: []model.Route{{
 			ID:       routeID,
@@ -239,8 +249,6 @@ func baseRawTemplateConfig(deviceID, routeID, ifName, cidr string, mtu int, vkey
 func rawTCPTemplateSettings() model.RawTCPSettings {
 	return model.RawTCPSettings{
 		LengthMode:      model.TCPLength16,
-		ReceiveBuffer:   1048576,
-		SendBuffer:      1048576,
 		NoDelay:         true,
 		KeepAliveSecond: 30,
 		ConnectTimeout:  5,

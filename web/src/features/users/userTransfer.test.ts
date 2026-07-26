@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { exportUserBundle, importUserBundle, sanitizeUserCredentials } from './userTransfer';
+import { exportUserBundle, importUserBundle } from './userTransfer';
 
 describe('user transfer bundle', () => {
   it('exports referenced address limits and vkeys', () => {
@@ -60,22 +60,5 @@ describe('user transfer bundle', () => {
     expect(bundle.Addresses[0]).toMatchObject({ Name: 'remote', ManagedNodeID: 'node-edge' });
     expect(bundle.VKeys).toHaveLength(1);
     expect(bundle.VKeys[0]).toMatchObject({ Name: 'remote', ManagedNodeID: 'node-edge' });
-  });
-
-  it('removes unsupported user credential fields at every transfer boundary', () => {
-    const legacy = {
-      ID: 'legacy',
-      Security: 'auto',
-      ReverseTag: 'reverse-old',
-      Flow: 'xtls-rprx-vision',
-      WireguardPrivateKey: 'private',
-      WireguardPublicKey: 'public',
-      WireguardPreSharedKey: 'psk',
-      WireguardAllowedIPs: ['10.0.0.2/32'],
-      UUID: 'uuid-a',
-    };
-    expect(sanitizeUserCredentials(legacy)).toEqual({ ID: 'legacy', UUID: 'uuid-a' });
-    expect(exportUserBundle([legacy], {}).Clients).toEqual([{ ID: 'legacy', UUID: 'uuid-a' }]);
-    expect(importUserBundle(JSON.stringify([legacy]), {}).clients).toEqual([{ ID: 'legacy', UUID: 'uuid-a' }]);
   });
 });

@@ -53,7 +53,7 @@ export function parseRawConnectorLink(link: string, t?: Translate): RawConnector
     address,
     port,
     security: security as RawConnectorSecurity,
-    vkey: url.searchParams.get('vkey') || decodeURIComponent(url.username || ''),
+    vkey: url.searchParams.get('vkey') || '',
     serverName: url.searchParams.get('sni') || '',
     lengthMode: network === 'tcp' ? requestedLength as TcpLengthMode : undefined,
   };

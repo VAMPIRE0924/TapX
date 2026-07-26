@@ -38,6 +38,7 @@ const (
 
 type panelAuthConfig struct {
 	Enabled          bool
+	PanelName        string
 	Username         string
 	PasswordHash     string
 	SessionTTLSecond int
@@ -281,8 +282,16 @@ func (s *Server) authConfig(ctx context.Context) (panelAuthConfig, error) {
 }
 
 func authConfigFromRuntimeConfig(cfg config.RuntimeConfig) panelAuthConfig {
+	out := panelAuthConfig{PanelName: "TapX-UI"}
 	for _, item := range cfg.Settings {
-		if !item.Enabled || !item.PanelAuthEnabled {
+		if !item.Enabled {
+			continue
+		}
+		panelName := strings.TrimSpace(item.PanelName)
+		if panelName != "" {
+			out.PanelName = panelName
+		}
+		if !item.PanelAuthEnabled {
 			continue
 		}
 		ttl := item.SessionTTLSecond
@@ -291,13 +300,14 @@ func authConfigFromRuntimeConfig(cfg config.RuntimeConfig) panelAuthConfig {
 		}
 		return panelAuthConfig{
 			Enabled:          true,
+			PanelName:        out.PanelName,
 			Username:         item.AdminUsername,
 			PasswordHash:     item.AdminPasswordHash,
 			SessionTTLSecond: ttl,
 			SecureCookie:     item.PanelHTTPS,
 		}
 	}
-	return panelAuthConfig{}
+	return out
 }
 
 func authConfigFromSettings(item model.Settings) panelAuthConfig {
@@ -316,6 +326,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if !auth.Enabled {
+			s.runtime.ConfirmOneArmApply()
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -324,10 +335,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				writeErrorStatus(w, http.StatusForbidden, fmt.Errorf("cross-site session request rejected"))
 				return
 			}
+			s.runtime.ConfirmOneArmApply()
 			next.ServeHTTP(w, r)
 			return
 		}
 		if s.apiTokenAuthenticated(r.Context(), r) {
+			s.runtime.ConfirmOneArmApply()
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -354,7 +367,7 @@ func authBypass(r *http.Request) bool {
 	if r.URL.Path == "/api/health" || strings.HasPrefix(r.URL.Path, "/api/auth/") {
 		return true
 	}
-	return !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/panel/api/")
+	return !strings.HasPrefix(r.URL.Path, "/api/")
 }
 
 func (s *Server) authenticated(r *http.Request) bool {

@@ -40,7 +40,7 @@ func TestManagedNodeRegistryAndRemoteControlPlane(t *testing.T) {
 			writeJSON(w, http.StatusOK, map[string]any{"byEndpoint": []any{
 				map[string]any{"id": "connector:connector-a", "name": "connector-a", "kind": "connector"},
 			}})
-		case "/api/system/interfaces":
+		case "/api/server/interfaces":
 			writeJSON(w, http.StatusOK, map[string]any{"interfaces": []string{"eth0", "ens3"}})
 		case "/api/share/clients/client-a":
 			writeJSON(w, http.StatusOK, map[string]any{"share": map[string]any{"link": "raw://remote-client"}})

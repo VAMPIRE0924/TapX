@@ -6,6 +6,7 @@ export type AddressAssignMode = 'auto' | 'manual';
 export type InterfaceType = 'tun' | 'tap';
 
 export type EndpointDeviceBinding = TapxBinding & {
+  DeviceBindingEnabled?: boolean;
   AutoCreateDevice?: boolean;
   DeviceBindMode?: DeviceBindMode;
   InterfaceType?: InterfaceType;
@@ -24,3 +25,7 @@ export const tapxProtocolOptions = [
   { value: 'raw-tcp', label: 'Raw TCP' },
   { value: 'raw-udp', label: 'Raw UDP' },
 ];
+
+export function runtimeModeChangesTransportFamily(current: EndpointRuntimeMode, next: EndpointRuntimeMode): boolean {
+  return (current === 'tapx') !== (next === 'tapx');
+}

@@ -72,7 +72,8 @@ cat >"${BUILD_DIR}/tapx-apply.json" <<JSON
       "Type": "tun",
       "IfName": "${TUN}",
       "MTU": 1400,
-      "IPv4CIDR": "10.99.0.1/30",
+      "AccessRole": "client",
+      "TUNDHCP": {"Mode": "manual", "Protocol": "ipv4", "IPv4CIDR": "10.99.0.1/30"},
       "Routes": [
         {"Enabled": true, "Destination": "10.250.0.0/24", "Metric": 20}
       ]
@@ -88,7 +89,7 @@ cat >"${BUILD_DIR}/tapx-apply.json" <<JSON
       "BindHost": "127.0.0.1",
       "BindPort": 45100,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "any"},
+      "RawUDP": {},
       "Binding": {"RouteID": "route-a"}
     }
   ]

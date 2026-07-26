@@ -3,21 +3,19 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strings"
 	"time"
 
 	"tapx/internal/fastpath"
-	"tapx/internal/linkdiag"
 	"tapx/internal/model"
 	"tapx/internal/rawtcp"
 )
@@ -62,12 +60,36 @@ func (h *TCPPipeHandle) acceptTLSLoop(ctx context.Context, listener *net.TCPList
 			continue
 		}
 		tlsConn := tls.Server(conn, tlsConfig)
+		var stream net.Conn = tlsConn
+		if h.address.isServer() {
+			handshakeCtx, stopHandshake := h.tlsHandshakeContext(ctx)
+			handshakeErr := tlsConn.HandshakeContext(handshakeCtx)
+			stopHandshake()
+			if handshakeErr != nil {
+				_ = tlsConn.Close()
+				h.setErr(handshakeErr)
+				continue
+			}
+			reader := bufio.NewReaderSize(tlsConn, 4+rawVKeyHeaderBaseSize+rawVKeyMaxSize)
+			probe, probeErr := peekTCPDispatchReader(reader, h.Pipe.LengthMode, h.Pipe.MaxFrameSize)
+			if probeErr != nil {
+				_ = tlsConn.Close()
+				h.setErr(probeErr)
+				continue
+			}
+			if probe.Diagnostic {
+				stream := &bufferedDispatchConn{Conn: tlsConn, reader: reader}
+				go func() { _ = serveAddressControl(ctx, stream, probe.VKey, h.address) }()
+				continue
+			}
+			stream = &bufferedDispatchConn{Conn: tlsConn, reader: reader}
+		}
 		h.mu.Lock()
 		active := h.tlsDone != nil
 		h.mu.Unlock()
 		if active {
 			go func() {
-				_ = linkdiag.ServeStream(ctx, tlsConn, h.Pipe.Binding.VKeyValue)
+				_ = serveAddressControl(ctx, stream, h.Pipe.Binding.VKeyValue, h.address)
 			}()
 			continue
 		}
@@ -80,7 +102,7 @@ func (h *TCPPipeHandle) acceptTLSLoop(ctx context.Context, listener *net.TCPList
 		h.mu.Lock()
 		h.acceptedRemote = remote
 		h.mu.Unlock()
-		if _, err := h.startTLSBridge(ctx, tlsConn, frameKind, guard); err != nil {
+		if _, err := h.startTLSBridge(ctx, stream, frameKind, guard); err != nil {
 			h.setErr(err)
 		}
 	}
@@ -98,6 +120,9 @@ func (h *TCPPipeHandle) startTLSConnector(frameKind fastpath.FrameKind, guard fa
 			cancel()
 			return err
 		}
+		h.address.startRenewal(func(renewCtx context.Context) error {
+			return h.ensureTLSAddressLease(renewCtx, tlsConfig)
+		}, h.setErr)
 		return nil
 	}
 
@@ -109,11 +134,17 @@ func (h *TCPPipeHandle) startTLSConnector(frameKind fastpath.FrameKind, guard fa
 	if err != nil {
 		h.setErr(err)
 	}
+	h.address.startRenewal(func(renewCtx context.Context) error {
+		return h.ensureTLSAddressLease(renewCtx, tlsConfig)
+	}, h.setErr)
 	go h.tlsReconnectLoop(ctx, done, sessionDone, frameKind, guard, tlsConfig)
 	return nil
 }
 
 func (h *TCPPipeHandle) connectTLS(ctx context.Context, frameKind fastpath.FrameKind, guard fastpath.AddressGuard, tlsConfig *tls.Config) (<-chan struct{}, error) {
+	if err := h.ensureTLSAddressLease(ctx, tlsConfig); err != nil {
+		return nil, err
+	}
 	tcpConn, local, remote, err := dialTCP(h.Pipe)
 	if err != nil {
 		return nil, err
@@ -140,6 +171,28 @@ func (h *TCPPipeHandle) connectTLS(ctx context.Context, frameKind fastpath.Frame
 	h.lastErr = nil
 	h.mu.Unlock()
 	return done, nil
+}
+
+func (h *TCPPipeHandle) ensureTLSAddressLease(ctx context.Context, tlsConfig *tls.Config) error {
+	if !h.address.isClient() {
+		return nil
+	}
+	tcpConn, _, _, err := dialTCP(h.Pipe)
+	if err != nil {
+		return err
+	}
+	if err := configureTCPConn(tcpConn, h.Pipe); err != nil {
+		_ = tcpConn.Close()
+		return err
+	}
+	conn := tls.Client(tcpConn, tlsConfig)
+	defer conn.Close()
+	handshakeCtx, stop := h.tlsHandshakeContext(ctx)
+	defer stop()
+	if err := conn.HandshakeContext(handshakeCtx); err != nil {
+		return fmt.Errorf("core: address control TLS handshake %s: %w", h.Pipe.EndpointID, err)
+	}
+	return h.address.requestLease(handshakeCtx, conn, h.Pipe.Binding.VKeyValue, addressLeaseKey(h.Pipe.Binding, h.Pipe.DeviceID, h.Pipe.EndpointID))
 }
 
 func (h *TCPPipeHandle) tlsReconnectLoop(ctx context.Context, loopDone chan struct{}, sessionDone <-chan struct{}, frameKind fastpath.FrameKind, guard fastpath.AddressGuard, tlsConfig *tls.Config) {
@@ -358,25 +411,12 @@ func rawTCPServerTLSConfig(settings model.RawTLSSettings) (*tls.Config, error) {
 	}
 	cfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   cleanALPN(settings.ALPN),
 	}
 	if settings.ServerName != "" {
 		cfg.ServerName = settings.ServerName
 	}
 	if err := applyTLSVersions(cfg, settings.MinVersion, settings.MaxVersion); err != nil {
 		return nil, err
-	}
-	if settings.CAFile != "" {
-		pool, err := loadCertPool(settings.CAFile)
-		if err != nil {
-			return nil, err
-		}
-		cfg.ClientCAs = pool
-		if settings.AllowInsecure {
-			cfg.ClientAuth = tls.RequestClientCert
-		} else {
-			cfg.ClientAuth = tls.RequireAndVerifyClientCert
-		}
 	}
 	return cfg, nil
 }
@@ -385,24 +425,9 @@ func rawTCPClientTLSConfig(settings model.RawTLSSettings, remote string) (*tls.C
 	cfg := &tls.Config{
 		ServerName:         firstNonEmpty(settings.ServerName, remote),
 		InsecureSkipVerify: settings.AllowInsecure,
-		NextProtos:         cleanALPN(settings.ALPN),
 	}
 	if err := applyTLSVersions(cfg, settings.MinVersion, settings.MaxVersion); err != nil {
 		return nil, err
-	}
-	if settings.CAFile != "" {
-		pool, err := loadCertPool(settings.CAFile)
-		if err != nil {
-			return nil, err
-		}
-		cfg.RootCAs = pool
-	}
-	if settings.CertFile != "" || settings.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(settings.CertFile, settings.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("core: load raw tcp tls client certificate: %w", err)
-		}
-		cfg.Certificates = []tls.Certificate{cert}
 	}
 	return cfg, nil
 }
@@ -436,32 +461,6 @@ func parseTLSVersion(value string) (uint16, error) {
 	default:
 		return 0, fmt.Errorf("core: unsupported tls version %q", value)
 	}
-}
-
-func loadCertPool(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("core: read CA file %q: %w", path, err)
-	}
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("core: CA file %q has no PEM certificates", path)
-	}
-	return pool, nil
-}
-
-func cleanALPN(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			out = append(out, value)
-		}
-	}
-	return out
 }
 
 func rawVKeyHeaderSize(vkey []byte) (int, error) {

@@ -49,7 +49,7 @@
 13. `✅` XHTTP 新建传输默认模式固定为 `auto`，并新增回归测试，避免出现空白无效选择。
 14. `✅` Raw TCP 长度分帧改为真实的 `uint16/uint32` 选择，默认 `uint16`；兼容旧布尔配置；监听端和连接端使用同一解析逻辑。
 15. `✅` TapX `raw://` 链接携带可选 `length=uint16|uint32`；旧链接缺省按 `uint16`；非法模式会被拒绝并有往返测试。
-16. `✅` WireGuard、Tunnel、MTProto 与 Vision 字段中本轮发现的中文界面英文标签已接入统一语言资源。
+16. `✅` WireGuard、Tunnel 与 Vision 字段中本轮发现的中文界面英文标签已接入统一语言资源；官方 Xray 不支持的 MTProto 已移除。
 
 ## 本轮实测证据
 

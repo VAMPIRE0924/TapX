@@ -3,16 +3,20 @@ package netapply
 import "tapx/internal/model"
 
 type DeviceConfig struct {
-	Type             model.DeviceType
-	IfName           string
-	MTU              int
-	MSSClamp         int
-	LinkAutoOptimize bool
-	IPv4CIDR         string
-	IPv6CIDR         string
-	Bridge           BridgeConfig
-	Routes           []RouteConfig
-	DNS              DNSConfig
+	Type                  model.DeviceType
+	IfName                string
+	MTU                   int
+	MSSClamp              int
+	LinkAutoOptimize      bool
+	Bridge                BridgeConfig
+	Routes                []RouteConfig
+	TapMode               model.TapMode
+	AccessRole            model.AccessRole
+	DHCP                  model.DHCPConfig
+	SharedIP              model.SharedIPConfig
+	TUNDHCP               model.TUNDHCPConfig
+	AllowDefaultRoute     bool
+	OneArmRollbackSeconds int
 }
 
 type BridgeConfig struct {
@@ -42,7 +46,16 @@ type DNSConfig struct {
 
 type Handle interface {
 	SetMSSClamp(ipv4MSS, ipv6MSS int) error
+	ApplyAddressLease(lease AddressLease) error
 	Rollback() error
+}
+
+type AddressLease struct {
+	IPv4CIDR          string
+	IPv6CIDR          string
+	Gateway           string
+	DNS               []string
+	AllowDefaultRoute bool
 }
 
 func hasEnabledRoutes(routes []RouteConfig) bool {
@@ -58,9 +71,10 @@ func needsApply(cfg DeviceConfig) bool {
 	return cfg.MTU > 0 ||
 		cfg.MSSClamp > 0 ||
 		cfg.LinkAutoOptimize ||
-		cfg.IPv4CIDR != "" ||
-		cfg.IPv6CIDR != "" ||
 		cfg.Bridge.Enabled ||
 		hasEnabledRoutes(cfg.Routes) ||
-		cfg.DNS.Enabled
+		(cfg.DHCP.Mode != "" && cfg.DHCP.Mode != model.DHCPModeOff) ||
+		(cfg.TUNDHCP.Mode != "" && cfg.TUNDHCP.Mode != model.TUNDHCPModeOff) ||
+		cfg.TUNDHCP.RelayEnabled ||
+		cfg.TapMode == model.TapModeSharedIP
 }

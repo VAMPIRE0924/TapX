@@ -111,6 +111,18 @@ func TestPostgresStoreAndPortableBackupRoundTrip(t *testing.T) {
 	if metrics, err := store.LoadMetrics(ctx, 10); err != nil || len(metrics) != 1 || !reflect.DeepEqual(metrics[0], metric) {
 		t.Fatalf("restored postgres metrics = %+v, err=%v", metrics, err)
 	}
+
+	want := currentWebContractConfig()
+	if err := store.ReplaceConfig(ctx, want); err != nil {
+		t.Fatalf("replace current Web contract in PostgreSQL: %v", err)
+	}
+	got, err := store.LoadConfig(ctx)
+	if err != nil {
+		t.Fatalf("load current Web contract from PostgreSQL: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("current Web contract changed during PostgreSQL round trip:\n got: %#v\nwant: %#v", got, want)
+	}
 }
 
 func postgresDSNWithSearchPath(t *testing.T, rawDSN, schema string) string {

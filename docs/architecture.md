@@ -123,6 +123,13 @@ path.
 
 ## Network Apply
 
+Before RuntimeManager mutates the active controller, a Linux/OpenWrt host
+network guard inventories existing interface networks and addresses, routes,
+and DHCP pools. If an enabled TapX TUN/TAP network overlaps that inventory, the
+apply returns a structured conflict and performs no controller stop, TUN/TAP
+open, address assignment, route, bridge, or firewall operation. Configuration
+persistence does not run this host-dependent check.
+
 The first Linux tapx-net apply layer runs after a TUN/TAP fd is created and
 before the C worker starts. It applies Device MTU, MSS clamp, IPv4/IPv6 CIDR
 assignment, interface up state, TAP bridge creation/member binding, static
@@ -194,10 +201,10 @@ UDP payload = TUN IP packet
 
 No encryption, no authentication, no vKey, and no address limit are valid when the operator leaves those fields empty. If vKey, route binding, or allowed IP/MAC settings are configured, they become generated checks or lookup tables in the worker.
 
-Raw UDP socket-level settings are control-plane options. `BindAddress` can
-override the endpoint bind host, `BindInterface` maps to Linux device binding,
-and receive/send buffers plus reuse flags are applied before `bind(2)`. Empty
-values leave the socket at the lean default.
+The endpoint bind address comes from `BindHost`. Queue size is compiled into
+socket buffer sizing, and `SO_REUSEPORT` is enabled internally only when a
+listener needs multi-policy dispatch. Peer learning/fixed-peer selection is
+derived from Listener/Connector role and is not stored as an operator field.
 
 When `VKeyValue` is generated for a raw UDP pipe, only that pipe switches to a
 compact vKey wire marker:
@@ -221,11 +228,9 @@ uint16_be length + TUN IP packet
 
 `uint32_be length` can be added as an advanced mode. Raw TCP can run as a pure framed stream, or with configured vKey/Client/Route/address-limit controls.
 
-Raw TCP socket-level settings are also control-plane options. `BindAddress` can
-override the listener bind host or choose the connector local address,
-`BindInterface` maps to Linux device binding, receive/send buffers are applied
-to the raw socket and connection, and TCP_NODELAY, keepalive, connect timeout,
-and TCP Fast Open are applied before the fd is handed to the C worker.
+Raw TCP queue size is compiled into socket buffer sizing. TCP_NODELAY,
+keepalive, connect timeout, reconnect interval, length mode, idle timeout, and
+TCP Fast Open are applied before the fd is handed to the C worker.
 
 When `VKeyValue` is generated for a raw TCP pipe, the TCP length field covers
 the vKey marker plus the TAP/TUN frame:

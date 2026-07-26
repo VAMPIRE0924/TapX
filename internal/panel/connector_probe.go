@@ -17,6 +17,7 @@ import (
 type connectorTestRequest struct {
 	ID              string  `json:"id"`
 	Kind            string  `json:"kind"`
+	Direction       string  `json:"direction,omitempty"`
 	DurationSeconds float64 `json:"durationSeconds,omitempty"`
 }
 
@@ -29,7 +30,10 @@ type connectorTestResult struct {
 	Confirmed           bool   `json:"confirmed"`
 	Active              bool   `json:"active"`
 	Message             string `json:"message"`
+	MessageCode         string `json:"messageCode,omitempty"`
 	DeviceName          string `json:"deviceName,omitempty"`
+	AddressFamily       string `json:"addressFamily,omitempty"`
+	PathMTUSource       string `json:"pathMtuSource,omitempty"`
 	ConfirmedPathMTU    int    `json:"confirmedPathMtu,omitempty"`
 	EffectiveNetworkMTU int    `json:"effectiveNetworkMtu,omitempty"`
 	MaxDatagramPayload  int    `json:"maxDatagramPayload,omitempty"`
@@ -62,6 +66,10 @@ func (s *Server) handleConnectorTest(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("kind must be channel, path-mtu, or throughput"))
 		return
 	}
+	if request.Direction != "" && request.Direction != "both" && request.Direction != "upload" && request.Direction != "download" {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("direction must be both, upload, or download"))
+		return
+	}
 	cfg, err := s.store.LoadConfig(r.Context())
 	if err != nil {
 		writeError(w, err)
@@ -86,7 +94,7 @@ func (s *Server) handleConnectorTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	result, err := s.probeConnector(ctx, cfg, connector, request.Kind, duration)
+	result, err := s.probeConnector(ctx, cfg, connector, request.Kind, request.Direction, duration)
 	if err != nil {
 		writeErrorStatus(w, http.StatusBadGateway, err)
 		return
@@ -94,7 +102,7 @@ func (s *Server) handleConnectorTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"result": result})
 }
 
-func (s *Server) probeConnector(ctx context.Context, cfg config.RuntimeConfig, connector model.Connector, kind string, duration time.Duration) (connectorTestResult, error) {
+func (s *Server) probeConnector(ctx context.Context, cfg config.RuntimeConfig, connector model.Connector, kind, direction string, duration time.Duration) (connectorTestResult, error) {
 	pipe, running := connectorRuntimePipe(s.runtime.State(), connector.ID)
 	result := connectorTestResult{
 		ID: connector.ID, Kind: kind, Network: connectorProbeNetwork(cfg, connector),
@@ -116,7 +124,11 @@ func (s *Server) probeConnector(ctx context.Context, cfg config.RuntimeConfig, c
 	}
 
 	if connector.Transport == model.TransportTCP || connector.Transport == model.TransportXray || connector.Transport == model.TransportUDP && kind != "path-mtu" {
-		diagnostic, err := s.runtime.DiagnoseConnector(ctx, connector.ID, kind, duration)
+		diagnosticKind := kind
+		if kind == "throughput" && (direction == "upload" || direction == "download") {
+			diagnosticKind += "-" + direction
+		}
+		diagnostic, err := s.runtime.DiagnoseConnector(ctx, connector.ID, diagnosticKind, duration)
 		if err != nil {
 			return result, err
 		}
@@ -125,15 +137,38 @@ func (s *Server) probeConnector(ctx context.Context, cfg config.RuntimeConfig, c
 		result.Target = diagnostic.Target
 		result.Network = diagnostic.Transport
 		result.DelayMS = durationMilliseconds(diagnostic.Delay)
+		result.AddressFamily = diagnostic.AddressFamily
 		if kind == "path-mtu" {
+			result.TCPMSSIPv4 = 0
+			result.TCPMSSIPv6 = 0
 			if diagnostic.PathMTU > 0 {
 				result.ConfirmedPathMTU = diagnostic.PathMTU
-				result.EffectiveNetworkMTU = diagnostic.PathMTU
-				result.Message = "A full device-sized frame was integrity-checked through the Xray stream; outer segmentation remains managed by Xray and kernel PMTUD."
-			} else {
-				result.TCPMSSIPv4 = diagnostic.TCPMSS
-				result.TCPMSSIPv6 = diagnostic.TCPMSS
-				result.Message = "Kernel TCP MSS was read from a fresh diagnostic stream over the configured connector."
+				if pipe.DeviceMTU > 0 {
+					result.EffectiveNetworkMTU = pipe.DeviceMTU
+				} else {
+					result.EffectiveNetworkMTU = diagnostic.PathMTU
+				}
+				if connector.Transport == model.TransportXray || diagnostic.Transport == "xray" {
+					result.PathMTUSource = "frame"
+					result.MessageCode = "stream-frame-confirmed"
+					result.Message = "A full device-sized frame was verified over the configured stream."
+				} else {
+					result.PathMTUSource = "kernel"
+					result.MessageCode = "tcp-path-measured"
+					result.Message = "The kernel reported path MTU and TCP MSS for a fresh diagnostic connection."
+				}
+			}
+			if diagnostic.TCPMSS > 0 {
+				if diagnostic.AddressFamily == "ipv6" {
+					result.TCPMSSIPv6 = diagnostic.TCPMSS
+				} else {
+					result.TCPMSSIPv4 = diagnostic.TCPMSS
+				}
+			}
+			if result.MessageCode == "" {
+				result.PathMTUSource = "kernel"
+				result.MessageCode = "tcp-mss-measured"
+				result.Message = "The kernel reported TCP MSS for a fresh diagnostic connection."
 			}
 		} else if kind == "throughput" {
 			result.UploadBytes = diagnostic.UploadBytes
@@ -141,8 +176,10 @@ func (s *Server) probeConnector(ctx context.Context, cfg config.RuntimeConfig, c
 			result.UploadBPS = diagnostic.UploadBPS
 			result.DownloadBPS = diagnostic.DownloadBPS
 			result.DurationMS = diagnostic.Duration.Milliseconds()
+			result.MessageCode = "throughput-measured"
 			result.Message = "Bidirectional payload throughput was measured over an isolated TapX diagnostic stream."
 		} else {
+			result.MessageCode = "channel-confirmed"
 			result.Message = "The remote TapX listener acknowledged the diagnostic control stream."
 		}
 		return result, nil
@@ -155,6 +192,7 @@ func (s *Server) probeConnector(ctx context.Context, cfg config.RuntimeConfig, c
 	case "channel":
 		if pipe.ConfirmedPathMTU > 0 {
 			result.Confirmed = true
+			result.MessageCode = "udp-channel-confirmed"
 			result.Message = "The UDP peer completed TapX path negotiation on this outer transport; no inner interface address was used."
 			return result, nil
 		}
@@ -165,6 +203,8 @@ func (s *Server) probeConnector(ctx context.Context, cfg config.RuntimeConfig, c
 		}
 		result.Confirmed = true
 		result.Active = true
+		result.PathMTUSource = "peer"
+		result.MessageCode = "udp-path-confirmed"
 		result.Message = "The value was peer-confirmed by TapX over the outer UDP path and does not depend on a TUN/TAP address."
 		return result, nil
 	case "throughput":

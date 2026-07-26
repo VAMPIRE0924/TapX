@@ -75,8 +75,8 @@ function New-TapXTLSListenerConfig {
       "Transport": "tcp",
       "RawTCP": {
         "LengthMode": "uint16",
-        "ReceiveBuffer": 1048576,
-        "SendBuffer": 1048576,
+        "QueueSize": 2048,
+        "ZeroCopy": true,
         "NoDelay": true,
         "KeepAliveSecond": 30,
         "ConnectTimeout": 5,
@@ -84,7 +84,6 @@ function New-TapXTLSListenerConfig {
           "Enabled": true,
           "CertFile": "$RemoteDir/server.crt",
           "KeyFile": "$RemoteDir/server.key",
-          "ALPN": ["tapx"],
           "MinVersion": "1.2"
         }
       },
@@ -116,16 +115,15 @@ function New-TapXTLSConnectorConfig {
       "Transport": "tcp",
       "RawTCP": {
         "LengthMode": "uint16",
-        "ReceiveBuffer": 1048576,
-        "SendBuffer": 1048576,
+        "QueueSize": 2048,
+        "ZeroCopy": true,
         "NoDelay": true,
         "KeepAliveSecond": 30,
         "ConnectTimeout": 5,
         "TLS": {
           "Enabled": true,
-          "CAFile": "$RemoteDir/server.crt",
           "ServerName": "$serverName",
-          "ALPN": ["tapx"],
+          "AllowInsecure": true,
           "MinVersion": "1.2"
         }
       },
@@ -156,15 +154,12 @@ function New-TapXDTLSListenerConfig {
       "BindPort": $UdpDTLSPort,
       "Transport": "udp",
       "RawUDP": {
-        "PeerMode": "learn",
-        "ReceiveBuffer": 1048576,
-        "SendBuffer": 1048576,
-        "ReuseAddr": true,
+        "QueueSize": 2048,
+        "ZeroCopy": true,
         "DTLS": {
           "Enabled": true,
           "CertFile": "$RemoteDir/server.crt",
           "KeyFile": "$RemoteDir/server.key",
-          "ALPN": ["tapx"],
           "MTU": 1200,
           "ReplayWindow": 64
         }
@@ -196,16 +191,12 @@ function New-TapXDTLSConnectorConfig {
       "Port": $UdpDTLSPort,
       "Transport": "udp",
       "RawUDP": {
-        "PeerMode": "fixed",
-        "FixedPeer": "$($HostA):$UdpDTLSPort",
-        "ReceiveBuffer": 1048576,
-        "SendBuffer": 1048576,
-        "ReuseAddr": true,
+        "QueueSize": 2048,
+        "ZeroCopy": true,
         "DTLS": {
           "Enabled": true,
-          "CAFile": "$RemoteDir/server.crt",
           "ServerName": "$serverName",
-          "ALPN": ["tapx"],
+          "AllowInsecure": true,
           "MTU": 1200,
           "ReplayWindow": 64
         }

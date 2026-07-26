@@ -142,6 +142,9 @@ func run(args []string) error {
 
 	runtimeManager := panel.NewRuntimeManager()
 	defer runtimeManager.Stop()
+	if err := restoreStoredRuntime(context.Background(), store, runtimeManager); err != nil {
+		fmt.Fprintf(os.Stderr, "tapx-panel: stored runtime restore failed: %v\n", err)
+	}
 	restartCh := make(chan struct{}, 1)
 
 	panelServer, err := loadPanelServerSettings(context.Background(), store, *listen, listenFlagSet)
@@ -208,6 +211,19 @@ func run(args []string) error {
 		}
 		return fmt.Errorf("panel restart requested")
 	}
+}
+
+func restoreStoredRuntime(ctx context.Context, store *panel.Store, runtimeManager *panel.RuntimeManager) error {
+	cfg, err := store.LoadConfig(ctx)
+	if err != nil {
+		return err
+	}
+	runtime, err := config.GenerateRuntime(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = runtimeManager.Apply(runtime, cfg)
+	return err
 }
 
 func envDefault(name, fallback string) string {

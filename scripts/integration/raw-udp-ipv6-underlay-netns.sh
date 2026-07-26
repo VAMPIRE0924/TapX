@@ -80,7 +80,7 @@ cat >"${BUILD_DIR}/tapx-v6-a.json" <<JSON
   "Routes": [{"ID":"route-a","Enabled":true,"DeviceID":"tun-a"}],
   "Listeners": [{
     "ID":"udp-v6-a","Enabled":true,"BindHost":"fd31:250::1","BindPort":44001,"Transport":"udp",
-    "RawUDP":{"PeerMode":"fixed","FixedPeer":"[fd31:250::2]:44001"},"Binding":{"RouteID":"route-a"}
+    "RawUDP":{},"Binding":{"RouteID":"route-a"}
   }]
 }
 JSON
@@ -89,9 +89,9 @@ cat >"${BUILD_DIR}/tapx-v6-b.json" <<JSON
 {
   "Devices": [{"ID":"tun-b","Enabled":true,"Type":"tun","IfName":"${TUN_B}","MTU":1500,"LinkAutoOptimize":true}],
   "Routes": [{"ID":"route-b","Enabled":true,"DeviceID":"tun-b"}],
-  "Listeners": [{
-    "ID":"udp-v6-b","Enabled":true,"BindHost":"fd31:250::2","BindPort":44001,"Transport":"udp",
-    "RawUDP":{"PeerMode":"fixed","FixedPeer":"[fd31:250::1]:44001"},"Binding":{"RouteID":"route-b"}
+  "Connectors": [{
+    "ID":"udp-v6-b","Enabled":true,"Remote":"fd31:250::1","Port":44001,"Transport":"udp",
+    "RawUDP":{},"Binding":{"RouteID":"route-b"}
   }]
 }
 JSON

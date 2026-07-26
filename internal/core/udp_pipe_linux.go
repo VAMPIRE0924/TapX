@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -29,6 +30,7 @@ type UDPPipeHandle struct {
 
 	device   tuntap.Device
 	netApply netapply.Handle
+	address  *deviceAddressControl
 	udpFD    int
 	worker   *fastpath.Worker
 	counter  *fastpath.Counters
@@ -46,6 +48,7 @@ type UDPPipeHandle struct {
 	runtimeDevice  config.RuntimeDevice
 	startupCancel  context.CancelFunc
 	startupDone    chan struct{}
+	ownsDevice     bool
 }
 
 func startUDPPipe(pipe config.RuntimeUDPPipe, device config.RuntimeDevice) (*UDPPipeHandle, error) {
@@ -53,7 +56,15 @@ func startUDPPipe(pipe config.RuntimeUDPPipe, device config.RuntimeDevice) (*UDP
 }
 
 func startUDPPipeWithCache(pipe config.RuntimeUDPPipe, device config.RuntimeDevice, pathCache *pathmtu.Cache) (*UDPPipeHandle, error) {
-	handle, err := prepareUDPPipeHandle(pipe, device, pathCache)
+	return startUDPPipeWithFabric(pipe, device, pathCache, nil)
+}
+
+func startUDPPipeWithFabric(pipe config.RuntimeUDPPipe, device config.RuntimeDevice, pathCache *pathmtu.Cache, fabric *deviceFabric) (*UDPPipeHandle, error) {
+	var shared *sharedRuntimeDevice
+	if fabric != nil {
+		shared = fabric.Port(udpFabricKey(pipe))
+	}
+	handle, err := prepareUDPPipeHandle(pipe, device, pathCache, shared)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +73,7 @@ func startUDPPipeWithCache(pipe config.RuntimeUDPPipe, device config.RuntimeDevi
 		_ = handle.Close()
 		return nil, err
 	}
-	peerMode, err := fastpath.PeerModeFromModel(pipe.PeerMode)
+	peerMode, err := runtimeUDPPeerMode(pipe.PeerMode)
 	if err != nil {
 		_ = handle.Close()
 		return nil, err
@@ -76,6 +87,11 @@ func startUDPPipeWithCache(pipe config.RuntimeUDPPipe, device config.RuntimeDevi
 	if err != nil {
 		_ = handle.Close()
 		return nil, err
+	}
+	addressResponse, err := handle.address.rawUDPResponse(addressLeaseKey(pipe.Binding, pipe.DeviceID, pipe.EndpointID))
+	if err != nil {
+		_ = handle.Close()
+		return nil, fmt.Errorf("core: prepare UDP address service for %s: %w", pipe.EndpointID, err)
 	}
 
 	if pipe.DTLS.Enabled {
@@ -137,7 +153,7 @@ func startUDPPipeWithCache(pipe config.RuntimeUDPPipe, device config.RuntimeDevi
 				handle.setErr(fmt.Errorf("core: apply confirmed UDP MSS for %s: %w", pipe.EndpointID, clampErr))
 				return
 			}
-			worker, counters, startErr := startRawUDPWorker(handle.device, preparedPipe, frameKind, addressGuard, udpFD, fastpath.UDPPeerFixed, confirmedPeer)
+			worker, counters, startErr := startRawUDPWorker(handle.device, preparedPipe, frameKind, addressGuard, udpFD, fastpath.UDPPeerFixed, confirmedPeer, addressResponse)
 			if startErr != nil {
 				handle.setErr(startErr)
 				return
@@ -184,8 +200,12 @@ func startUDPPipeWithCache(pipe config.RuntimeUDPPipe, device config.RuntimeDevi
 			return nil, fmt.Errorf("core: apply confirmed UDP MSS for %s: %w", pipe.EndpointID, err)
 		}
 	}
+	if err := handle.requestRawUDPAddress(pipe, peer); err != nil {
+		_ = handle.Close()
+		return nil, err
+	}
 
-	worker, counters, err := startRawUDPWorker(handle.device, pipe, frameKind, addressGuard, udpFD, peerMode, peer)
+	worker, counters, err := startRawUDPWorker(handle.device, pipe, frameKind, addressGuard, udpFD, peerMode, peer, addressResponse)
 	if err != nil {
 		_ = handle.Close()
 		return nil, err
@@ -195,57 +215,63 @@ func startUDPPipeWithCache(pipe config.RuntimeUDPPipe, device config.RuntimeDevi
 	handle.acceptedRemote = peer
 	handle.worker = worker
 	handle.counter = counters
+	handle.address.startRenewal(func(context.Context) error {
+		return handle.renewRawUDPAddress(pipe, peer)
+	}, handle.setErr)
 	return handle, nil
 }
 
-func prepareUDPPipeHandle(pipe config.RuntimeUDPPipe, device config.RuntimeDevice, pathCache *pathmtu.Cache) (*UDPPipeHandle, error) {
+func runtimeUDPPeerMode(mode config.RuntimeUDPPeerMode) (fastpath.UDPPeerMode, error) {
+	switch mode {
+	case config.RuntimeUDPPeerFixed:
+		return fastpath.UDPPeerFixed, nil
+	case config.RuntimeUDPPeerLearn:
+		return fastpath.UDPPeerLearn, nil
+	default:
+		return 0, fmt.Errorf("core: unsupported runtime udp peer mode %q", mode)
+	}
+}
+
+func prepareUDPPipeHandle(pipe config.RuntimeUDPPipe, device config.RuntimeDevice, pathCache *pathmtu.Cache, shared *sharedRuntimeDevice) (*UDPPipeHandle, error) {
 	if !pipe.LinkAutoOptimize && pipe.MaxDatagramPayload != 0 {
 		return nil, fmt.Errorf("core: udp pipe %s has a datagram path plan while automatic link optimization is disabled", pipe.EndpointID)
 	}
 
-	tunDevice, err := tuntap.Open(tuntap.OpenOptions{
-		Name:     device.IfName,
-		Type:     device.Type,
-		NonBlock: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("core: open %s %s: %w", device.Type, device.IfName, err)
-	}
-	netHandle, err := netapply.ApplyDevice(netapply.DeviceConfig{
-		Type:             device.Type,
-		IfName:           tunDevice.Name(),
-		MTU:              device.MTU,
-		MSSClamp:         device.MSSClamp,
-		LinkAutoOptimize: device.LinkAutoOptimize,
-		IPv4CIDR:         device.IPv4CIDR,
-		IPv6CIDR:         device.IPv6CIDR,
-		Bridge: netapply.BridgeConfig{
-			Enabled: device.Bridge.Enabled,
-			Name:    device.Bridge.Name,
-			IfName:  device.Bridge.IfName,
-			MTU:     device.Bridge.MTU,
-		},
-		Routes: netapplyRoutes(device.Routes),
-		DNS:    netapplyDNS(device.DNS),
-	})
-	if err != nil {
-		_ = tunDevice.Close()
-		return nil, fmt.Errorf("core: apply device %s: %w", tunDevice.Name(), err)
+	owned := shared == nil
+	if shared == nil {
+		tunDevice, err := tuntap.Open(tuntap.OpenOptions{Name: device.IfName, Type: device.Type, NonBlock: true})
+		if err != nil {
+			return nil, fmt.Errorf("core: open %s %s: %w", device.Type, device.IfName, err)
+		}
+		netHandle, err := netapply.ApplyDevice(netapplyDeviceConfig(device, tunDevice.Name()))
+		if err != nil {
+			_ = tunDevice.Close()
+			return nil, fmt.Errorf("core: apply device %s: %w", tunDevice.Name(), err)
+		}
+		address, err := newDeviceAddressControl(device, netHandle)
+		if err != nil {
+			_ = netHandle.Rollback()
+			_ = tunDevice.Close()
+			return nil, err
+		}
+		shared = &sharedRuntimeDevice{device: tunDevice, netApply: netHandle, address: address}
 	}
 
 	handle := &UDPPipeHandle{
 		Pipe:          pipe,
-		DeviceName:    tunDevice.Name(),
-		device:        tunDevice,
-		netApply:      netHandle,
+		DeviceName:    shared.device.Name(),
+		device:        shared.device,
+		netApply:      shared.netApply,
+		address:       shared.address,
 		udpFD:         -1,
 		pathPreparer:  defaultRawUDPPathPreparer(pathCache),
 		runtimeDevice: device,
+		ownsDevice:    owned,
 	}
 	return handle, nil
 }
 
-func startRawUDPWorker(device tuntap.Device, pipe config.RuntimeUDPPipe, frameKind fastpath.FrameKind, addressGuard fastpath.AddressGuard, udpFD int, peerMode fastpath.UDPPeerMode, peer netip.AddrPort) (*fastpath.Worker, *fastpath.Counters, error) {
+func startRawUDPWorker(device tuntap.Device, pipe config.RuntimeUDPPipe, frameKind fastpath.FrameKind, addressGuard fastpath.AddressGuard, udpFD int, peerMode fastpath.UDPPeerMode, peer netip.AddrPort, addressResponse []byte) (*fastpath.Worker, *fastpath.Counters, error) {
 	if err := prepareRawUDPWorkerSocket(udpFD, pipe, peer); err != nil {
 		return nil, nil, err
 	}
@@ -258,11 +284,15 @@ func startRawUDPWorker(device tuntap.Device, pipe config.RuntimeUDPPipe, frameKi
 		MaxFrameSize:           uint32(pipe.MaxFrameSize),
 		MaxDatagramPayload:     uint32(pipe.MaxDatagramPayload),
 		PeerMode:               peerMode,
+		InitialHandshake:       pipe.EndpointKind == "connector",
+		KeepAliveInterval:      keepAliveMilliseconds(pipe.KeepAliveSecond),
+		IdleTimeout:            keepAliveMilliseconds(pipe.IdleTimeout),
 		AddressGuardRemote:     pipe.AddressGuardRemote,
 		Peer:                   peer,
 		DeviceToNetworkRateBPS: deviceToNetworkRate,
 		NetworkToDeviceRateBPS: networkToDeviceRate,
 		VKey:                   []byte(pipe.Binding.VKeyValue),
+		AddressResponse:        addressResponse,
 		AddressGuard:           addressGuard,
 		Counters:               counters,
 	})
@@ -271,6 +301,92 @@ func startRawUDPWorker(device tuntap.Device, pipe config.RuntimeUDPPipe, frameKi
 		return nil, nil, err
 	}
 	return worker, counters, nil
+}
+
+func keepAliveMilliseconds(seconds int) uint32 {
+	if seconds <= 0 {
+		return 0
+	}
+	const maxSeconds = int(^uint32(0) / 1000)
+	if seconds > maxSeconds {
+		return ^uint32(0)
+	}
+	return uint32(seconds * 1000)
+}
+
+func (h *UDPPipeHandle) requestRawUDPAddress(pipe config.RuntimeUDPPipe, peer netip.AddrPort) error {
+	if h.address == nil || !h.address.isClient() {
+		return nil
+	}
+	if !peer.IsValid() {
+		return fmt.Errorf("core: UDP address client %s has no confirmed peer", pipe.EndpointID)
+	}
+	conn, err := duplicateUDPConn(h.udpFD)
+	if err != nil {
+		return fmt.Errorf("core: prepare UDP address client %s: %w", pipe.EndpointID, err)
+	}
+	defer conn.Close()
+	return h.exchangeRawUDPAddress(conn, pipe, peer)
+}
+
+func (h *UDPPipeHandle) renewRawUDPAddress(pipe config.RuntimeUDPPipe, peer netip.AddrPort) error {
+	if h.address == nil || !h.address.isClient() {
+		return nil
+	}
+	if !peer.IsValid() {
+		return fmt.Errorf("core: UDP address client %s has no confirmed peer", pipe.EndpointID)
+	}
+	controlPipe := pipe
+	controlPipe.BindPort = 0
+	controlPipe.ReusePort = false
+	conn, _, err := openUDPPacketConn(controlPipe, peer)
+	if err != nil {
+		return fmt.Errorf("core: open UDP address renewal socket %s: %w", pipe.EndpointID, err)
+	}
+	defer conn.Close()
+	return h.exchangeRawUDPAddress(conn, pipe, peer)
+}
+
+func (h *UDPPipeHandle) exchangeRawUDPAddress(conn net.PacketConn, pipe config.RuntimeUDPPipe, peer netip.AddrPort) error {
+	prefix, err := rawUDPPathProbePrefix(pipe.Binding.VKeyValue)
+	if err != nil {
+		return fmt.Errorf("core: build UDP address credential: %w", err)
+	}
+	request := make([]byte, 0, len(prefix)+len(rawUDPAddressRequest))
+	request = append(request, prefix...)
+	request = append(request, rawUDPAddressRequest[:]...)
+	timeout := time.Duration(pipe.ConnectTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	buffer := make([]byte, 65535)
+	for time.Now().Before(deadline) {
+		if err := conn.SetDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			return err
+		}
+		if _, err := conn.WriteTo(request, net.UDPAddrFromAddrPort(peer)); err != nil {
+			return fmt.Errorf("core: request UDP address lease: %w", err)
+		}
+		length, from, readErr := conn.ReadFrom(buffer)
+		if readErr != nil {
+			if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return fmt.Errorf("core: receive UDP address lease: %w", readErr)
+		}
+		fromUDP, ok := from.(*net.UDPAddr)
+		if !ok || fromUDP.AddrPort() != peer || length < len(prefix)+len(rawUDPAddressResponseMagic) ||
+			!equalBytes(buffer[:len(prefix)], prefix) ||
+			!equalBytes(buffer[len(prefix):len(prefix)+len(rawUDPAddressResponseMagic)], rawUDPAddressResponseMagic[:]) {
+			continue
+		}
+		if err := h.address.applyRawUDPResponse(buffer[len(prefix):length]); err != nil {
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("core: UDP address lease request for %s timed out", pipe.EndpointID)
 }
 
 func prepareRawUDPWorkerSocket(fd int, pipe config.RuntimeUDPPipe, peer netip.AddrPort) error {
@@ -325,7 +441,7 @@ func (h *UDPPipeHandle) Close() error {
 		h.startupDone = nil
 	}
 	if h.dtlsListener != nil {
-		if err := h.dtlsListener.Close(); err != nil && firstErr == nil {
+		if err := h.dtlsListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) && firstErr == nil {
 			firstErr = err
 		}
 		h.dtlsListener = nil
@@ -342,7 +458,7 @@ func (h *UDPPipeHandle) Close() error {
 		_ = dtlsConn.Close()
 	}
 	if h.dtlsPacketConn != nil {
-		if err := h.dtlsPacketConn.Close(); err != nil && firstErr == nil {
+		if err := h.dtlsPacketConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && firstErr == nil {
 			firstErr = err
 		}
 		h.dtlsPacketConn = nil
@@ -362,7 +478,11 @@ func (h *UDPPipeHandle) Close() error {
 		}
 		h.udpFD = -1
 	}
-	if h.device != nil {
+	if h.device != nil && h.ownsDevice {
+		if h.address != nil {
+			h.address.Close()
+			h.address = nil
+		}
 		if h.netApply != nil {
 			if err := h.netApply.Rollback(); err != nil && firstErr == nil {
 				firstErr = err
@@ -374,6 +494,7 @@ func (h *UDPPipeHandle) Close() error {
 		}
 		h.device = nil
 	}
+	h.device = nil
 	if h.counter != nil {
 		h.counter.Close()
 		h.counter = nil
@@ -425,19 +546,12 @@ func (h *UDPPipeHandle) replaceErr(err error) {
 }
 
 func peerForPipe(pipe config.RuntimeUDPPipe, mode fastpath.UDPPeerMode) (netip.AddrPort, fastpath.UDPPeerMode, error) {
-	if pipe.FixedPeer != "" {
-		peer, err := netip.ParseAddrPort(pipe.FixedPeer)
-		if err != nil {
-			return netip.AddrPort{}, 0, fmt.Errorf("core: parse fixed peer %q: %w", pipe.FixedPeer, err)
-		}
-		return peer, mode, nil
-	}
 	if pipe.Remote != "" && pipe.Port != 0 {
-		addr, err := netip.ParseAddr(pipe.Remote)
+		addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(pipe.Remote, strconv.Itoa(int(pipe.Port))))
 		if err != nil {
-			return netip.AddrPort{}, 0, fmt.Errorf("core: parse remote %q: %w", pipe.Remote, err)
+			return netip.AddrPort{}, 0, fmt.Errorf("core: resolve remote %q: %w", pipe.Remote, err)
 		}
-		peer := netip.AddrPortFrom(addr, pipe.Port)
+		peer := netip.AddrPortFrom(addr.AddrPort().Addr().Unmap(), addr.AddrPort().Port())
 		if mode == fastpath.UDPPeerAny {
 			mode = fastpath.UDPPeerFixed
 		}
@@ -462,14 +576,6 @@ func openUDPSocketWithHook(pipe config.RuntimeUDPPipe, peer netip.AddrPort, befo
 		}
 		bind = addr.Unmap()
 	}
-	if pipe.BindAddress != "" {
-		addr, err := netip.ParseAddr(pipe.BindAddress)
-		if err != nil {
-			return -1, netip.AddrPort{}, fmt.Errorf("core: parse udp bind address %q: %w", pipe.BindAddress, err)
-		}
-		bind = addr.Unmap()
-	}
-
 	family := unix.AF_INET
 	if bind.Is6() {
 		family = unix.AF_INET6
@@ -521,6 +627,7 @@ func openUDPPacketConn(pipe config.RuntimeUDPPipe, peer netip.AddrPort) (net.Pac
 }
 
 func configureUDPSocket(fd int, pipe config.RuntimeUDPPipe, family int) error {
+	queueBytes := socketQueueBytes(pipe.QueueSize, pipe.MaxFrameSize)
 	if pipe.LinkAutoOptimize {
 		switch family {
 		case unix.AF_INET:
@@ -535,28 +642,16 @@ func configureUDPSocket(fd int, pipe config.RuntimeUDPPipe, family int) error {
 			return fmt.Errorf("core: unsupported UDP address family %d", family)
 		}
 	}
-	if pipe.BindInterface != "" {
-		if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, pipe.BindInterface); err != nil {
-			return fmt.Errorf("core: bind udp socket to interface %q: %w", pipe.BindInterface, err)
-		}
-	}
-	if pipe.ReuseAddr {
-		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
-			return fmt.Errorf("core: set udp SO_REUSEADDR: %w", err)
-		}
-	}
 	if pipe.ReusePort {
 		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
 			return fmt.Errorf("core: set udp SO_REUSEPORT: %w", err)
 		}
 	}
-	if pipe.ReceiveBuffer > 0 {
-		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, pipe.ReceiveBuffer); err != nil {
+	if queueBytes > 0 {
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, queueBytes); err != nil {
 			return fmt.Errorf("core: set udp receive buffer: %w", err)
 		}
-	}
-	if pipe.SendBuffer > 0 {
-		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, pipe.SendBuffer); err != nil {
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, queueBytes); err != nil {
 			return fmt.Errorf("core: set udp send buffer: %w", err)
 		}
 	}

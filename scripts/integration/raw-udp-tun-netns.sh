@@ -124,7 +124,17 @@ echo "build tapx-core"
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500, "LinkAutoOptimize": true}
+    {
+      "ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500,
+      "LinkAutoOptimize": true, "AccessRole": "server",
+      "TUNDHCP": {
+        "Mode": "server", "Protocol": "dual",
+        "IPv4CIDR": "10.88.0.1/30", "IPv6CIDR": "fd88::1/126",
+        "PoolStart": "10.88.0.2", "PoolEnd": "10.88.0.2",
+        "IPv6PoolStart": "fd88::2", "IPv6PoolEnd": "fd88::2",
+        "LeaseSeconds": 300
+      }
+    }
   ],
   "Routes": [
     {"ID": "route-a", "Enabled": true, "DeviceID": "tun-a"}
@@ -136,7 +146,7 @@ cat >"${BUILD_DIR}/tapx-a.json" <<JSON
       "BindHost": "172.31.250.1",
       "BindPort": 44000,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "172.31.250.2:44000"},
+      "RawUDP": {},
       "Binding": {"RouteID": "route-a"}
     }
   ]
@@ -146,19 +156,23 @@ JSON
 cat >"${BUILD_DIR}/tapx-b.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500, "LinkAutoOptimize": true}
+    {
+      "ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500,
+      "LinkAutoOptimize": true, "AccessRole": "client",
+      "TUNDHCP": {"Mode": "client", "Protocol": "dual"}
+    }
   ],
   "Routes": [
     {"ID": "route-b", "Enabled": true, "DeviceID": "tun-b"}
   ],
-  "Listeners": [
+  "Connectors": [
     {
       "ID": "udp-b",
       "Enabled": true,
-      "BindHost": "172.31.250.2",
-      "BindPort": 44000,
+      "Remote": "172.31.250.1",
+      "Port": 44000,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "172.31.250.1:44000"},
+      "RawUDP": {},
       "Binding": {"RouteID": "route-b"}
     }
   ]
@@ -203,13 +217,11 @@ wait_for_link "$NS_B" "$TUN_B" || fail_with_logs
 show_interface_evidence "$NS_A" "$TUN_A"
 show_interface_evidence "$NS_B" "$TUN_B"
 
-echo "configure tunnel interfaces"
-ip -n "$NS_A" addr add 10.88.0.1/30 dev "$TUN_A"
-ip -n "$NS_B" addr add 10.88.0.2/30 dev "$TUN_B"
-ip -n "$NS_A" addr add fd88::1/126 dev "$TUN_A" nodad
-ip -n "$NS_B" addr add fd88::2/126 dev "$TUN_B" nodad
-ip -n "$NS_A" link set "$TUN_A" up
-ip -n "$NS_B" link set "$TUN_B" up
+echo "verify TapX address control assigned the tunnel interfaces"
+ip -n "$NS_A" addr show dev "$TUN_A" | grep -q "10.88.0.1/30" || fail_with_logs
+ip -n "$NS_B" addr show dev "$TUN_B" | grep -q "10.88.0.2/30" || fail_with_logs
+ip -n "$NS_A" addr show dev "$TUN_A" | grep -q "fd88::1/126" || fail_with_logs
+ip -n "$NS_B" addr show dev "$TUN_B" | grep -q "fd88::2/126" || fail_with_logs
 
 echo "verify underlay"
 ip netns exec "$NS_A" ping -c 1 -W 1 172.31.250.2 >/dev/null || fail_with_logs

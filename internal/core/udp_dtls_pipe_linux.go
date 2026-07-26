@@ -16,7 +16,6 @@ import (
 	"github.com/pion/dtls/v3"
 
 	"tapx/internal/fastpath"
-	"tapx/internal/linkdiag"
 	"tapx/internal/model"
 	"tapx/internal/pathmtu"
 )
@@ -109,10 +108,13 @@ func (h *UDPPipeHandle) acceptAndRunDTLS(ctx context.Context, packetConn net.Pac
 		return
 	}
 	if hello.diagnostic {
-		if err := linkdiag.ServeStream(ctx, conn, hello.vkey); err != nil {
+		if err := serveAddressControl(ctx, conn, hello.vkey, h.address); err != nil {
 			h.setDTLSErr(ctx, fmt.Errorf("core: serve DTLS diagnostic %s: %w", h.Pipe.EndpointID, err))
 		}
 		_ = conn.Close()
+		if ctx.Err() == nil {
+			h.acceptAndRunDTLS(ctx, packetConn, dtlsOptions, frameKind, guard)
+		}
 		return
 	}
 	h.mu.Lock()
@@ -129,6 +131,9 @@ func (h *UDPPipeHandle) acceptAndRunDTLS(ctx context.Context, packetConn net.Pac
 func (h *UDPPipeHandle) startDTLSConnector(frameKind fastpath.FrameKind, guard fastpath.AddressGuard, peer netip.AddrPort) error {
 	dtlsOptions, err := rawUDPClientDTLSOptions(h.Pipe.DTLS, peer.Addr().String())
 	if err != nil {
+		return err
+	}
+	if err := h.ensureDTLSAddressLease(peer, dtlsOptions); err != nil {
 		return err
 	}
 	packetConn, local, err := openUDPPacketConn(h.Pipe, peer)
@@ -194,7 +199,39 @@ func (h *UDPPipeHandle) startDTLSConnector(frameKind fastpath.FrameKind, guard f
 		}
 		h.mu.Unlock()
 	}()
+	h.address.startRenewal(func(context.Context) error {
+		return h.ensureDTLSAddressLease(peer, dtlsOptions)
+	}, h.setErr)
 	return nil
+}
+
+func (h *UDPPipeHandle) ensureDTLSAddressLease(peer netip.AddrPort, options []dtls.ClientOption) error {
+	if !h.address.isClient() {
+		return nil
+	}
+	pipe := h.Pipe
+	pipe.BindPort = 0
+	pipe.ReusePort = false
+	packetConn, _, err := openUDPPacketConn(pipe, peer)
+	if err != nil {
+		return err
+	}
+	defer packetConn.Close()
+	conn, err := dtls.ClientWithOptions(packetConn, udpAddrFromAddrPort(peer), options...)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), h.dtlsHandshakeTimeout())
+	defer cancel()
+	if err := conn.HandshakeContext(ctx); err != nil {
+		return fmt.Errorf("core: address control DTLS handshake %s: %w", h.Pipe.EndpointID, err)
+	}
+	credential := h.Pipe.Binding.VKeyValue
+	if err := sendDTLSDiagnosticHello(ctx, conn, credential, h.dtlsHandshakeTimeout()); err != nil {
+		return err
+	}
+	return h.address.requestLease(ctx, conn, credential, addressLeaseKey(h.Pipe.Binding, h.Pipe.DeviceID, h.Pipe.EndpointID))
 }
 
 func (h *UDPPipeHandle) confirmDTLSPath(parent context.Context, conn *dtls.Conn, peer netip.AddrPort) error {
@@ -542,28 +579,12 @@ func rawUDPServerDTLSOptions(settings model.RawDTLSSettings) ([]dtls.ServerOptio
 	}
 	options := []dtls.ServerOption{
 		dtls.WithCertificates(cert),
-		dtls.WithInsecureSkipVerifyHello(settings.AllowInsecure),
-	}
-	if protocols := cleanALPN(settings.ALPN); len(protocols) > 0 {
-		options = append(options, dtls.WithSupportedProtocols(protocols...))
 	}
 	if settings.MTU > 0 {
 		options = append(options, dtls.WithMTU(settings.MTU))
 	}
 	if settings.ReplayWindow > 0 {
 		options = append(options, dtls.WithReplayProtectionWindow(settings.ReplayWindow))
-	}
-	if settings.CAFile != "" {
-		pool, err := loadCertPool(settings.CAFile)
-		if err != nil {
-			return nil, err
-		}
-		options = append(options, dtls.WithClientCAs(pool))
-		if settings.AllowInsecure {
-			options = append(options, dtls.WithClientAuth(dtls.RequestClientCert))
-		} else {
-			options = append(options, dtls.WithClientAuth(dtls.RequireAndVerifyClientCert))
-		}
 	}
 	return options, nil
 }
@@ -573,28 +594,11 @@ func rawUDPClientDTLSOptions(settings model.RawDTLSSettings, remote string) ([]d
 		dtls.WithServerName(firstNonEmpty(settings.ServerName, remote)),
 		dtls.WithInsecureSkipVerify(settings.AllowInsecure),
 	}
-	if protocols := cleanALPN(settings.ALPN); len(protocols) > 0 {
-		options = append(options, dtls.WithSupportedProtocols(protocols...))
-	}
 	if settings.MTU > 0 {
 		options = append(options, dtls.WithMTU(settings.MTU))
 	}
 	if settings.ReplayWindow > 0 {
 		options = append(options, dtls.WithReplayProtectionWindow(settings.ReplayWindow))
-	}
-	if settings.CAFile != "" {
-		pool, err := loadCertPool(settings.CAFile)
-		if err != nil {
-			return nil, err
-		}
-		options = append(options, dtls.WithRootCAs(pool))
-	}
-	if settings.CertFile != "" || settings.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(settings.CertFile, settings.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("core: load raw udp dtls client certificate: %w", err)
-		}
-		options = append(options, dtls.WithCertificates(cert))
 	}
 	return options, nil
 }

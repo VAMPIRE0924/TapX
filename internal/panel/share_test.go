@@ -10,7 +10,7 @@ import (
 
 func TestBuildClientShareRawTapXLink(t *testing.T) {
 	cfg := config.RuntimeConfig{
-		Devices: []model.Device{{ID: "tun-a", Enabled: true, Type: model.DeviceTUN, IfName: "tapx0", MTU: 1400, IPv4CIDR: "10.30.0.1/30"}},
+		Devices: []model.Device{{ID: "tun-a", Enabled: true, Type: model.DeviceTUN, IfName: "tapx0", MTU: 1400}},
 		VKeys:   []model.VKey{{ID: "vk-a", Enabled: true, Name: "Raw Key", Value: "secret-vkey"}},
 		Addresses: []model.AddressLimit{{
 			ID: "addr-a", Enabled: true, DeviceID: "tun-a", ClientID: "client-a",
@@ -31,7 +31,7 @@ func TestBuildClientShareRawTapXLink(t *testing.T) {
 		}},
 		Clients: []model.Client{{
 			ID: "client-a", Enabled: true, Name: "Alice", Email: "alice@example.test", ListenerID: "udp-in",
-			CredentialType: "vkey", CredentialValue: "secret-vkey", Binding: model.Binding{RouteID: "route-a"},
+			Binding:   model.Binding{RouteID: "route-a"},
 			AddressID: "addr-a", TrafficCap: 1024, UploadRateLimit: 3_000_000, DownloadRateLimit: 5_000_000,
 		}},
 	}
@@ -81,7 +81,7 @@ func TestBuildClientShareVLESSLink(t *testing.T) {
 		}},
 		Clients: []model.Client{{
 			ID: "client-x", Enabled: true, Name: "Xray User", ListenerID: "xray-in",
-			CredentialType: "uuid", CredentialValue: "11111111-1111-4111-8111-111111111111",
+			UUID: "11111111-1111-4111-8111-111111111111",
 		}},
 	}
 
@@ -105,13 +105,14 @@ func TestBuildClientShareVLESSLink(t *testing.T) {
 
 func TestBuildClientShareCreatesOneLinkPerListener(t *testing.T) {
 	cfg := config.RuntimeConfig{
+		VKeys: []model.VKey{{ID: "vk-a", Enabled: true, Value: "raw-secret"}},
 		Listeners: []model.Listener{
 			{ID: "tcp-in", Enabled: true, BindHost: "198.51.100.10", BindPort: 41000, Transport: model.TransportTCP},
 			{ID: "udp-in", Enabled: true, BindHost: "198.51.100.10", BindPort: 42000, Transport: model.TransportUDP},
 		},
 		Clients: []model.Client{{
 			ID: "client-raw", Enabled: true, Name: "Raw User", ListenerID: "tcp-in",
-			ListenerIDs: []string{"tcp-in", "udp-in"}, CredentialType: "vkey", CredentialValue: "raw-secret",
+			ListenerIDs: []string{"tcp-in", "udp-in"}, Binding: model.Binding{VKeyID: "vk-a"},
 		}},
 	}
 
@@ -142,7 +143,7 @@ func TestBuildClientShareIgnoresUnrelatedInvalidObjects(t *testing.T) {
 			{ID: "broken-xray", Enabled: true, BindPort: 45001, Transport: model.TransportXray},
 		},
 		Clients: []model.Client{{
-			ID: "client-raw", Enabled: true, ListenerID: "raw-in", CredentialType: "raw-udp",
+			ID: "client-raw", Enabled: true, ListenerID: "raw-in",
 		}},
 	}
 
@@ -186,8 +187,8 @@ func TestBuildClientShareUsesCustomListenerShareAddress(t *testing.T) {
 			ShareAddressStrategy: "custom", ShareAddress: "edge.example.com",
 		}},
 		Clients: []model.Client{{
-			ID: "client-x", Enabled: true, ListenerID: "xray-in", CredentialType: "uuid",
-			CredentialValue: "11111111-1111-4111-8111-111111111111",
+			ID: "client-x", Enabled: true, ListenerID: "xray-in",
+			UUID: "11111111-1111-4111-8111-111111111111",
 		}},
 	}
 

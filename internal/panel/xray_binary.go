@@ -59,14 +59,15 @@ func (s *Server) handleXrayExternalUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	rawContentType := r.Header.Get("Content-Type")
+	contentType, _, _ := mime.ParseMediaType(rawContentType)
 	if strings.EqualFold(contentType, "multipart/form-data") {
 		s.handleXrayExternalMultipartUpload(w, r, path)
 		return
 	}
 
 	defer r.Body.Close()
-	status, err := writeXrayBinary(path, r.Body)
+	status, err := writeDownloadedXrayBinary(path, "", rawContentType, r.Body, "overwrite")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -95,7 +96,7 @@ func (s *Server) handleXrayExternalMultipartUpload(w http.ResponseWriter, r *htt
 			_ = part.Close()
 			continue
 		}
-		status, err := writeXrayBinary(path, part)
+		status, err := writeDownloadedXrayBinary(path, part.FileName(), part.Header.Get("Content-Type"), part, "overwrite")
 		_ = part.Close()
 		if err != nil {
 			writeError(w, err)
@@ -429,21 +430,32 @@ func inspectXrayBinary(path string) xrayBinaryStatus {
 	status.Mode = info.Mode().String()
 	status.ModifiedAt = info.ModTime().UTC().Format(time.RFC3339Nano)
 	if status.Executable {
-		status.Version = inspectXrayVersion(status.Path)
+		status.Version, err = inspectXrayVersion(status.Path)
+		if err != nil {
+			status.Executable = false
+			status.Error = err.Error()
+		}
 	}
 	return status
 }
 
-func inspectXrayVersion(path string) string {
+func inspectXrayVersion(path string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, path, "version").Output()
+	output, err := exec.CommandContext(ctx, path, "version").CombinedOutput()
 	if err != nil {
-		return ""
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("xray version check timed out")
+		}
+		detail := strings.TrimSpace(string(output))
+		if detail != "" {
+			return "", fmt.Errorf("xray version check failed: %s", detail)
+		}
+		return "", fmt.Errorf("xray version check failed: %w", err)
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) < 2 || !strings.EqualFold(fields[0], "xray") {
-		return ""
+		return "", fmt.Errorf("xray version output is invalid")
 	}
-	return strings.TrimPrefix(fields[1], "v")
+	return strings.TrimPrefix(fields[1], "v"), nil
 }

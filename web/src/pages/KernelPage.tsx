@@ -480,11 +480,11 @@ function ExternalKernelSettings({ status, diagnostics, action, onStatus, onDownl
         <Row gutter={[20, 0]}>
           <Col xs={24} xl={12}>
             <Form.Item name="externalXrayEnabled" label={t('kernel.enableExternalXray')} tooltip={t('kernel.enableExternalHelp')} valuePropName="checked"><Switch /></Form.Item>
-            <Form.Item name="externalXrayPath" label={t('kernel.externalPath')} tooltip={t('kernel.externalPathHelp')}><Input placeholder="/usr/local/bin/xray" /></Form.Item>
-            <Form.Item name="externalXrayConfigFile" label={t('kernel.configFile')} tooltip={t('kernel.configFileHelp')}><Input placeholder="/usr/local/etc/tapx/xray/generated.json" /></Form.Item>
+            <Form.Item name="externalXrayPath" label={t('kernel.externalPath')} tooltip={t('kernel.externalPathHelp')}><Input placeholder="/var/lib/tapx/xray/xray" /></Form.Item>
+            <Form.Item name="externalXrayConfigFile" label={t('kernel.configFile')} tooltip={t('kernel.configFileHelp')}><Input placeholder="/var/lib/tapx/xray/generated.json" /></Form.Item>
           </Col>
           <Col xs={24} xl={12}>
-            <Form.Item name="externalXrayWorkDir" label={t('kernel.workDir')} tooltip={t('kernel.workDirHelp')}><Input placeholder="/usr/local/etc/tapx/xray" /></Form.Item>
+            <Form.Item name="externalXrayWorkDir" label={t('kernel.workDir')} tooltip={t('kernel.workDirHelp')}><Input placeholder="/var/lib/tapx/xray" /></Form.Item>
             <Form.Item name="externalXrayArgs" label={t('kernel.args')} tooltip={t('kernel.argsHelp')}><Input.TextArea rows={3} placeholder={'run\n-config\n{config}'} /></Form.Item>
           </Col>
         </Row>
@@ -564,11 +564,11 @@ export function diagnosticPlatform(report?: DiagnosticReport): string {
   return `${goos}-${goarch}`;
 }
 
-function applyExternalXrayPathDefaults(values: KernelSettings, report?: DiagnosticReport) {
+export function applyExternalXrayPathDefaults(values: KernelSettings, report?: DiagnosticReport) {
   const isWindows = report?.process?.goos === 'windows';
-  if (!values.externalXrayPath) values.externalXrayPath = isWindows ? 'C:\\ProgramData\\TapX\\xray.exe' : '/usr/local/bin/xray';
-  if (!values.externalXrayConfigFile) values.externalXrayConfigFile = isWindows ? 'C:\\ProgramData\\TapX\\xray.json' : '/usr/local/etc/tapx/xray/generated.json';
-  if (!values.externalXrayWorkDir) values.externalXrayWorkDir = isWindows ? 'C:\\ProgramData\\TapX' : '/usr/local/etc/tapx/xray';
+  if (!values.externalXrayPath) values.externalXrayPath = isWindows ? 'C:\\ProgramData\\TapX\\xray.exe' : '/var/lib/tapx/xray/xray';
+  if (!values.externalXrayConfigFile) values.externalXrayConfigFile = isWindows ? 'C:\\ProgramData\\TapX\\xray.json' : '/var/lib/tapx/xray/generated.json';
+  if (!values.externalXrayWorkDir) values.externalXrayWorkDir = isWindows ? 'C:\\ProgramData\\TapX' : '/var/lib/tapx/xray';
 }
 
 export function officialXrayAsset(platform: string): string {

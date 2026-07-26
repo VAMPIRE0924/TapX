@@ -35,6 +35,7 @@ describe('typed panel settings adapter', () => {
     const [row] = objectToSettings({
       settingsID: 'global',
       settingsName: 'TapX',
+      panelName: '边缘网络面板',
       listenIP: '127.0.0.1',
       listenPort: 2053,
       listenDomain: 'panel.example.com',
@@ -60,6 +61,7 @@ describe('typed panel settings adapter', () => {
 
     expect(row).toMatchObject({
       PanelDomain: 'panel.example.com',
+      PanelName: '边缘网络面板',
       PanelBasePath: '/tapx/',
       Timezone: 'Asia/Hong_Kong',
       PanelOutbound: 'connector-a',
@@ -82,6 +84,7 @@ describe('typed panel settings adapter', () => {
     expect(settingsToObject([row])).toMatchObject({
       settingsID: 'global',
       settingsName: 'TapX',
+      panelName: '边缘网络面板',
       listenIP: '127.0.0.1',
       listenPort: 2053,
       listenDomain: 'panel.example.com',

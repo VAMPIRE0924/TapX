@@ -3,13 +3,13 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 
 	"tapx/internal/fastpath"
-	"tapx/internal/linkdiag"
 )
 
 func (h *TCPPipeHandle) startGoListener(frameKind fastpath.FrameKind, guard fastpath.AddressGuard) error {
@@ -46,7 +46,26 @@ func (h *TCPPipeHandle) acceptGoLoop(ctx context.Context, listener *net.TCPListe
 		active := h.tlsDone != nil
 		h.mu.Unlock()
 		if active {
-			go func() { _ = linkdiag.ServeStream(ctx, conn, "") }()
+			go func() { _ = serveAddressControl(ctx, conn, "", h.address) }()
+			continue
+		}
+		if h.address.isServer() {
+			reader := bufio.NewReaderSize(conn, 4+rawVKeyHeaderBaseSize+rawVKeyMaxSize)
+			probe, probeErr := peekTCPDispatchReader(reader, h.Pipe.LengthMode, h.Pipe.MaxFrameSize)
+			if probeErr != nil {
+				_ = conn.Close()
+				h.setErr(probeErr)
+				continue
+			}
+			stream := &bufferedDispatchConn{Conn: conn, reader: reader}
+			if probe.Diagnostic {
+				go func() { _ = serveAddressControl(ctx, stream, probe.VKey, h.address) }()
+				continue
+			}
+			conn = nil
+			if _, err := h.startTLSBridge(ctx, stream, frameKind, guard); err != nil {
+				h.setErr(err)
+			}
 			continue
 		}
 		remote, err := tcpAddrPort(conn.RemoteAddr())
@@ -65,6 +84,9 @@ func (h *TCPPipeHandle) acceptGoLoop(ctx context.Context, listener *net.TCPListe
 }
 
 func (h *TCPPipeHandle) startGoConnector(frameKind fastpath.FrameKind, guard fastpath.AddressGuard) error {
+	if err := h.ensureGoBridgeAddressLease(context.Background()); err != nil {
+		return err
+	}
 	conn, local, remote, err := dialTCP(h.Pipe)
 	if err != nil {
 		return err
@@ -81,5 +103,20 @@ func (h *TCPPipeHandle) startGoConnector(frameKind fastpath.FrameKind, guard fas
 		cancel()
 		return err
 	}
+	h.address.startRenewal(h.ensureGoBridgeAddressLease, h.setErr)
 	return nil
+}
+
+func (h *TCPPipeHandle) ensureGoBridgeAddressLease(parent context.Context) error {
+	if !h.address.isClient() {
+		return nil
+	}
+	controlConn, _, _, err := dialTCP(h.Pipe)
+	if err != nil {
+		return err
+	}
+	defer controlConn.Close()
+	ctx, cancel := h.tlsHandshakeContext(parent)
+	defer cancel()
+	return h.address.requestLease(ctx, controlConn, "", addressLeaseKey(h.Pipe.Binding, h.Pipe.DeviceID, h.Pipe.EndpointID))
 }

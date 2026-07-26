@@ -11,20 +11,19 @@ import (
 	"golang.org/x/sys/unix"
 
 	"tapx/internal/config"
+	"tapx/internal/fastpath"
 	"tapx/internal/model"
 )
 
-func TestOpenUDPSocketAppliesAdvancedSocketSettings(t *testing.T) {
+func TestOpenUDPSocketAppliesDerivedQueueBuffers(t *testing.T) {
 	pipe := config.RuntimeUDPPipe{
-		EndpointID:    "udp-listener",
-		EndpointKind:  "listener",
-		FrameKind:     model.DeviceTUN,
-		BindHost:      "0.0.0.0",
-		BindAddress:   "127.0.0.1",
-		ReceiveBuffer: 8192,
-		SendBuffer:    16384,
-		ReuseAddr:     true,
-		ReusePort:     true,
+		EndpointID:   "udp-listener",
+		EndpointKind: "listener",
+		FrameKind:    model.DeviceTUN,
+		BindHost:     "127.0.0.1",
+		QueueSize:    8,
+		MaxFrameSize: 2048,
+		ReusePort:    true,
 	}
 
 	fd, local, err := openUDPSocket(pipe, netip.AddrPort{})
@@ -36,8 +35,24 @@ func TestOpenUDPSocketAppliesAdvancedSocketSettings(t *testing.T) {
 	if got := local.Addr().String(); got != "127.0.0.1" {
 		t.Fatalf("local addr = %s, want 127.0.0.1", got)
 	}
-	assertSockoptAtLeast(t, fd, unix.SO_RCVBUF, pipe.ReceiveBuffer)
-	assertSockoptAtLeast(t, fd, unix.SO_SNDBUF, pipe.SendBuffer)
+	wantBuffer := socketQueueBytes(pipe.QueueSize, pipe.MaxFrameSize)
+	assertSockoptAtLeast(t, fd, unix.SO_RCVBUF, wantBuffer)
+	assertSockoptAtLeast(t, fd, unix.SO_SNDBUF, wantBuffer)
+}
+
+func TestPeerForPipeUnmapsResolvedIPv4(t *testing.T) {
+	peer, mode, err := peerForPipe(config.RuntimeUDPPipe{
+		Remote: "127.0.0.1", Port: 44000,
+	}, fastpath.UDPPeerFixed)
+	if err != nil {
+		t.Fatalf("peerForPipe: %v", err)
+	}
+	if !peer.Addr().Is4() || peer.Addr().Is4In6() {
+		t.Fatalf("resolved peer = %s, want native IPv4", peer)
+	}
+	if mode != fastpath.UDPPeerFixed {
+		t.Fatalf("peer mode = %v, want fixed", mode)
+	}
 }
 
 func TestOpenUDPSocketAllowsExplicitPortReuse(t *testing.T) {
@@ -45,8 +60,7 @@ func TestOpenUDPSocketAllowsExplicitPortReuse(t *testing.T) {
 		EndpointID:   "udp-a",
 		EndpointKind: "listener",
 		FrameKind:    model.DeviceTUN,
-		BindAddress:  "127.0.0.1",
-		ReuseAddr:    true,
+		BindHost:     "127.0.0.1",
 		ReusePort:    true,
 	}
 
@@ -69,11 +83,11 @@ func TestOpenUDPSocketAllowsExplicitPortReuse(t *testing.T) {
 	defer unix.Close(secondFD)
 }
 
-func TestOpenUDPSocketRejectsInvalidBindAddress(t *testing.T) {
+func TestOpenUDPSocketRejectsInvalidBindHost(t *testing.T) {
 	_, _, err := openUDPSocket(config.RuntimeUDPPipe{
 		EndpointID:   "udp-listener",
 		EndpointKind: "listener",
-		BindAddress:  "not-an-ip",
+		BindHost:     "not-an-ip",
 	}, netip.AddrPort{})
 	if err == nil {
 		t.Fatal("openUDPSocket() error = nil, want invalid bind address error")
@@ -84,7 +98,7 @@ func TestOpenUDPSocketAutoOptimizeEnablesIPv4PathMTUDiscovery(t *testing.T) {
 	fd, _, err := openUDPSocket(config.RuntimeUDPPipe{
 		EndpointID:       "udp-auto-mtu",
 		EndpointKind:     "connector",
-		BindAddress:      "127.0.0.1",
+		BindHost:         "127.0.0.1",
 		LinkAutoOptimize: true,
 	}, netip.MustParseAddrPort("127.0.0.1:45000"))
 	if err != nil {
@@ -212,6 +226,23 @@ func TestStartUDPPipeRejectsPlanWhenOptimizationIsDisabled(t *testing.T) {
 	}, config.RuntimeDevice{})
 	if err == nil {
 		t.Fatal("startUDPPipe() accepted a path plan while optimization is disabled")
+	}
+}
+
+func TestUDPPipeCloseIgnoresAlreadyClosedDTLSPacketConn(t *testing.T) {
+	packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := packetConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	handle := &UDPPipeHandle{udpFD: -1, dtlsPacketConn: packetConn}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want idempotent success", err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want idempotent success", err)
 	}
 }
 

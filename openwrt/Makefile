@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=tapx
 TAPX_SOURCE_VERSION:=$(if $(TAPX_VERSION),$(TAPX_VERSION),0.0.0-dev)
 PKG_VERSION:=$(subst dev,git,$(subst -,_,$(TAPX_SOURCE_VERSION)))
-PKG_RELEASE:=1
+PKG_RELEASE:=3
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=TapX
 
@@ -15,7 +15,16 @@ define Package/tapx-core
   SECTION:=net
   CATEGORY:=Network
   TITLE:=TapX TAP/TUN transport core
-  DEPENDS:=+libc +kmod-tun +ip-full +tc-full +iptables-nft +ip6tables-nft +ca-bundle
+  DEPENDS:=+libc \
+	+kmod-tun \
+	+ip-full \
+	+tc-full \
+	+kmod-sched-flower \
+	+iptables-nft \
+	+ip6tables-nft \
+	+dnsmasq \
+	+isc-dhcp-relay-ipv6 \
+	+ca-bundle
 endef
 
 define Package/tapx-core/description
@@ -92,7 +101,10 @@ define Package/luci-app-tapx/install
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
 	$(INSTALL_DATA) ./luci-app-tapx/root/usr/share/rpcd/acl.d/luci-app-tapx.json $(1)/usr/share/rpcd/acl.d/luci-app-tapx.json
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/tapx
-	$(INSTALL_DATA) ./luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js $(1)/www/luci-static/resources/view/tapx/config.js
+	$(INSTALL_DATA) ./luci-app-tapx/root/www/luci-static/resources/view/tapx/*.js $(1)/www/luci-static/resources/view/tapx/
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/tapx
+	$(INSTALL_DATA) ./luci-app-tapx/root/www/luci-static/resources/tapx/*.js $(1)/www/luci-static/resources/tapx/
+	$(INSTALL_DATA) ./luci-app-tapx/root/www/luci-static/resources/tapx/*.css $(1)/www/luci-static/resources/tapx/
 endef
 
 $(eval $(call BuildPackage,tapx-core))

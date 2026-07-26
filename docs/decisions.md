@@ -99,12 +99,21 @@ assignment fields belong in the binding payload only for the "auto create by
 name" workflow, where saving the Listener or Connector also creates or updates
 the corresponding Device record.
 
-When address configuration is enabled, the operator can choose automatic
-assignment or manual assignment. Automatic assignment records the intent but
-does not save manual IPv4, IPv6, or gateway values. Manual assignment saves the
-operator-provided address fields. Legacy records or calls that already contain
-IPv4, IPv6, or gateway values are treated as manual address configuration for
-compatibility.
+TAP uses real DHCP passthrough or a local DHCP service. TUN automatic address
+assignment uses the TapX control channel because a layer-3 TUN interface cannot
+run Ethernet DHCP. The service side allocates IPv4/IPv6 leases and the access
+side applies address, gateway, and DNS transactionally. Manual mode applies the
+configured values directly.
+
+Host network conflicts are activation errors, not persistence errors. TapX
+must allow a disabled TUN/TAP configuration to be saved. Before startup or any
+runtime re-apply, the Go control plane compares every enabled device network
+and DHCP pool with existing Linux/OpenWrt interface networks, addresses,
+routes, and DHCP pools. Any overlap aborts the apply before the active runtime
+is stopped and before a TUN/TAP fd, interface address, route, bridge, or
+firewall rule is created. The Web panel keeps the device disabled and reports
+the concrete conflicting interface/network. New devices default to disabled so
+this check occurs when the operator explicitly enables them.
 
 TapX raw Connectors mirror Listener composition for Raw TCP/UDP. They can run
 bare for maximum performance, or optionally carry vKey plus Raw TCP TLS / Raw
@@ -310,3 +319,25 @@ Public servers are validation targets only. They are not development machines an
 - TapX-UI can have a separate update entry, but release installation must validate the panel/core compatibility described by `tapx-update-manifest.json`.
 - External Xray remains an independently managed official binary.
 - Version checks, release downloads, checksum verification, extraction, and process restart are Go control-plane work initiated by an administrator. None of them add work to raw UDP/TCP, TAP/TUN, C fastpath, or embedded Xray packet handling.
+
+## External Xray state paths
+
+- Non-Windows defaults place the managed external Xray binary, generated
+  configuration, and working directory under `/var/lib/tapx/xray`.
+- This location is writable by the hardened Linux systemd unit
+  (`ProtectSystem=full` with `/var/lib/tapx` in `ReadWritePaths`) and is also
+  suitable for OpenWrt overlay storage. The panel must not weaken service
+  hardening merely to write a downloaded binary under `/usr/local`.
+- Switching an endpoint between embedded and external Xray changes only the
+  owning Xray process. It must preserve protocol, address, credentials,
+  transport, security, and advanced settings. Defaults are regenerated only
+  when crossing between the Xray and TapX raw transport families.
+
+## OpenWrt runtime ownership
+
+- When `tapx-panel` is enabled and initialized, it is the sole owner of the
+  local runtime lifecycle. The legacy `tapx-core` init service delegates to the
+  panel instead of starting a second process that competes for TUN/TAP devices.
+- LuCI service restart remains a real init-script restart even when no UCI
+  value changed. Stored listener and connector objects survive that restart
+  and the panel restores their runtime state.

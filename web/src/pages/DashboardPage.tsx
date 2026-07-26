@@ -95,6 +95,9 @@ export function DashboardPage() {
   const rates = data.rates || {};
   const tapxPipes = (runtime.udpPipes?.length || 0) + (runtime.tcpPipes?.length || 0);
   const xrayPipes = runtime.xrayPipes?.length || 0;
+  const externalXrayTunnels = (runtime.tcpPipes || []).filter((item) => (item as { xrayRuntime?: string }).xrayRuntime === 'external').length;
+  const rawTcpTunnels = Math.max(0, (runtime.tcpPipes?.length || 0) - externalXrayTunnels);
+  const rawUdpTunnels = runtime.udpPipes?.length || 0;
   const activeEndpoints = (data.stats?.byEndpoint || []).filter((item) => (item.pipes || 0) > 0);
   const activeListeners = activeEndpoints.filter((item) => item.kind === 'listener').length;
   const activeConnectors = activeEndpoints.filter((item) => item.kind === 'connector').length;
@@ -183,7 +186,11 @@ export function DashboardPage() {
           </ActionGrid>
         </DashboardCard>
 
-        <DashboardCard title={t('dashboard.tapx')} status={tapxPipes > 0 ? t('common.running') : t('common.stopped')} statusTone={tapxPipes > 0 ? 'green' : 'orange'}>
+        <DashboardCard
+          title={t('dashboard.tapx')}
+          status={componentStatus(tapxPipes > 0, diagnostics?.components?.tapx, t)}
+          statusTone={tapxPipes > 0 ? 'green' : 'orange'}
+        >
           <ActionGrid>
             <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'tapx' })} />
             <ActionItem icon={<PoweroffOutlined />} text={t('common.stop')} onClick={() => confirmRuntimeAction('tapx', 'TapX', 'stop')} />
@@ -192,7 +199,11 @@ export function DashboardPage() {
           </ActionGrid>
         </DashboardCard>
 
-        <DashboardCard title={t('dashboard.embeddedXray')} status={runtimeStatus(embeddedXray, t)} statusTone={embeddedXray?.running ? 'green' : 'orange'}>
+        <DashboardCard
+          title={t('dashboard.embeddedXray')}
+          status={runtimeStatus(embeddedXray, diagnostics?.components?.embeddedXray, t)}
+          statusTone={embeddedXray?.running ? 'green' : 'orange'}
+        >
           <ActionGrid>
             <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'xray' })} />
             <ActionItem icon={<PoweroffOutlined />} text={t('common.stop')} onClick={() => confirmRuntimeAction('embedded-xray', t('dashboard.embeddedXray'), 'stop')} />
@@ -201,7 +212,11 @@ export function DashboardPage() {
           </ActionGrid>
         </DashboardCard>
 
-        <DashboardCard title={t('dashboard.externalXray')} status={runtimeStatus(externalXray, t)} statusTone={externalXray?.running ? 'green' : 'orange'}>
+        <DashboardCard
+          title={t('dashboard.externalXray')}
+          status={runtimeStatus(externalXray, diagnostics?.components?.externalXray, t)}
+          statusTone={externalXray?.running ? 'green' : 'orange'}
+        >
           <ActionGrid>
             <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'xray' })} />
             <ActionItem icon={<PoweroffOutlined />} text={t('common.stop')} onClick={() => confirmRuntimeAction('external-xray', t('dashboard.externalXray'), 'stop')} />
@@ -235,16 +250,16 @@ export function DashboardPage() {
           </StatGrid>
         </DashboardCard>
 
-        <DashboardCard title={t('dashboard.dataPlane')}>
+        <DashboardCard title={t('dashboard.tunnelStatus')}>
           <StatGrid columns={2}>
-            <Stat label={t('dashboard.tapxPipes')} value={String(tapxPipes)} icon={<BranchesOutlined />} />
-            <Stat label={t('dashboard.xrayPipes')} value={String(xrayPipes)} icon={<BranchesOutlined />} />
-            <Stat label={t('dashboard.tcpPipes')} value={String(runtime.tcpPipes?.length || 0)} />
-            <Stat label={t('dashboard.udpPipes')} value={String(runtime.udpPipes?.length || 0)} />
+            <Stat label={t('dashboard.rawTcpTunnels')} value={String(rawTcpTunnels)} icon={<BranchesOutlined />} />
+            <Stat label={t('dashboard.rawUdpTunnels')} value={String(rawUdpTunnels)} icon={<BranchesOutlined />} />
+            <Stat label={t('dashboard.embeddedXrayTunnels')} value={String(xrayPipes)} />
+            <Stat label={t('dashboard.externalXrayTunnels')} value={String(externalXrayTunnels)} />
           </StatGrid>
         </DashboardCard>
 
-        <DashboardCard title={t('dashboard.endpointStatus')}>
+        <DashboardCard title={t('dashboard.activeObjects')}>
           <StatGrid columns={2}>
             <Stat label={t('dashboard.activeListeners')} value={String(activeListeners)} />
             <Stat label={t('dashboard.activeConnectors')} value={String(activeConnectors)} />
@@ -253,10 +268,12 @@ export function DashboardPage() {
           </StatGrid>
         </DashboardCard>
 
-        <DashboardCard title={t('dashboard.policyProtection')}>
-          <StatGrid columns={2}>
+        <DashboardCard title={t('dashboard.linkProtection')}>
+          <StatGrid columns={3}>
+            <Stat label={t('dashboard.routes')} value={String(counts.routes || 0)} />
             <Stat label={t('dashboard.activeBindings')} value={String(activeBindings)} />
-            <Stat label={t('dashboard.addressLimits')} value={String(counts.addressLimits || 0)} />
+            <Stat label="vKey" value={String(counts.vkeys || 0)} />
+            <Stat label={t('dashboard.addressLimits')} value={String(counts.addresses || counts.addressLimits || 0)} />
             <Stat label={t('dashboard.guardDrops')} value={String(totals.dropsGuard || 0)} />
             <Stat label={t('dashboard.ioDrops')} value={String(totals.dropsIO || 0)} />
           </StatGrid>
@@ -421,7 +438,16 @@ function appendSample(current: DashboardSample[], report: DashboardReport): Dash
   return [...current, next].slice(-120);
 }
 
-function runtimeStatus(runtime: { running?: boolean; endpointCount?: number } | undefined, t: ReturnType<typeof useI18n>['t']) {
+function componentStatus(running: boolean | undefined, version: string | undefined, t: ReturnType<typeof useI18n>['t']) {
+  const state = running ? t('common.running') : t('common.stopped');
+  return version?.trim() ? `${state} · ${displayVersion(version)}` : state;
+}
+
+function runtimeStatus(
+  runtime: { running?: boolean } | undefined,
+  version: string | undefined,
+  t: ReturnType<typeof useI18n>['t'],
+) {
   if (!runtime) return t('dashboard.notConfigured');
-  return runtime.running ? t('dashboard.runningPipesStatus', { count: runtime.endpointCount || 0 }) : t('common.stopped');
+  return componentStatus(runtime.running, version, t);
 }

@@ -17,4 +17,8 @@ func (noopHandle) SetMSSClamp(int, int) error {
 	return fmt.Errorf("netapply: MSS clamp is only supported on linux")
 }
 
+func (noopHandle) ApplyAddressLease(AddressLease) error {
+	return fmt.Errorf("netapply: address lease apply is only supported on linux")
+}
+
 func (noopHandle) Rollback() error { return nil }

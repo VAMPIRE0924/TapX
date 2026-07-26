@@ -3,6 +3,7 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ type XrayPipeHandle struct {
 
 	device   tuntap.Device
 	netApply netapply.Handle
+	address  *deviceAddressControl
 	shared   *xraySharedDevice
 	owner    bool
 	counter  xrayPipeCounters
@@ -43,14 +45,6 @@ type XrayPipeHandle struct {
 	conn    net.Conn
 	lastErr error
 	active  bool
-}
-
-type xraySharedDevice struct {
-	device   tuntap.Device
-	netApply netapply.Handle
-
-	mu     sync.Mutex
-	active bool
 }
 
 type xrayPipeCounters struct {
@@ -81,6 +75,13 @@ func startXrayPipeShared(pipe config.RuntimeXrayPipe, device config.RuntimeDevic
 			return nil, err
 		}
 		shared = &xraySharedDevice{device: tunDevice, netApply: netHandle}
+		address, err := newDeviceAddressControl(device, netHandle)
+		if err != nil {
+			_ = netHandle.Rollback()
+			_ = tunDevice.Close()
+			return nil, err
+		}
+		shared.address = address
 		owner = true
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,6 +90,7 @@ func startXrayPipeShared(pipe config.RuntimeXrayPipe, device config.RuntimeDevic
 		DeviceName: shared.device.Name(),
 		device:     shared.device,
 		netApply:   shared.netApply,
+		address:    shared.address,
 		shared:     shared,
 		owner:      owner,
 		manager:    manager,
@@ -108,6 +110,10 @@ func startXrayPipeShared(pipe config.RuntimeXrayPipe, device config.RuntimeDevic
 			return nil, err
 		}
 	case "connector":
+		if err := handle.ensureXrayAddressLease(ctx); err != nil {
+			_ = handle.Close()
+			return nil, err
+		}
 		if !handle.markActive() {
 			_ = handle.Close()
 			return nil, fmt.Errorf("core: xray device %s already has an active stream", device.ID)
@@ -119,6 +125,7 @@ func startXrayPipeShared(pipe config.RuntimeXrayPipe, device config.RuntimeDevic
 			return nil, err
 		}
 		handle.startBridge(ctx, conn, frameKind, guard)
+		handle.address.startRenewal(handle.ensureXrayAddressLease, handle.setErr)
 	default:
 		_ = handle.Close()
 		return nil, fmt.Errorf("core: xray pipe %s has unsupported endpoint kind %q", pipe.EndpointID, pipe.EndpointKind)
@@ -135,23 +142,7 @@ func openAppliedDevice(device config.RuntimeDevice, nonBlock bool) (tuntap.Devic
 	if err != nil {
 		return nil, nil, fmt.Errorf("core: open %s %s: %w", device.Type, device.IfName, err)
 	}
-	netHandle, err := netapply.ApplyDevice(netapply.DeviceConfig{
-		Type:             device.Type,
-		IfName:           tunDevice.Name(),
-		MTU:              device.MTU,
-		MSSClamp:         device.MSSClamp,
-		LinkAutoOptimize: device.LinkAutoOptimize,
-		IPv4CIDR:         device.IPv4CIDR,
-		IPv6CIDR:         device.IPv6CIDR,
-		Bridge: netapply.BridgeConfig{
-			Enabled: device.Bridge.Enabled,
-			Name:    device.Bridge.Name,
-			IfName:  device.Bridge.IfName,
-			MTU:     device.Bridge.MTU,
-		},
-		Routes: netapplyRoutes(device.Routes),
-		DNS:    netapplyDNS(device.DNS),
-	})
+	netHandle, err := netapply.ApplyDevice(netapplyDeviceConfig(device, tunDevice.Name()))
 	if err != nil {
 		_ = tunDevice.Close()
 		return nil, nil, fmt.Errorf("core: apply device %s: %w", tunDevice.Name(), err)
@@ -160,12 +151,39 @@ func openAppliedDevice(device config.RuntimeDevice, nonBlock bool) (tuntap.Devic
 }
 
 func (h *XrayPipeHandle) runAcceptedStream(ctx context.Context, conn net.Conn, frameKind fastpath.FrameKind, guard fastpath.AddressGuard) {
+	if h.address.isServer() {
+		reader := bufio.NewReaderSize(conn, 4+rawVKeyHeaderBaseSize+rawVKeyMaxSize)
+		probe, err := peekTCPDispatchReader(reader, h.Pipe.LengthMode, h.Pipe.MaxFrameSize)
+		if err != nil {
+			_ = conn.Close()
+			h.setBridgeErr(ctx, err)
+			return
+		}
+		stream := &bufferedDispatchConn{Conn: conn, reader: reader}
+		if probe.Diagnostic {
+			_ = serveAddressControl(ctx, stream, probe.VKey, h.address)
+			return
+		}
+		conn = stream
+	}
 	if !h.markActive() {
-		_ = linkdiag.ServeStream(ctx, conn, "")
+		_ = serveAddressControl(ctx, conn, "", h.address)
 		return
 	}
 	defer h.clearActive()
 	h.runBridge(ctx, conn, frameKind, guard)
+}
+
+func (h *XrayPipeHandle) ensureXrayAddressLease(ctx context.Context) error {
+	if !h.address.isClient() {
+		return nil
+	}
+	conn, err := h.manager.DialEmbeddedTCP(ctx, h.Pipe.EndpointID, firstNonEmpty(h.Pipe.Remote, "tapx.frame.local"), firstNonZero(h.Pipe.Port, 1))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return h.address.requestLease(ctx, conn, "", addressLeaseKey(h.Pipe.Binding, h.Pipe.DeviceID, h.Pipe.EndpointID))
 }
 
 func (h *XrayPipeHandle) Diagnose(ctx context.Context, kind string, duration time.Duration) (ConnectorDiagnostic, error) {
@@ -181,8 +199,16 @@ func (h *XrayPipeHandle) Diagnose(ctx context.Context, kind string, duration tim
 	switch kind {
 	case "channel":
 		result.Delay, err = linkdiag.Ping(ctx, conn, "")
-	case "throughput":
-		measured, measureErr := linkdiag.Throughput(ctx, conn, "", duration)
+	case "throughput", "throughput-upload", "throughput-download":
+		var measured linkdiag.Result
+		var measureErr error
+		if kind == "throughput-upload" {
+			measured, measureErr = linkdiag.ThroughputOneWay(ctx, conn, "", duration, true)
+		} else if kind == "throughput-download" {
+			measured, measureErr = linkdiag.ThroughputOneWay(ctx, conn, "", duration, false)
+		} else {
+			measured, measureErr = linkdiag.Throughput(ctx, conn, "", duration)
+		}
 		err = measureErr
 		result.UploadBytes = measured.UploadBytes
 		result.DownloadBytes = measured.DownloadBytes
@@ -606,6 +632,10 @@ func (h *XrayPipeHandle) Close() error {
 		_ = conn.Close()
 	}
 	if h.owner && h.shared != nil {
+		if h.shared.address != nil {
+			h.shared.address.Close()
+			h.shared.address = nil
+		}
 		if h.shared.netApply != nil {
 			if err := h.shared.netApply.Rollback(); err != nil && firstErr == nil {
 				firstErr = err
@@ -620,6 +650,10 @@ func (h *XrayPipeHandle) Close() error {
 		}
 	}
 	if h.owner && h.shared == nil && h.device != nil {
+		if h.address != nil {
+			h.address.Close()
+			h.address = nil
+		}
 		if h.netApply != nil {
 			if err := h.netApply.Rollback(); err != nil && firstErr == nil {
 				firstErr = err

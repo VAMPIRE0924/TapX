@@ -63,9 +63,8 @@ import { NodeScopeSelect, NodeSourceTag, useNodeScope, useNodeTargetOptions } fr
 import { copyText } from '../shared/clipboard';
 import { TapxListenerDtlsFields, TapxListenerFastPathFields, TapxListenerTlsFields } from '../features/endpoints/TapxEndpointFields';
 import { EndpointBindingFields } from '../features/endpoints/EndpointBindingFields';
-import { tapxProtocolOptions, type DeviceBindMode, type EndpointDeviceBinding, type EndpointRuntimeMode } from '../features/endpoints/endpoint-types';
+import { runtimeModeChangesTransportFamily, tapxProtocolOptions, type DeviceBindMode, type EndpointDeviceBinding, type EndpointRuntimeMode } from '../features/endpoints/endpoint-types';
 import { resolveTcpLengthMode } from '../features/endpoints/tcpLengthMode';
-import { stripTapxSocketOverrides } from '../features/endpoints/tapxRawSettings';
 import { buildRawConnectorLink } from '../features/endpoints/rawConnectorLink';
 import { DeviceTypeConflictError, deviceTypeConflictValues, hydrateSavedDeviceBinding, materializeEndpointAutoDevice, normalizeDeviceBinding } from '../features/endpoints/deviceBinding';
 import { defaultInboundSettings, defaultTapxListenerFields } from '../features/xray/inbounds/defaults';
@@ -92,6 +91,7 @@ import {
 import { labelDevice, nextId } from '../shared/tapx-model';
 import { settingsToObject } from '../shared/settings';
 import { isManagedLinkAddressRemark } from '../shared/managed-objects';
+import { clearBindingReferences, relationKey } from '../shared/config-relations';
 import { randomInteger } from '../shared/random';
 import { parseJSON, parseObjectJSON } from '../shared/json';
 import { removeUnusedXrayProfiles, upsertXrayProfile } from '../shared/xray-profiles';
@@ -126,7 +126,6 @@ type ListenerRecord = TapxEndpoint & NodeOwned & {
   streamSettings?: Record<string, unknown>;
   mux?: Record<string, unknown>;
   sniffing?: Record<string, unknown>;
-  FastPath?: Record<string, unknown>;
   TLS?: Record<string, unknown>;
   ShareAddressStrategy?: 'listen' | 'custom';
   ShareAddress?: string;
@@ -166,6 +165,7 @@ const defaultListener: ListenerRecord = {
   TrafficReset: 'never',
   ExpireAt: null,
   Binding: {
+    DeviceBindingEnabled: true,
     DeviceBindMode: 'autoCreate',
     AutoCreateDevice: true,
     InterfaceType: 'tun',
@@ -245,20 +245,13 @@ export function ListenerPage() {
   const streamNetwork = String(Form.useWatch(['streamSettings', 'network'], form) || 'tcp');
   const streamSecurity = String(Form.useWatch(['streamSettings', 'security'], form) || 'none');
   const bindMode = (Form.useWatch(['Binding', 'DeviceBindMode'], form) || 'autoCreate') as DeviceBindMode;
+  const deviceBindingEnabled = Form.useWatch(['Binding', 'DeviceBindingEnabled'], form) !== false;
   const linkAutoOptimize = Form.useWatch(['Binding', 'LinkAutoOptimize'], form) === true;
   const interfaceType = (Form.useWatch(['Binding', 'InterfaceType'], form) || 'tun') as 'tun' | 'tap';
   const addressConfigEnabled = Form.useWatch(['Binding', 'AddressConfigEnabled'], form) === true;
   const addressAssignMode = (Form.useWatch(['Binding', 'AddressAssignMode'], form) || 'manual') as 'auto' | 'manual';
   const shareAddressStrategy = (Form.useWatch('ShareAddressStrategy', form) || 'listen') as 'listen' | 'custom';
   const targetNodeID = String(Form.useWatch('ManagedNodeID', form) || defaultTargetNodeID(scope));
-  const xrayConnectorTags = useMemo(
-    () => filterNodeOwned((config.Connectors || []) as Array<TapxEndpoint & NodeOwned>, targetNodeID)
-      .filter((connector) => ((connector as ListenerRecord).RuntimeMode || 'embedded-xray') !== 'tapx')
-      .map((connector) => connector.ID.trim())
-      .filter(Boolean),
-    [config.Connectors, targetNodeID],
-  );
-
   const streamEnabled = runtimeMode !== 'tapx' && canEnableStream(protocol);
   const showProtocolTab = shouldShowInboundProtocolTab(runtimeMode, protocol, streamNetwork, streamSecurity);
   const showSecurityTab = runtimeMode === 'tapx' || (streamEnabled && !['wireguard', 'tunnel'].includes(protocol));
@@ -565,6 +558,7 @@ export function ListenerPage() {
     );
     const nextListeners = listeners.filter((item) => !selected.has(nodeObjectKey(item)));
     const removedRoutes = (config.Routes || []).filter((route) => isSelectedListenerReference(route, route.ListenerID));
+    const removedRouteKeys = new Set(removedRoutes.map((route) => relationKey(route, route.ID)));
     const removedAddressKeys = new Set(removedRoutes
       .filter((route) => route.AddressID)
       .map((route) => `${nodeIDOf(route)}:${route.AddressID}`));
@@ -582,23 +576,18 @@ export function ListenerPage() {
       const key = `${nodeIDOf(profile)}:${profile.ID}`;
       return !candidateProfiles.has(key) || usedProfiles.has(key);
     });
-    const nextDevices = devices.map((device) => {
-      const removedOnNode = records.filter((record) => nodeIDOf(record) === nodeIDOf(device));
-      if (removedOnNode.length === 0) return device;
-      const removedIDs = new Set(removedOnNode.map((record) => record.ID));
-      const removedNames = new Set(removedOnNode.map((record) => record.Name).filter(Boolean));
-      return {
-        ...device,
-        LinkedListenerIDs: (device.LinkedListenerIDs || []).filter((id) => !removedIDs.has(id)),
-        LinkedListenerNames: (device.LinkedListenerNames || []).filter((name) => !removedNames.has(name)),
-      };
-    });
+    const nextDevices = devices;
+    const cleanedListeners = clearBindingReferences(nextListeners, 'RouteID', removedRouteKeys);
+    const cleanedConnectors = clearBindingReferences(config.Connectors || [], 'RouteID', removedRouteKeys);
+    const cleanedClients = clearBindingReferences(config.Clients || [], 'RouteID', removedRouteKeys);
     setSaving(true);
     try {
       const saved = await saveRuntimeConfig({
         ...config,
         Devices: nextDevices,
-        Listeners: nextListeners,
+        Listeners: cleanedListeners,
+        Connectors: cleanedConnectors,
+        Clients: cleanedClients,
         Routes: nextRoutes,
         Addresses: nextAddresses,
         XrayProfiles: nextProfiles,
@@ -662,7 +651,7 @@ export function ListenerPage() {
         vkey: '',
         serverName,
         lengthMode: record.Protocol === 'raw-tcp'
-          ? resolveTcpLengthMode({ stored: rawTCP.LengthMode })
+          ? resolveTcpLengthMode({ mode: rawTCP.LengthMode })
           : undefined,
       }, t);
       setExportModal({ open: true, title: t('listener.shareLinkTitle'), value });
@@ -760,6 +749,7 @@ export function ListenerPage() {
   }
 
   function handleRuntimeModeChange(mode: RuntimeMode) {
+    if (!runtimeModeChangesTransportFamily(runtimeMode, mode)) return;
     if (mode === 'tapx') {
       form.setFieldValue('Protocol', 'raw-udp');
       form.setFieldValue('Network', 'udp');
@@ -813,13 +803,14 @@ export function ListenerPage() {
   };
 
   const columns = useMemo<TableColumnsType<ListenerRecord>>(() => [
-    { title: 'ID', dataIndex: 'ID', align: 'right', width: 70 },
-    { title: t('node.sourceNode'), key: 'ManagedNodeID', width: 150, render: (_, record) => <NodeSourceTag value={record} /> },
+    { title: 'ID', key: 'Index', align: 'center', width: 70, fixed: 'left', render: (_, _record, index) => index + 1 },
+    { title: t('node.sourceNode'), key: 'ManagedNodeID', width: 150, fixed: 'left', render: (_, record) => <NodeSourceTag value={record} /> },
     {
-      title: t('listener.menu'),
+      title: t('listener.actions'),
       key: 'actions',
       align: 'center',
       width: 80,
+      fixed: 'left',
       render: (_, record, index) => (
         <Space size={4}>
           <Button shape="circle" size="small" icon={<EditOutlined />} aria-label={t('listener.edit')} onClick={() => openEdit(record)} />
@@ -830,6 +821,7 @@ export function ListenerPage() {
               { key: 'up', icon: <ArrowUpOutlined />, label: t('common.moveUp'), disabled: index === 0, onClick: () => moveListener(index, index - 1) },
               { key: 'down', icon: <ArrowDownOutlined />, label: t('common.moveDown'), disabled: index === filteredListeners.length - 1, onClick: () => moveListener(index, index + 1) },
               { type: 'divider' },
+              { key: 'export', icon: <ExportOutlined />, label: t('listener.export'), onClick: () => exportListeners([record]) },
               { key: 'share', icon: <LinkOutlined />, label: t('listener.shareLink'), disabled: record.RuntimeMode !== 'tapx', onClick: () => exportShareLink(record) },
               { key: 'reset', icon: <RetweetOutlined />, label: t('listener.resetTraffic'), onClick: () => void resetTraffic([record]) },
               { key: 'delete', icon: <DeleteOutlined />, label: t('common.delete'), danger: true, onClick: () => deleteListener(record) },
@@ -839,6 +831,12 @@ export function ListenerPage() {
           </Dropdown>
         </Space>
       ),
+    },
+    {
+      title: t('listener.tag'),
+      key: 'Name',
+      width: 190,
+      render: (_, record) => <span>{record.Name || record.ID}</span>,
     },
     {
       title: t('common.enabled'),
@@ -1091,10 +1089,13 @@ export function ListenerPage() {
   function bindingTab() {
     return (
       <EndpointBindingFields
+        bindingEnabled={deviceBindingEnabled}
         bindMode={bindMode}
         linkAutoOptimize={linkAutoOptimize}
         addressConfigEnabled={addressConfigEnabled}
         addressAssignMode={addressAssignMode}
+        interfaceType={interfaceType}
+        role="listener"
         deviceOptions={deviceOptions}
         addressPlaceholders={{ ipv4: '10.10.0.1/24', ipv6: 'fd00::1/64', gateway: '10.10.0.254' }}
       />
@@ -1113,7 +1114,6 @@ export function ListenerPage() {
           protocol={protocol}
           network={streamNetwork}
           security={streamSecurity}
-          outboundTags={xrayConnectorTags}
         />
         {fallbackProtocol && streamNetwork === 'tcp' ? (
           <FallbacksFields
@@ -1214,10 +1214,9 @@ function normalizeForSave(record: ListenerRecord): ListenerRecord {
   const runtime = record.RuntimeMode || 'embedded-xray';
   const stream = runtime === 'tapx' ? undefined : (record.streamSettings || newInboundStreamSlice(record.Network || 'tcp'));
   const security = runtime === 'tapx' ? record.Security || 'none' : String(stream?.security || 'none');
-  const fastPath = record.FastPath || {};
   const tls = record.TLS || {};
-  const rawUDP = stripTapxSocketOverrides(record.RawUDP || {});
-  const rawTCP = stripTapxSocketOverrides(record.RawTCP || {});
+  const rawUDP = record.RawUDP || {};
+  const rawTCP = record.RawTCP || {};
   return {
     ...record,
     RuntimeMode: runtime,
@@ -1234,16 +1233,15 @@ function normalizeForSave(record: ListenerRecord): ListenerRecord {
     streamSettings: stream,
     RawUDP: runtime === 'tapx' && record.Protocol === 'raw-udp' ? {
       ...rawUDP,
-      Workers: numberValue(rawUDP.Workers, numberValue(fastPath.WorkerThreads)),
-      QueueSize: numberValue(rawUDP.QueueSize, numberValue(fastPath.QueueSize)),
-      ZeroCopy: booleanValue(rawUDP.ZeroCopy, booleanValue(fastPath.ZeroCopy)),
+      Workers: numberValue(rawUDP.Workers),
+      QueueSize: numberValue(rawUDP.QueueSize),
+      ZeroCopy: booleanValue(rawUDP.ZeroCopy),
       DTLS: {
         ...rawUDP.DTLS,
         Enabled: security === 'dtls',
         CertFile: stringValue(tls.CertFile, rawUDP.DTLS?.CertFile),
         KeyFile: stringValue(tls.KeyFile, rawUDP.DTLS?.KeyFile),
         ServerName: stringValue(tls.ServerName, rawUDP.DTLS?.ServerName),
-        ALPN: [],
         MinVersion: stringValue(tls.MinVersion, rawUDP.DTLS?.MinVersion),
         MaxVersion: stringValue(tls.MaxVersion, rawUDP.DTLS?.MaxVersion),
         AllowInsecure: booleanValue(tls.AllowInsecure, rawUDP.DTLS?.AllowInsecure),
@@ -1253,21 +1251,16 @@ function normalizeForSave(record: ListenerRecord): ListenerRecord {
     } : rawUDP,
     RawTCP: runtime === 'tapx' && record.Protocol === 'raw-tcp' ? {
       ...rawTCP,
-      LengthMode: resolveTcpLengthMode({
-        mode: rawTCP.LengthMode,
-        legacyPrefix: fastPath.TcpLengthPrefix,
-        stored: fastPath.TcpLengthMode,
-      }),
-      Workers: numberValue(rawTCP.Workers, numberValue(fastPath.WorkerThreads)),
-      QueueSize: numberValue(rawTCP.QueueSize, numberValue(fastPath.QueueSize)),
-      ZeroCopy: booleanValue(rawTCP.ZeroCopy, booleanValue(fastPath.ZeroCopy)),
+      LengthMode: resolveTcpLengthMode({ mode: rawTCP.LengthMode }),
+      Workers: numberValue(rawTCP.Workers),
+      QueueSize: numberValue(rawTCP.QueueSize),
+      ZeroCopy: booleanValue(rawTCP.ZeroCopy),
       TLS: {
         ...rawTCP.TLS,
         Enabled: security === 'tls',
         CertFile: stringValue(tls.CertFile, rawTCP.TLS?.CertFile),
         KeyFile: stringValue(tls.KeyFile, rawTCP.TLS?.KeyFile),
         ServerName: stringValue(tls.ServerName, rawTCP.TLS?.ServerName),
-        ALPN: [],
         MinVersion: stringValue(tls.MinVersion, rawTCP.TLS?.MinVersion),
         MaxVersion: stringValue(tls.MaxVersion, rawTCP.TLS?.MaxVersion),
         AllowInsecure: booleanValue(tls.AllowInsecure, rawTCP.TLS?.AllowInsecure),
@@ -1477,21 +1470,9 @@ function panelCertificateFromSettings(settings: unknown[] | undefined): { certPu
     && ('PanelCertFile' in item || 'PanelKeyFile' in item || 'PanelHTTPS' in item)) as {
     PanelCertFile?: string;
     PanelKeyFile?: string;
-    Key?: string;
-    Value?: unknown;
   } | undefined;
-  if (row?.PanelCertFile || row?.PanelKeyFile) {
-    return { certPublicPath: row.PanelCertFile, certPrivatePath: row.PanelKeyFile };
-  }
-
-  const legacy: Record<string, unknown> = {};
-  for (const item of settings || []) {
-    if (!item || typeof item !== 'object') continue;
-    const entry = item as { Key?: string; Value?: unknown };
-    if (entry.Key) legacy[entry.Key] = entry.Value;
-  }
   return {
-    certPublicPath: typeof legacy.certPublicPath === 'string' ? legacy.certPublicPath : undefined,
-    certPrivatePath: typeof legacy.certPrivatePath === 'string' ? legacy.certPrivatePath : undefined,
+    certPublicPath: row?.PanelCertFile,
+    certPrivatePath: row?.PanelKeyFile,
   };
 }

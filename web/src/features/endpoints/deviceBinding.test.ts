@@ -3,15 +3,30 @@ import { DeviceTypeConflictError, hydrateSavedDeviceBinding, materializeEndpoint
 
 describe('endpoint device binding', () => {
   it('normalizes existing-device bindings without carrying auto-create address fields', () => {
-    expect(normalizeDeviceBinding({ DeviceBindMode: 'existing', AddressConfigEnabled: true }, { mode: 'autoCreate', addressMode: 'auto' })).toMatchObject({
+    expect(normalizeDeviceBinding({ DeviceBindingEnabled: true, DeviceBindMode: 'existing', AddressConfigEnabled: true }, { mode: 'autoCreate', addressMode: 'auto' })).toMatchObject({
       DeviceBindMode: 'existing',
       AutoCreateDevice: false,
       AddressConfigEnabled: false,
     });
-    expect(normalizeDeviceBinding({ DeviceBindMode: 'autoCreate', AddressAssignMode: 'manual' }, { mode: 'autoCreate', addressMode: 'auto' }))
+    expect(normalizeDeviceBinding({ DeviceBindingEnabled: true, DeviceBindMode: 'autoCreate', AddressAssignMode: 'manual' }, { mode: 'autoCreate', addressMode: 'auto' }))
       .toMatchObject({ AddressAssignMode: 'manual' });
-    expect(normalizeDeviceBinding({ DeviceBindMode: 'autoCreate', LinkAutoOptimize: true, MSSClamp: 1360 }, { mode: 'autoCreate', addressMode: 'auto' }))
+    expect(normalizeDeviceBinding({ DeviceBindingEnabled: true, DeviceBindMode: 'autoCreate', LinkAutoOptimize: true, MSSClamp: 1360 }, { mode: 'autoCreate', addressMode: 'auto' }))
       .toMatchObject({ LinkAutoOptimize: true, MSSClamp: 0 });
+  });
+
+  it('keeps non-device bindings and skips device creation when device binding is disabled', () => {
+    const result = materializeEndpointAutoDevice({
+      ID: 'listener-1',
+      Binding: {
+        DeviceBindingEnabled: false,
+        DeviceBindMode: 'autoCreate',
+        DeviceName: 'tapx-tun0',
+        DeviceID: 'device-old',
+        VKeyID: 'vkey-1',
+      },
+    }, [], { role: 'listener', defaultMode: 'existing', defaultAddressMode: 'manual' });
+    expect(result.devices).toEqual([]);
+    expect(result.endpoint.Binding).toEqual({ VKeyID: 'vkey-1' });
   });
 
   it('materializes a listener device and rewrites the endpoint binding', () => {
@@ -19,11 +34,30 @@ describe('endpoint device binding', () => {
       ID: 'listener-1',
       Name: 'edge',
       Binding: { DeviceBindMode: 'autoCreate', DeviceName: 'tapx-tun0', InterfaceType: 'tun', MTU: 1400 },
-    }, [], { role: 'listener', defaultMode: 'existing', defaultAddressMode: 'manual', now: 123 });
-    expect(result.endpoint.Binding).toMatchObject({ DeviceID: 'device-tapx-tun0', DeviceBindMode: 'existing', AutoCreateDevice: false });
+    }, [], { role: 'listener', defaultMode: 'existing', defaultAddressMode: 'manual' });
+    expect(result.endpoint.Binding).toEqual({ DeviceID: 'device-tapx-tun0' });
     expect(result.devices[0]).toMatchObject({
-      ID: 'device-tapx-tun0', Source: 'listener-auto', LinkedListenerIDs: ['listener-1'], LinkedListenerNames: ['edge'], UpdatedAt: 123,
+      ID: 'device-tapx-tun0', Source: 'listener-auto',
     });
+  });
+
+  it('persists an existing-device binding without UI-only fields', () => {
+    const result = materializeEndpointAutoDevice({
+      ID: 'listener-1',
+      Binding: {
+        DeviceBindingEnabled: true,
+        DeviceBindMode: 'existing',
+        DeviceID: 'device-1',
+        InterfaceType: 'tap',
+        DeviceName: 'tap0',
+        MTU: 1500,
+        VKeyID: 'vkey-1',
+      },
+    }, [{ ID: 'device-1', Type: 'tap', IfName: 'tap0' }], {
+      role: 'listener', defaultMode: 'existing', defaultAddressMode: 'manual',
+    });
+
+    expect(result.endpoint.Binding).toEqual({ DeviceID: 'device-1', VKeyID: 'vkey-1' });
   });
 
   it('materializes automatic link optimization as a device-owned setting', () => {
@@ -39,7 +73,7 @@ describe('endpoint device binding', () => {
 
   it('hydrates an existing device without changing its identity', () => {
     expect(hydrateSavedDeviceBinding({ DeviceID: 'device-1' }, {
-      ID: 'device-1', Type: 'tap', IfName: 'tap0', MTU: 1500, AddressAssignMode: 'manual', IPv4CIDR: '10.0.0.1/24',
+      ID: 'device-1', Type: 'tap', IfName: 'tap0', MTU: 1500,
     })).toMatchObject({ DeviceID: 'device-1', DeviceBindMode: 'existing', AutoCreateDevice: false, InterfaceType: 'tap', DeviceName: 'tap0' });
   });
 
@@ -62,16 +96,14 @@ describe('endpoint device binding', () => {
       },
     }, [{
       ID: 'device-1', Type: 'tap', IfName: 'tap0', MTU: 9000,
-      IPv4CIDR: '10.0.0.1/24', DNS: { Enabled: true, Nameservers: ['1.1.1.1'] },
+      DHCP: { Mode: 'server', DNS: ['1.1.1.1'] },
       Bridge: { Enabled: true, Name: 'br0', IfName: 'eth0' },
-    }], { role: 'connector', defaultMode: 'autoCreate', defaultAddressMode: 'auto', now: 456 });
+    }], { role: 'connector', defaultMode: 'autoCreate', defaultAddressMode: 'auto' });
 
     expect(result.devices[0]).toMatchObject({
       ID: 'device-1', Type: 'tap', IfName: 'tap0', MTU: 9000,
-      IPv4CIDR: '10.0.0.1/24', LinkedConnectorIDs: ['connector-1'],
-      LinkedConnectorNames: ['remote'], UpdatedAt: 456,
     });
-    expect(result.devices[0].DNS).toEqual({ Enabled: true, Nameservers: ['1.1.1.1'] });
+    expect(result.devices[0].DHCP).toEqual({ Mode: 'server', DNS: ['1.1.1.1'] });
     expect(result.devices[0].Bridge).toEqual({ Enabled: true, Name: 'br0', IfName: 'eth0' });
   });
 

@@ -29,15 +29,15 @@ need_root
 
 if command -v apk >/dev/null 2>&1; then
 	packages="$(collect_packages apk)"
-	apk update
+	apk update || echo "警告：软件源索引刷新失败，继续尝试安装本地 TapX 软件包。" >&2
 	# Package dependencies are resolved from the configured OpenWrt repositories.
 	# shellcheck disable=SC2086
-	apk add --allow-untrusted $packages
+	apk add --allow-untrusted --force-reinstall $packages
 elif command -v opkg >/dev/null 2>&1; then
 	packages="$(collect_packages ipk)"
-	opkg update
+	opkg update || echo "警告：软件源索引刷新失败，继续尝试安装本地 TapX 软件包。" >&2
 	# shellcheck disable=SC2086
-	opkg install $packages
+	opkg install --force-reinstall $packages
 else
 	echo "未找到 OpenWrt 包管理器 apk 或 opkg" >&2
 	exit 1

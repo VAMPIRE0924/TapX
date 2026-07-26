@@ -17,14 +17,11 @@ func TestBuildRawPairTemplateUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildRawPairTemplate() error = %v", err)
 	}
-	if len(template.A.Listeners) != 1 || len(template.B.Listeners) != 1 {
-		t.Fatalf("udp template listeners = %d/%d, want one each", len(template.A.Listeners), len(template.B.Listeners))
+	if len(template.A.Listeners) != 1 || len(template.B.Connectors) != 1 {
+		t.Fatalf("udp template endpoints = listeners:%d connectors:%d, want listener/connector", len(template.A.Listeners), len(template.B.Connectors))
 	}
-	if got := template.A.Listeners[0].RawUDP.FixedPeer; got != "192.0.2.20:46000" {
-		t.Fatalf("side A fixed peer = %q, want host B", got)
-	}
-	if got := template.B.Listeners[0].RawUDP.FixedPeer; got != "192.0.2.10:46000" {
-		t.Fatalf("side B fixed peer = %q, want host A", got)
+	if got := template.B.Connectors[0].Remote; got != "192.0.2.10" {
+		t.Fatalf("side B connector remote = %q, want host A", got)
 	}
 	if len(template.A.VKeys) != 1 || template.A.Routes[0].VKeyID != "raw-vkey" {
 		t.Fatalf("side A vkey/route = %+v %+v, want vKey route binding", template.A.VKeys, template.A.Routes)

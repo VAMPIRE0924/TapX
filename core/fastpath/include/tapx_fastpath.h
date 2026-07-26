@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define TAPX_FASTPATH_ABI_VERSION 8u
+#define TAPX_FASTPATH_ABI_VERSION 12u
 
 enum tapx_frame_kind {
     TAPX_FRAME_TUN = 1,
@@ -71,13 +71,18 @@ struct tapx_udp_pipe_config {
     uint32_t max_frame_size;
     uint32_t max_datagram_payload;
     uint32_t peer_mode;
+    uint32_t initial_handshake;
     uint32_t address_guard_remote;
+    uint32_t keepalive_interval_ms;
+    uint32_t idle_timeout_ms;
     uint64_t device_to_network_rate_bps;
     uint64_t network_to_device_rate_bps;
     struct sockaddr_storage peer_addr;
     socklen_t peer_addr_len;
     struct tapx_address_guard guard;
     struct tapx_vkey_guard vkey;
+    const uint8_t *address_response;
+    size_t address_response_len;
     struct tapx_fastpath_counters *counters;
 };
 
@@ -88,6 +93,7 @@ struct tapx_tcp_pipe_config {
     uint32_t max_frame_size;
     uint32_t length_mode;
     uint32_t address_guard_remote;
+    uint32_t idle_timeout_ms;
     uint64_t device_to_network_rate_bps;
     uint64_t network_to_device_rate_bps;
     struct tapx_address_guard guard;
@@ -96,6 +102,24 @@ struct tapx_tcp_pipe_config {
 };
 
 struct tapx_worker;
+struct tapx_device_switch;
+
+struct tapx_device_switch_port {
+    int fd;
+    const struct tapx_ipv4_prefix *ipv4_prefixes;
+    size_t ipv4_prefix_count;
+    const struct tapx_ipv6_prefix *ipv6_prefixes;
+    size_t ipv6_prefix_count;
+};
+
+struct tapx_device_switch_config {
+    int device_fd;
+    uint32_t frame_kind;
+    uint32_t max_frame_size;
+    const struct tapx_device_switch_port *ports;
+    size_t port_count;
+    struct tapx_fastpath_counters *counters;
+};
 
 uint32_t tapx_fastpath_abi_version(void);
 void tapx_fastpath_counters_reset(struct tapx_fastpath_counters *counters);
@@ -104,6 +128,9 @@ void tapx_fastpath_counters_snapshot(const struct tapx_fastpath_counters *counte
 int tapx_udp_pipe_start(const struct tapx_udp_pipe_config *config, struct tapx_worker **worker);
 int tapx_tcp_pipe_start(const struct tapx_tcp_pipe_config *config, struct tapx_worker **worker);
 int tapx_worker_stop(struct tapx_worker *worker);
+int tapx_device_switch_start(const struct tapx_device_switch_config *config,
+                             struct tapx_device_switch **device_switch);
+int tapx_device_switch_stop(struct tapx_device_switch *device_switch);
 
 #ifdef __cplusplus
 }

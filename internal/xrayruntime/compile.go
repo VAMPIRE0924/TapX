@@ -424,20 +424,20 @@ func injectInboundClients(settings map[string]any, protocol, listenerID string, 
 	for _, client := range selected {
 		switch protocol {
 		case "vless", "vmess":
-			id := firstClientValue(client.UUID, credentialFor(client, "vless", "vmess", "uuid"))
+			id := strings.TrimSpace(client.UUID)
 			if id == "" {
 				return fmt.Errorf("xray: listener %s client %s requires UUID for %s", listenerID, client.ID, protocol)
 			}
 			entry := map[string]any{"id": id, "email": firstClientValue(client.Email, client.ID)}
 			generated = append(generated, entry)
 		case "trojan", "shadowsocks":
-			password := firstClientValue(client.Password, credentialFor(client, "trojan", "shadowsocks", "password"))
+			password := strings.TrimSpace(client.Password)
 			if password == "" {
 				return fmt.Errorf("xray: listener %s client %s requires password for %s", listenerID, client.ID, protocol)
 			}
 			generated = append(generated, map[string]any{"password": password, "email": firstClientValue(client.Email, client.ID)})
 		case "hysteria":
-			auth := firstClientValue(client.Auth, credentialFor(client, "hysteria"))
+			auth := strings.TrimSpace(client.Auth)
 			if auth == "" {
 				return fmt.Errorf("xray: listener %s client %s requires auth for hysteria", listenerID, client.ID)
 			}
@@ -458,15 +458,6 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func credentialFor(client model.Client, types ...string) string {
-	for _, value := range types {
-		if client.CredentialType == value {
-			return client.CredentialValue
-		}
-	}
-	return ""
 }
 
 func firstClientValue(values ...string) string {
@@ -555,6 +546,9 @@ func compileStream(profile config.RuntimeXrayProfile, policy linkPolicy) (map[st
 	if err != nil {
 		return nil, err
 	}
+	if err := normalizeWebStreamSettings(stream, profile.ID); err != nil {
+		return nil, err
+	}
 	if profile.Network != "" {
 		stream["network"] = profile.Network
 	}
@@ -574,6 +568,24 @@ func compileStream(profile config.RuntimeXrayProfile, policy linkPolicy) (map[st
 		}
 	}
 	return stream, nil
+}
+
+func normalizeWebStreamSettings(stream map[string]any, profileID string) error {
+	xhttp, ok := stream["xhttpSettings"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	headers, exists := xhttp["headers"]
+	if !exists {
+		return nil
+	}
+	if values, ok := headers.([]any); ok {
+		if len(values) != 0 {
+			return fmt.Errorf("xray: profile %s xhttpSettings.headers must be an object", profileID)
+		}
+		xhttp["headers"] = map[string]any{}
+	}
+	return nil
 }
 
 func endpointLinkPolicy(runtime *config.GeneratedRuntime, endpoint config.RuntimeEndpoint) linkPolicy {

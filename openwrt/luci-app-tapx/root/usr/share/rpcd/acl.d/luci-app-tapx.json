@@ -4,8 +4,9 @@
     "read": {
       "uci": [ "tapx" ],
       "file": {
-        "/usr/bin/tapx-core": [ "exec" ],
+		"/usr/bin/tapx-core": [ "exec" ],
         "/usr/bin/tapx-panel": [ "exec" ],
+        "/bin/pidof": [ "exec" ],
         "/etc/init.d/tapx": [ "exec" ],
         "/etc/init.d/tapx-panel": [ "exec" ],
         "/usr/libexec/tapx-openwrt-config": [ "exec" ],
@@ -18,7 +19,8 @@
         "/etc/init.d/tapx": [ "exec" ],
         "/etc/init.d/tapx-panel": [ "exec" ],
         "/usr/libexec/tapx-openwrt-config": [ "exec" ],
-        "/tmp/tapx-openwrt-restore.tar.gz": [ "write" ]
+        "/tmp/tapx-openwrt-restore.tar.gz": [ "write" ],
+        "/tmp/tapx-openwrt-panel-password": [ "write" ]
       }
     }
   }

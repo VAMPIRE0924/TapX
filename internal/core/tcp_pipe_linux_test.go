@@ -14,16 +14,15 @@ import (
 	"tapx/internal/model"
 )
 
-func TestListenTCPAppliesAdvancedSocketSettings(t *testing.T) {
+func TestListenTCPAppliesDerivedQueueBuffers(t *testing.T) {
 	pipe := config.RuntimeTCPPipe{
-		EndpointID:    "tcp-listener",
-		EndpointKind:  "listener",
-		FrameKind:     model.DeviceTUN,
-		BindHost:      "0.0.0.0",
-		BindAddress:   "127.0.0.1",
-		ReceiveBuffer: 8192,
-		SendBuffer:    16384,
-		TCPMaxSeg:     1200,
+		EndpointID:   "tcp-listener",
+		EndpointKind: "listener",
+		FrameKind:    model.DeviceTUN,
+		BindHost:     "127.0.0.1",
+		QueueSize:    8,
+		MaxFrameSize: 2048,
+		TCPMaxSeg:    1200,
 	}
 
 	listener, local, err := listenTCP(pipe)
@@ -42,16 +41,33 @@ func TestListenTCPAppliesAdvancedSocketSettings(t *testing.T) {
 	}
 	defer file.Close()
 	fd := int(file.Fd())
-	assertSockoptAtLeast(t, fd, unix.SO_RCVBUF, pipe.ReceiveBuffer)
-	assertSockoptAtLeast(t, fd, unix.SO_SNDBUF, pipe.SendBuffer)
-	if got, err := unix.GetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_MAXSEG); err != nil {
+	wantBuffer := socketQueueBytes(pipe.QueueSize, pipe.MaxFrameSize)
+	assertSockoptAtLeast(t, fd, unix.SO_RCVBUF, wantBuffer)
+	assertSockoptAtLeast(t, fd, unix.SO_SNDBUF, wantBuffer)
+
+	client, err := net.DialTimeout("tcp", local.String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer client.Close()
+	accepted, err := listener.AcceptTCP()
+	if err != nil {
+		t.Fatalf("accept listener connection: %v", err)
+	}
+	defer accepted.Close()
+	acceptedFile, err := accepted.File()
+	if err != nil {
+		t.Fatalf("accepted connection file: %v", err)
+	}
+	defer acceptedFile.Close()
+	if got, err := unix.GetsockoptInt(int(acceptedFile.Fd()), unix.IPPROTO_TCP, unix.TCP_MAXSEG); err != nil {
 		t.Fatalf("getsockopt TCP_MAXSEG: %v", err)
-	} else if got != pipe.TCPMaxSeg {
-		t.Fatalf("TCP_MAXSEG = %d, want %d", got, pipe.TCPMaxSeg)
+	} else if got <= 0 || got > pipe.TCPMaxSeg {
+		t.Fatalf("accepted TCP_MAXSEG = %d, want a positive value no greater than %d", got, pipe.TCPMaxSeg)
 	}
 }
 
-func TestDialTCPUsesBindAddress(t *testing.T) {
+func TestDialTCPUsesRemoteAddressAndDerivedQueueBuffers(t *testing.T) {
 	server, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("listen test server: %v", err)
@@ -83,9 +99,8 @@ func TestDialTCPUsesBindAddress(t *testing.T) {
 		EndpointKind:   "connector",
 		Remote:         "127.0.0.1",
 		Port:           uint16(port),
-		BindAddress:    "127.0.0.1",
-		ReceiveBuffer:  8192,
-		SendBuffer:     16384,
+		QueueSize:      8,
+		MaxFrameSize:   2048,
 		NoDelay:        true,
 		ConnectTimeout: 2,
 	})
@@ -100,6 +115,10 @@ func TestDialTCPUsesBindAddress(t *testing.T) {
 	if remote.Port() != uint16(port) {
 		t.Fatalf("remote port = %d, want %d", remote.Port(), port)
 	}
+	pathMTU, mss, family := tcpConnPathMetrics(conn)
+	if pathMTU <= 0 || mss <= 0 || family != "ipv4" {
+		t.Fatalf("tcp path metrics = mtu %d, mss %d, family %q", pathMTU, mss, family)
+	}
 
 	select {
 	case acceptedConn := <-accepted:
@@ -111,11 +130,11 @@ func TestDialTCPUsesBindAddress(t *testing.T) {
 	}
 }
 
-func TestListenTCPRejectsInvalidBindAddress(t *testing.T) {
+func TestListenTCPRejectsInvalidBindHost(t *testing.T) {
 	_, _, err := listenTCP(config.RuntimeTCPPipe{
 		EndpointID:   "tcp-listener",
 		EndpointKind: "listener",
-		BindAddress:  "not-an-ip",
+		BindHost:     "not-an-ip",
 	})
 	if err == nil {
 		t.Fatal("listenTCP() error = nil, want invalid bind address error")

@@ -3,6 +3,8 @@
 package netapply
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -11,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/vishvananda/netlink"
 
 	"tapx/internal/model"
 )
@@ -25,19 +29,59 @@ var runCommand commandRunner = func(name string, args ...string) error {
 	return nil
 }
 
+var deviceRegistry = struct {
+	sync.Mutex
+	items map[string]*sharedDeviceApply
+}{items: make(map[string]*sharedDeviceApply)}
+
+type sharedDeviceApply struct {
+	config string
+	handle *appliedDevice
+	refs   int
+}
+
+type sharedHandle struct {
+	mu     sync.Mutex
+	done   bool
+	ifName string
+	entry  *sharedDeviceApply
+}
+
 type appliedDevice struct {
 	mu                 sync.Mutex
+	serviceMu          sync.Mutex
 	runner             commandRunner
 	ifName             string
-	addrs              []string
+	addrs              []appliedAddress
+	leasedAddrs        []appliedAddress
+	leasedRoute        *appliedRoute
 	bridgeName         string
 	bridgeCreated      bool
 	tapEnslaved        bool
 	memberIfName       string
 	bridgeControlRules []firewallRule
-	routes             [][]string
+	routes             []appliedRoute
 	mssRules           []firewallRule
 	dns                dnsRollback
+	services           []*managedService
+	generatedFiles     []string
+	rollbackCommands   []firewallRule
+	sysctls            []sysctlRollback
+	monitorCancel      context.CancelFunc
+	monitorDone        chan struct{}
+	oneArm             *oneArmState
+	allowDefaultRoute  bool
+	managementRoutes   []protectedManagementRoute
+}
+
+type appliedAddress struct {
+	ifName string
+	cidr   string
+}
+
+type appliedRoute struct {
+	family string
+	args   []string
 }
 
 type firewallRule struct {
@@ -53,7 +97,229 @@ type dnsRollback struct {
 }
 
 func ApplyDevice(cfg DeviceConfig) (Handle, error) {
-	return applyDevice(cfg, runCommand)
+	return applyDeviceShared(cfg, runCommand)
+}
+
+func applyDeviceShared(cfg DeviceConfig, runner commandRunner) (Handle, error) {
+	if cfg.IfName == "" {
+		return nil, errors.New("netapply: interface name is required")
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("netapply: encode device config: %w", err)
+	}
+	configKey := string(encoded)
+	deviceRegistry.Lock()
+	defer deviceRegistry.Unlock()
+	if current := deviceRegistry.items[cfg.IfName]; current != nil {
+		if current.config != configKey {
+			return nil, fmt.Errorf("netapply: interface %s already has a different active configuration", cfg.IfName)
+		}
+		current.refs++
+		return &sharedHandle{ifName: cfg.IfName, entry: current}, nil
+	}
+	handle, err := applyDevice(cfg, runner)
+	if err != nil {
+		return nil, err
+	}
+	entry := &sharedDeviceApply{config: configKey, handle: handle.(*appliedDevice), refs: 1}
+	deviceRegistry.items[cfg.IfName] = entry
+	return &sharedHandle{ifName: cfg.IfName, entry: entry}, nil
+}
+
+func (h *sharedHandle) SetMSSClamp(ipv4MSS, ipv6MSS int) error {
+	if h == nil || h.entry == nil {
+		return errors.New("netapply: device handle is unavailable")
+	}
+	return h.entry.handle.SetMSSClamp(ipv4MSS, ipv6MSS)
+}
+
+func (h *sharedHandle) ApplyAddressLease(lease AddressLease) error {
+	if h == nil || h.entry == nil {
+		return errors.New("netapply: device handle is unavailable")
+	}
+	return h.entry.handle.ApplyAddressLease(lease)
+}
+
+func (h *sharedHandle) Rollback() error {
+	if h == nil || h.entry == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.done {
+		return nil
+	}
+	deviceRegistry.Lock()
+	defer deviceRegistry.Unlock()
+	current := deviceRegistry.items[h.ifName]
+	if current != h.entry || current.refs <= 0 {
+		h.done = true
+		return nil
+	}
+	current.refs--
+	if current.refs > 0 {
+		h.done = true
+		return nil
+	}
+	if err := current.handle.Rollback(); err != nil {
+		current.refs = 1
+		return err
+	}
+	delete(deviceRegistry.items, h.ifName)
+	h.done = true
+	return nil
+}
+
+func (h *appliedDevice) ApplyAddressLease(lease AddressLease) error {
+	if h == nil || h.runner == nil {
+		return errors.New("netapply: device handle is unavailable")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	nextAddrs := make([]appliedAddress, 0, 2)
+	for _, cidr := range []string{strings.TrimSpace(lease.IPv4CIDR), strings.TrimSpace(lease.IPv6CIDR)} {
+		if cidr == "" {
+			continue
+		}
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			return fmt.Errorf("netapply: invalid leased CIDR %q: %w", cidr, err)
+		}
+		nextAddrs = append(nextAddrs, appliedAddress{ifName: h.ifName, cidr: cidr})
+	}
+	var nextRoute *appliedRoute
+	var defaultRouteSnapshot []netlink.Route
+	if gateway := strings.TrimSpace(lease.Gateway); gateway != "" && lease.AllowDefaultRoute && h.allowDefaultRoute {
+		address, err := netip.ParseAddr(gateway)
+		if err != nil {
+			return fmt.Errorf("netapply: invalid leased gateway %q: %w", gateway, err)
+		}
+		family := "-4"
+		if address.Is6() {
+			family = "-6"
+		}
+		defaultRouteSnapshot, err = snapshotDefaultRoutes(address.Is6())
+		if err != nil {
+			return fmt.Errorf("netapply: snapshot default route: %w", err)
+		}
+		nextRoute = &appliedRoute{
+			family: family,
+			args:   []string{"default", "via", gateway, "dev", h.ifName},
+		}
+	}
+	if len(lease.DNS) > 0 {
+		if _, err := dnsContent(DNSConfig{Enabled: true, Nameservers: lease.DNS}); err != nil {
+			return err
+		}
+	}
+
+	previousAddrs := append([]appliedAddress(nil), h.leasedAddrs...)
+	previousRoute := h.leasedRoute
+	var appliedNew []appliedAddress
+	var removedPrevious []appliedAddress
+	routeApplied := false
+	previousRouteRemoved := false
+	dnsWasActive := h.dns.path != ""
+	var previousDNS []byte
+	if dnsWasActive {
+		var err error
+		previousDNS, err = os.ReadFile(h.dns.path)
+		if err != nil {
+			return fmt.Errorf("netapply: snapshot active DNS file %s: %w", h.dns.path, err)
+		}
+	}
+	rollbackAttempt := func() {
+		if dnsWasActive {
+			_ = os.WriteFile(h.dns.path, previousDNS, h.dns.mode)
+		} else if h.dns.path != "" {
+			_ = h.rollbackDNS()
+		}
+		if routeApplied && nextRoute != nil {
+			_ = h.deleteRoute(*nextRoute)
+			_ = restoreDefaultRoutes(defaultRouteSnapshot)
+		}
+		for i := len(appliedNew) - 1; i >= 0; i-- {
+			if !containsAppliedAddress(previousAddrs, appliedNew[i]) {
+				_ = h.runner("ip", "addr", "del", appliedNew[i].cidr, "dev", appliedNew[i].ifName)
+			}
+		}
+		for _, previous := range removedPrevious {
+			_ = h.runner("ip", "addr", "replace", previous.cidr, "dev", previous.ifName)
+		}
+		if previousRouteRemoved && previousRoute != nil {
+			args := []string{previousRoute.family, "route", "replace"}
+			args = append(args, previousRoute.args...)
+			_ = h.runner("ip", args...)
+		}
+		h.leasedAddrs = previousAddrs
+		h.leasedRoute = previousRoute
+	}
+
+	for _, address := range nextAddrs {
+		if err := h.runner("ip", "addr", "replace", address.cidr, "dev", address.ifName); err != nil {
+			rollbackAttempt()
+			return err
+		}
+		appliedNew = append(appliedNew, address)
+	}
+	if nextRoute != nil {
+		args := []string{nextRoute.family, "route", "replace"}
+		args = append(args, nextRoute.args...)
+		if err := h.runner("ip", args...); err != nil {
+			rollbackAttempt()
+			return err
+		}
+		routeApplied = true
+	}
+	if len(lease.DNS) > 0 {
+		if err := h.applyDNS(DNSConfig{Enabled: true, Nameservers: lease.DNS}); err != nil {
+			rollbackAttempt()
+			return err
+		}
+	}
+	if err := h.verifyManagementPaths(); err != nil {
+		rollbackAttempt()
+		return err
+	}
+	for _, previous := range h.leasedAddrs {
+		if containsAppliedAddress(nextAddrs, previous) {
+			continue
+		}
+		if err := h.runner("ip", "addr", "del", previous.cidr, "dev", previous.ifName); err != nil {
+			rollbackAttempt()
+			return err
+		}
+		removedPrevious = append(removedPrevious, previous)
+	}
+	if h.leasedRoute != nil && nextRoute == nil {
+		if err := h.deleteRoute(*h.leasedRoute); err != nil {
+			rollbackAttempt()
+			return err
+		}
+		previousRouteRemoved = true
+	}
+	h.leasedAddrs = nextAddrs
+	h.leasedRoute = nextRoute
+	return nil
+}
+
+func containsAppliedAddress(values []appliedAddress, target appliedAddress) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *appliedDevice) deleteRoute(route appliedRoute) error {
+	args := make([]string, 0, len(route.args)+3)
+	if route.family != "" {
+		args = append(args, route.family)
+	}
+	args = append(args, "route", "del")
+	args = append(args, route.args...)
+	return h.runner("ip", args...)
 }
 
 func applyDevice(cfg DeviceConfig, runner commandRunner) (Handle, error) {
@@ -63,27 +329,19 @@ func applyDevice(cfg DeviceConfig, runner commandRunner) (Handle, error) {
 	if runner == nil {
 		runner = runCommand
 	}
-	handle := &appliedDevice{runner: runner, ifName: cfg.IfName}
+	handle := &appliedDevice{runner: runner, ifName: cfg.IfName, allowDefaultRoute: cfg.AllowDefaultRoute}
+	if managementProtectionRequired(cfg) && cfg.TapMode != model.TapModeOneArm {
+		if err := handle.protectManagementPaths(); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.MTU > 0 {
 		if err := runner("ip", "link", "set", "dev", cfg.IfName, "mtu", fmt.Sprint(cfg.MTU)); err != nil {
 			return nil, err
 		}
 	}
-	for _, cidr := range []string{cfg.IPv4CIDR, cfg.IPv6CIDR} {
-		if cidr == "" {
-			continue
-		}
-		if _, err := netip.ParsePrefix(cidr); err != nil {
-			_ = handle.Rollback()
-			return nil, fmt.Errorf("netapply: invalid CIDR %q: %w", cidr, err)
-		}
-		if err := runner("ip", "addr", "add", cidr, "dev", cfg.IfName); err != nil {
-			_ = handle.Rollback()
-			return nil, err
-		}
-		handle.addrs = append(handle.addrs, cidr)
-	}
-	if cfg.MTU > 0 || cfg.MSSClamp > 0 || cfg.LinkAutoOptimize || cfg.IPv4CIDR != "" || cfg.IPv6CIDR != "" || hasEnabledRoutes(cfg.Routes) {
+	if cfg.MTU > 0 || cfg.MSSClamp > 0 || cfg.LinkAutoOptimize || hasEnabledRoutes(cfg.Routes) ||
+		(cfg.TUNDHCP.Mode != "" && cfg.TUNDHCP.Mode != model.TUNDHCPModeOff) {
 		if err := runner("ip", "link", "set", "dev", cfg.IfName, "up"); err != nil {
 			_ = handle.Rollback()
 			return nil, err
@@ -94,9 +352,27 @@ func applyDevice(cfg DeviceConfig, runner commandRunner) (Handle, error) {
 			_ = handle.Rollback()
 			return nil, errors.New("netapply: bridge is only valid for tap devices")
 		}
+		if cfg.TapMode == model.TapModeOneArm {
+			state, err := snapshotOneArmState(cfg.Bridge.IfName, cfg.Bridge.Name)
+			if err != nil {
+				_ = handle.Rollback()
+				return nil, err
+			}
+			handle.oneArm = state
+		}
 		if err := handle.applyBridge(cfg.Bridge); err != nil {
 			_ = handle.Rollback()
 			return nil, err
+		}
+		if handle.oneArm != nil {
+			if err := handle.oneArm.migrate(); err != nil {
+				_ = handle.Rollback()
+				return nil, err
+			}
+			if err := handle.protectManagementPaths(); err != nil {
+				_ = handle.Rollback()
+				return nil, err
+			}
 		}
 	}
 	if err := handle.applyRoutes(cfg.Routes); err != nil {
@@ -107,7 +383,11 @@ func applyDevice(cfg DeviceConfig, runner commandRunner) (Handle, error) {
 		_ = handle.Rollback()
 		return nil, err
 	}
-	if err := handle.applyDNS(cfg.DNS); err != nil {
+	if err := handle.applyNetworkAccess(cfg); err != nil {
+		_ = handle.Rollback()
+		return nil, err
+	}
+	if err := handle.verifyManagementPaths(); err != nil {
 		_ = handle.Rollback()
 		return nil, err
 	}
@@ -118,14 +398,61 @@ func (h *appliedDevice) Rollback() error {
 	if h == nil || h.runner == nil {
 		return nil
 	}
+	if h.monitorCancel != nil {
+		h.monitorCancel()
+		if h.monitorDone != nil {
+			<-h.monitorDone
+		}
+		h.monitorCancel = nil
+		h.monitorDone = nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var firstErr error
+	h.serviceMu.Lock()
+	for i := len(h.services) - 1; i >= 0; i-- {
+		if err := h.services[i].stop(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	h.services = nil
+	h.serviceMu.Unlock()
+	for i := len(h.generatedFiles) - 1; i >= 0; i-- {
+		if err := os.Remove(h.generatedFiles[i]); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	h.generatedFiles = nil
+	for i := len(h.rollbackCommands) - 1; i >= 0; i-- {
+		command := h.rollbackCommands[i]
+		if err := h.runner(command.command, command.args...); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	h.rollbackCommands = nil
+	for i := len(h.sysctls) - 1; i >= 0; i-- {
+		if err := os.WriteFile(h.sysctls[i].path, []byte(h.sysctls[i].value), 0o644); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	h.sysctls = nil
 	if h.dns.path != "" {
 		if err := h.rollbackDNS(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
+	if h.leasedRoute != nil {
+		if err := h.deleteRoute(*h.leasedRoute); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		h.leasedRoute = nil
+	}
+	for i := len(h.leasedAddrs) - 1; i >= 0; i-- {
+		if err := h.runner("ip", "addr", "del", h.leasedAddrs[i].cidr, "dev", h.leasedAddrs[i].ifName); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	h.leasedAddrs = nil
 	for i := len(h.mssRules) - 1; i >= 0; i-- {
 		rule := h.mssRules[i]
 		if err := h.runner(rule.command, deleteRuleArgs(rule.args)...); err != nil && firstErr == nil {
@@ -134,12 +461,23 @@ func (h *appliedDevice) Rollback() error {
 	}
 	h.mssRules = nil
 	for i := len(h.routes) - 1; i >= 0; i-- {
-		args := append([]string{"route", "del"}, h.routes[i]...)
+		args := make([]string, 0, len(h.routes[i].args)+3)
+		if h.routes[i].family != "" {
+			args = append(args, h.routes[i].family)
+		}
+		args = append(args, "route", "del")
+		args = append(args, h.routes[i].args...)
 		if err := h.runner("ip", args...); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	h.routes = nil
+	if h.oneArm != nil {
+		if err := h.oneArm.rollback(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		h.oneArm = nil
+	}
 	for i := len(h.bridgeControlRules) - 1; i >= 0; i-- {
 		rule := h.bridgeControlRules[i]
 		if err := h.runner(rule.command, rule.args...); err != nil && firstErr == nil {
@@ -167,11 +505,14 @@ func (h *appliedDevice) Rollback() error {
 		h.bridgeName = ""
 	}
 	for i := len(h.addrs) - 1; i >= 0; i-- {
-		if err := h.runner("ip", "addr", "del", h.addrs[i], "dev", h.ifName); err != nil && firstErr == nil {
+		if err := h.runner("ip", "addr", "del", h.addrs[i].cidr, "dev", h.addrs[i].ifName); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	h.addrs = nil
+	if err := h.rollbackManagementPaths(); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	return firstErr
 }
 
@@ -279,6 +620,15 @@ func (h *appliedDevice) applyDNS(cfg DNSConfig) error {
 	content, err := dnsContent(cfg)
 	if err != nil {
 		return err
+	}
+	if h.dns.path != "" {
+		if h.dns.path != outputPath {
+			return fmt.Errorf("netapply: DNS output path changed from %s to %s while active", h.dns.path, outputPath)
+		}
+		if err := os.WriteFile(outputPath, content, h.dns.mode); err != nil {
+			return fmt.Errorf("netapply: update DNS file %s: %w", outputPath, err)
+		}
+		return nil
 	}
 
 	rollback := dnsRollback{path: outputPath, mode: 0o644}
@@ -485,12 +835,41 @@ func (h *appliedDevice) applyRoutes(routes []RouteConfig) error {
 		if err != nil {
 			return err
 		}
-		if err := h.runner("ip", append([]string{"route", "add"}, args...)...); err != nil {
+		family := routeFamily(route)
+		commandArgs := make([]string, 0, len(args)+3)
+		if family != "" {
+			commandArgs = append(commandArgs, family)
+		}
+		commandArgs = append(commandArgs, "route", "add")
+		commandArgs = append(commandArgs, args...)
+		if err := h.runner("ip", commandArgs...); err != nil {
 			return err
 		}
-		h.routes = append(h.routes, args)
+		h.routes = append(h.routes, appliedRoute{family: family, args: args})
 	}
 	return nil
+}
+
+func routeFamily(route RouteConfig) string {
+	for _, candidate := range []string{route.Destination, route.Gateway, route.Source} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate == "default" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(candidate); err == nil {
+			if prefix.Addr().Is6() {
+				return "-6"
+			}
+			return ""
+		}
+		if address, err := netip.ParseAddr(candidate); err == nil {
+			if address.Is6() {
+				return "-6"
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 func routeArgs(route RouteConfig, defaultIfName string) ([]string, error) {

@@ -122,14 +122,14 @@ cat >"$BUILD_DIR/a.json" <<JSON
 {
   "Devices": [{"ID":"tap-a","Enabled":true,"Type":"tap","IfName":"$TAP_A","MTU":$DEVICE_MTU,"LinkAutoOptimize":true,"Bridge":{"Enabled":true,"Name":"$BRIDGE_A","IfName":"$LAN_A","MTU":$DEVICE_MTU}}],
   "Routes": [{"ID":"route-a","Enabled":true,"DeviceID":"tap-a"}],
-  "Listeners": [{"ID":"udp-a","Enabled":true,"BindHost":"172.31.252.1","BindPort":44200,"Transport":"udp","RawUDP":{"PeerMode":"fixed","FixedPeer":"172.31.252.2:44200"},"Binding":{"RouteID":"route-a"}}]
+  "Listeners": [{"ID":"udp-a","Enabled":true,"BindHost":"172.31.252.1","BindPort":44200,"Transport":"udp","RawUDP":{},"Binding":{"RouteID":"route-a"}}]
 }
 JSON
 cat >"$BUILD_DIR/b.json" <<JSON
 {
   "Devices": [{"ID":"tap-b","Enabled":true,"Type":"tap","IfName":"$TAP_B","MTU":$DEVICE_MTU,"LinkAutoOptimize":true,"Bridge":{"Enabled":true,"Name":"$BRIDGE_B","IfName":"$LAN_B","MTU":$DEVICE_MTU}}],
   "Routes": [{"ID":"route-b","Enabled":true,"DeviceID":"tap-b"}],
-  "Listeners": [{"ID":"udp-b","Enabled":true,"BindHost":"172.31.252.2","BindPort":44200,"Transport":"udp","RawUDP":{"PeerMode":"fixed","FixedPeer":"172.31.252.1:44200"},"Binding":{"RouteID":"route-b"}}]
+  "Connectors": [{"ID":"udp-b","Enabled":true,"Remote":"172.31.252.1","Port":44200,"Transport":"udp","RawUDP":{},"Binding":{"RouteID":"route-b"}}]
 }
 JSON
 elif [[ "$TRANSPORT" == "udp-dtls" ]]; then
@@ -141,7 +141,7 @@ cat >"$BUILD_DIR/a.json" <<JSON
   "Devices": [{"ID":"tap-a","Enabled":true,"Type":"tap","IfName":"$TAP_A","MTU":$DEVICE_MTU,"LinkAutoOptimize":true,"Bridge":{"Enabled":true,"Name":"$BRIDGE_A","IfName":"$LAN_A","MTU":$DEVICE_MTU}}],
   "VKeys": [{"ID":"vk-a","Enabled":true,"Value":"tapx-l2-dtls-vkey"}],
   "Routes": [{"ID":"route-a","Enabled":true,"DeviceID":"tap-a","VKeyID":"vk-a"}],
-  "Listeners": [{"ID":"udp-a","Enabled":true,"BindHost":"172.31.252.1","BindPort":44200,"Transport":"udp","RawUDP":{"PeerMode":"learn","DTLS":{"Enabled":true,"CertFile":"$BUILD_DIR/server.crt","KeyFile":"$BUILD_DIR/server.key","ALPN":["tapx"],"ReplayWindow":64}},"Binding":{"RouteID":"route-a"}}]
+  "Listeners": [{"ID":"udp-a","Enabled":true,"BindHost":"172.31.252.1","BindPort":44200,"Transport":"udp","RawUDP":{"DTLS":{"Enabled":true,"CertFile":"$BUILD_DIR/server.crt","KeyFile":"$BUILD_DIR/server.key","ReplayWindow":64}},"Binding":{"RouteID":"route-a"}}]
 }
 JSON
 cat >"$BUILD_DIR/b.json" <<JSON
@@ -149,7 +149,7 @@ cat >"$BUILD_DIR/b.json" <<JSON
   "Devices": [{"ID":"tap-b","Enabled":true,"Type":"tap","IfName":"$TAP_B","MTU":$DEVICE_MTU,"LinkAutoOptimize":true,"Bridge":{"Enabled":true,"Name":"$BRIDGE_B","IfName":"$LAN_B","MTU":$DEVICE_MTU}}],
   "VKeys": [{"ID":"vk-b","Enabled":true,"Value":"tapx-l2-dtls-vkey"}],
   "Routes": [{"ID":"route-b","Enabled":true,"DeviceID":"tap-b","VKeyID":"vk-b"}],
-  "Connectors": [{"ID":"udp-b","Enabled":true,"Remote":"172.31.252.1","Port":44200,"Transport":"udp","RawUDP":{"PeerMode":"fixed","FixedPeer":"172.31.252.1:44200","DTLS":{"Enabled":true,"CAFile":"$BUILD_DIR/server.crt","ServerName":"tapx.local","ALPN":["tapx"],"ReplayWindow":64}},"Binding":{"RouteID":"route-b"}}]
+  "Connectors": [{"ID":"udp-b","Enabled":true,"Remote":"172.31.252.1","Port":44200,"Transport":"udp","RawUDP":{"DTLS":{"Enabled":true,"ServerName":"tapx.local","AllowInsecure":true,"ReplayWindow":64}},"Binding":{"RouteID":"route-b"}}]
 }
 JSON
 elif [[ "$TRANSPORT" == "tcp" || "$TRANSPORT" == "tcp-tls" ]]; then
@@ -159,8 +159,8 @@ if [[ "$TRANSPORT" == "tcp-tls" ]]; then
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "$BUILD_DIR/server.key" -out "$BUILD_DIR/server.crt" -days 1 \
     -subj "/CN=tapx.local" -addext "subjectAltName = DNS:tapx.local,IP:172.31.252.1" >/dev/null 2>&1
-  server_tls=',"TLS":{"Enabled":true,"CertFile":"'"$BUILD_DIR"'/server.crt","KeyFile":"'"$BUILD_DIR"'/server.key","ALPN":["tapx"],"MinVersion":"1.2"}'
-  client_tls=',"TLS":{"Enabled":true,"CAFile":"'"$BUILD_DIR"'/server.crt","ServerName":"tapx.local","ALPN":["tapx"],"MinVersion":"1.2"}'
+  server_tls=',"TLS":{"Enabled":true,"CertFile":"'"$BUILD_DIR"'/server.crt","KeyFile":"'"$BUILD_DIR"'/server.key","MinVersion":"1.2"}'
+  client_tls=',"TLS":{"Enabled":true,"ServerName":"tapx.local","AllowInsecure":true,"MinVersion":"1.2"}'
 fi
 cat >"$BUILD_DIR/a.json" <<JSON
 {

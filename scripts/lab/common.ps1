@@ -61,7 +61,9 @@ function Invoke-TapXRemoteScript {
         [Parameter(Mandatory = $true)][string]$HostName,
         [Parameter(Mandatory = $true)][string]$Script
     )
-    $scriptBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Script)
+    # Remote commands execute under Bash; normalize PowerShell here-strings to LF.
+    $normalizedScript = $Script.Replace("`r`n", "`n").Replace("`r", "`n")
+    $scriptBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($normalizedScript)
     $scriptB64 = [Convert]::ToBase64String($scriptBytes)
     $output = & ssh @($Context.SshBase) "$($Context.User)@$HostName" "printf '%s' '$scriptB64' | base64 -d | bash"
     if ($LASTEXITCODE -ne 0) {
@@ -227,7 +229,7 @@ function New-TapXUdpConfig {
       "BindHost": "0.0.0.0",
       "BindPort": $UdpPort,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "$($PeerHost):$UdpPort", "ReceiveBuffer": 1048576, "SendBuffer": 1048576, "ReuseAddr": true},
+      "RawUDP": {"QueueSize": 2048, "ZeroCopy": true},
       "Binding": {"RouteID": "route-a"}
     }
   ]
@@ -256,7 +258,7 @@ function New-TapXTapUdpConfig {
       "BindHost": "0.0.0.0",
       "BindPort": $UdpPort,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "$($PeerHost):$UdpPort", "ReceiveBuffer": 1048576, "SendBuffer": 1048576, "ReuseAddr": true},
+      "RawUDP": {"QueueSize": 2048, "ZeroCopy": true},
       "Binding": {"RouteID": "route-a"}
     }
   ]
@@ -281,7 +283,7 @@ function New-TapXTcpListenerConfig {
       "BindHost": "0.0.0.0",
       "BindPort": $TcpPort,
       "Transport": "tcp",
-      "RawTCP": {"LengthMode": "uint16", "ReceiveBuffer": 1048576, "SendBuffer": 1048576, "NoDelay": true, "KeepAliveSecond": 30, "ConnectTimeout": 5},
+      "RawTCP": {"LengthMode": "uint16", "QueueSize": 2048, "ZeroCopy": true, "NoDelay": true, "KeepAliveSecond": 30, "ConnectTimeout": 5},
       "Binding": {"RouteID": "route-a"}
     }
   ]
@@ -309,7 +311,7 @@ function New-TapXTcpConnectorConfig {
       "Remote": "$HostA",
       "Port": $TcpPort,
       "Transport": "tcp",
-      "RawTCP": {"LengthMode": "uint16", "ReceiveBuffer": 1048576, "SendBuffer": 1048576, "NoDelay": true, "KeepAliveSecond": 30, "ConnectTimeout": 5},
+      "RawTCP": {"LengthMode": "uint16", "QueueSize": 2048, "ZeroCopy": true, "NoDelay": true, "KeepAliveSecond": 30, "ConnectTimeout": 5},
       "Binding": {"RouteID": "route-a"}
     }
   ]

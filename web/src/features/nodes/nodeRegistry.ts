@@ -1,5 +1,6 @@
 import { panelFetch } from '../../app/runtime-path';
 import type { RuntimeConfig } from '../../shared/api';
+import { runtimeConfigForAPI } from '../../shared/runtime-config-wire';
 import { responseError } from '../../shared/http-error';
 
 export type NodeStatus = 'online' | 'offline' | 'checking';
@@ -105,7 +106,7 @@ export async function saveManagedNodeConfig(id: string, config: RuntimeConfig): 
   const response = await request(`/api/nodes/${encodeURIComponent(id)}/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(config),
+    body: JSON.stringify(runtimeConfigForAPI(config)),
   });
   return unwrapConfig(await response.json(), config);
 }
@@ -151,5 +152,5 @@ function unwrapConfig(payload: unknown, fallback: RuntimeConfig = {}): RuntimeCo
   if (payload && typeof payload === 'object' && 'config' in payload) {
     return ((payload as { config?: RuntimeConfig }).config || fallback);
   }
-  return payload && typeof payload === 'object' ? payload as RuntimeConfig : fallback;
+  return fallback;
 }

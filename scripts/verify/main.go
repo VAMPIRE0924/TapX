@@ -29,10 +29,9 @@ type verifier struct {
 func main() {
 	root := flag.String("repo", ".", "repository root")
 	requirePackages := flag.Bool("require-openwrt-package", false, "fail when native OpenWrt package files are missing")
-	requireIPK := flag.Bool("require-openwrt-ipk", false, "deprecated alias for -require-openwrt-package")
 	flag.Parse()
 
-	v := verifier{root: cleanRoot(*root), requireOpenWrtPackages: *requirePackages || *requireIPK}
+	v := verifier{root: cleanRoot(*root), requireOpenWrtPackages: *requirePackages}
 	v.checkRequiredFiles()
 	v.checkJSONFiles()
 	v.checkRuntimeExamples()
@@ -167,10 +166,15 @@ func (v *verifier) checkRequiredFiles() {
 		"scripts/build/openwrt-x86-64-packages.sh",
 		"scripts/install/openwrt-install.sh",
 		"openwrt/Makefile",
+		"docs/openwrt-dependencies.md",
 		"openwrt/tapx-core/files/etc/config/tapx",
 		"openwrt/tapx-core/files/etc/init.d/tapx",
 		"openwrt/tapx-panel/files/etc/init.d/tapx-panel",
-		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js",
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/tapx/common.js",
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/overview.js",
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/panel.js",
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/backup.js",
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/logs.js",
 	}
 	if v.exists("AGENTS.md") {
 		required = append(required,
@@ -272,9 +276,9 @@ func (v *verifier) checkDashboard() {
 			"getDashboard",
 			"dashboard.management",
 			"dashboard.realtimeTransport",
-			"dashboard.dataPlane",
-			"dashboard.endpointStatus",
-			"dashboard.policyProtection",
+			"dashboard.tunnelStatus",
+			"dashboard.activeObjects",
+			"dashboard.linkProtection",
 		},
 	}
 	if v.exists("docs/panel-api.md") {
@@ -468,8 +472,14 @@ func (v *verifier) checkLinuxInstall() {
 			"0.0.0.0:$PANEL_PORT",
 			"set-panel",
 			"set-database",
+			"reset-password",
+			"update-script",
+			"scripts/install/linux-install.sh",
+			"bash -n",
+			"随机重置面板用户名和密码",
+			"随机生成的用户名和密码只显示这一次",
 			"-init-admin",
-			"随机生成的密码只显示这一次",
+			"随机生成的用户名和密码只显示这一次",
 		},
 		"scripts/install/install.sh": {
 			"releases/latest/download",
@@ -523,8 +533,9 @@ func (v *verifier) checkLinuxInstall() {
 func (v *verifier) checkClientSharing() {
 	checks := map[string][]string{
 		"internal/model/model.go": {
-			"CredentialType",
-			"CredentialValue",
+			"UUID",
+			"Password",
+			"Auth",
 			"ConnectorID string",
 			"IPv4Gateway",
 			"AllowDefaultRoute",
@@ -545,7 +556,7 @@ func (v *verifier) checkClientSharing() {
 		},
 		"web/src/shared/api.ts": {
 			"/api/share/clients",
-			"CredentialType",
+			"UUID",
 			"ConnectorID",
 			"IPv4Gateway",
 			"AllowDefaultRoute",
@@ -676,26 +687,55 @@ func (v *verifier) checkNetdevVisibilityIntegration() {
 }
 
 func (v *verifier) checkOpenWrtLuCI() {
-	view, err := os.ReadFile(v.path("openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/config.js"))
+	packageMakefile, err := os.ReadFile(v.path("openwrt/Makefile"))
 	if err != nil {
-		v.fail("read LuCI view: %v", err)
-		return
+		v.fail("read OpenWrt package Makefile: %v", err)
+	} else {
+		makefileText := string(packageMakefile)
+		for _, dependency := range []string{
+			"+libc",
+			"+kmod-tun",
+			"+ip-full",
+			"+tc-full",
+			"+kmod-sched-flower",
+			"+iptables-nft",
+			"+ip6tables-nft",
+			"+ca-bundle",
+		} {
+			if !strings.Contains(makefileText, dependency) {
+				v.fail("OpenWrt tapx-core dependency missing %q", dependency)
+			}
+		}
 	}
-	viewText := string(view)
-	for _, want := range []string{
-		"/etc/init.d/tapx",
-		"/etc/init.d/tapx-panel",
-		"/sbin/logread",
-		"监听网卡",
-		"初始化并保存",
-		"开机启动",
-		"PBKDF2",
-		"端口不可用",
-		"fs.exec",
-		"不包含证书",
-	} {
-		if !strings.Contains(viewText, want) {
-			v.fail("LuCI view missing %q", want)
+
+	viewChecks := map[string][]string{
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/tapx/common.js": {
+			"tapx.luci.language", "languageControl", "serviceCard", "panelUrl",
+		},
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/overview.js": {
+			"tapx.status", "runtimeConfig", "database", "uciConfig",
+		},
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/panel.js": {
+			"Listening interface", "Save and apply", "coreAutostart", "panelAutostart", "tapx.languageControl",
+		},
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/backup.js": {
+			"tapx-openwrt-config", "Download backup", "Choose backup", "Reset TapX",
+		},
+		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/logs.js": {
+			"/sbin/logread", "level", "refresh",
+		},
+	}
+	for rel, markers := range viewChecks {
+		payload, err := os.ReadFile(v.path(rel))
+		if err != nil {
+			v.fail("read LuCI view %s: %v", rel, err)
+			continue
+		}
+		text := string(payload)
+		for _, marker := range markers {
+			if !strings.Contains(text, marker) {
+				v.fail("LuCI view %s missing %q", rel, marker)
+			}
 		}
 	}
 	helper, err := os.ReadFile(v.path("openwrt/luci-app-tapx/root/usr/libexec/tapx-openwrt-config"))
@@ -728,8 +768,20 @@ func (v *verifier) checkOpenWrtLuCI() {
 	initScript, err := os.ReadFile(v.path("openwrt/tapx-core/files/etc/init.d/tapx"))
 	if err != nil {
 		v.fail("read OpenWrt core init: %v", err)
-	} else if !strings.Contains(string(initScript), "-export-runtime-config") {
-		v.fail("OpenWrt core init must regenerate runtime config from the database")
+	} else {
+		initText := string(initScript)
+		if !strings.Contains(initText, "-export-runtime-config") {
+			v.fail("OpenWrt core init must regenerate runtime config from the database")
+		}
+		for _, want := range []string{
+			"config_get_bool panel_enabled panel enabled 0",
+			"config_get_bool panel_initialized panel initialized 0",
+			"runtime lifecycle is delegated to tapx-panel",
+		} {
+			if !strings.Contains(initText, want) {
+				v.fail("OpenWrt core init missing panel lifecycle guard %q", want)
+			}
+		}
 	}
 	acl, err := os.ReadFile(v.path("openwrt/luci-app-tapx/root/usr/share/rpcd/acl.d/luci-app-tapx.json"))
 	if err != nil {
@@ -738,7 +790,6 @@ func (v *verifier) checkOpenWrtLuCI() {
 	}
 	aclText := string(acl)
 	for _, want := range []string{
-		"/usr/bin/tapx-core",
 		"/usr/bin/tapx-panel",
 		"/etc/init.d/tapx",
 		"/etc/init.d/tapx-panel",
@@ -776,6 +827,13 @@ func (v *verifier) checkOpenWrtPackages() {
 				"Package: tapx-core",
 				"Architecture: x86_64",
 				"Depends: libc",
+				"kmod-tun",
+				"ip-full",
+				"tc-full",
+				"kmod-sched-flower",
+				"iptables-nft",
+				"ip6tables-nft",
+				"ca-bundle",
 			},
 			DataFiles: []string{
 				"./usr/bin/tapx-core",
@@ -797,22 +855,25 @@ func (v *verifier) checkOpenWrtPackages() {
 				"./usr/share/luci/menu.d/luci-app-tapx.json",
 				"./usr/share/rpcd/acl.d/luci-app-tapx.json",
 				"./usr/libexec/tapx-openwrt-config",
-				"./www/luci-static/resources/view/tapx/config.js",
+				"./www/luci-static/resources/tapx/common.js",
+				"./www/luci-static/resources/view/tapx/overview.js",
+				"./www/luci-static/resources/view/tapx/panel.js",
+				"./www/luci-static/resources/view/tapx/backup.js",
+				"./www/luci-static/resources/view/tapx/logs.js",
 			},
 			DataContains: map[string][]string{
 				"./usr/share/rpcd/acl.d/luci-app-tapx.json": {
-					"/usr/bin/tapx-core",
 					"/usr/bin/tapx-panel",
 					"/etc/init.d/tapx",
 					"/etc/init.d/tapx-panel",
 					"/sbin/logread",
 					"exec",
 				},
-				"./www/luci-static/resources/view/tapx/config.js": {
-					"监听网卡",
-					"初始化并保存",
-					"PBKDF2",
-					"fs.exec",
+				"./www/luci-static/resources/view/tapx/panel.js": {
+					"Listening interface",
+					"Save and apply",
+					"coreAutostart",
+					"panelAutostart",
 				},
 				"./usr/libexec/tapx-openwrt-config": {
 					"etc/config/tapx etc/tapx/tapx.db",
@@ -947,7 +1008,7 @@ type ipkExpectation struct {
 }
 
 func verifyIPK(path string, expect ipkExpectation) error {
-	members, err := readAr(path)
+	members, err := readIPK(path)
 	if err != nil {
 		return err
 	}
@@ -1001,11 +1062,33 @@ func verifyIPK(path string, expect ipkExpectation) error {
 	return nil
 }
 
-func readAr(path string) (map[string][]byte, error) {
+func readIPK(path string) (map[string][]byte, error) {
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+
+	var members map[string][]byte
+	switch {
+	case len(payload) >= 8 && string(payload[:8]) == "!<arch>\n":
+		members, err = readArPayload(payload)
+	case len(payload) >= 2 && payload[0] == 0x1f && payload[1] == 0x8b:
+		members, err = readTarGz(payload)
+	default:
+		return nil, errors.New("unsupported ipk container")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	normalized := make(map[string][]byte, len(members))
+	for name, data := range members {
+		normalized[strings.TrimPrefix(name, "./")] = data
+	}
+	return normalized, nil
+}
+
+func readArPayload(payload []byte) (map[string][]byte, error) {
 	if len(payload) < 8 || string(payload[:8]) != "!<arch>\n" {
 		return nil, errors.New("invalid ar magic")
 	}

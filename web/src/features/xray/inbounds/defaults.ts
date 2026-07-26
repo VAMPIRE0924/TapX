@@ -1,5 +1,5 @@
 import { generateWireguardKeypair } from '../../../shared/wireguard';
-import { randomBase64, randomBytes, randomLowerAndNumber } from '../../../shared/random';
+import { randomBase64, randomLowerAndNumber } from '../../../shared/random';
 
 export function defaultInboundSettings(protocol: string): Record<string, unknown> {
   switch (protocol) {
@@ -31,10 +31,6 @@ export function defaultInboundSettings(protocol: string): Record<string, unknown
         udp: false,
         ip: '127.0.0.1',
       };
-    case 'mtproto': {
-      const fakeTlsDomain = 'www.cloudflare.com';
-      return { fakeTlsDomain, secret: mtprotoSecret(fakeTlsDomain) };
-    }
     case 'tunnel':
       return { portMap: {}, allowedNetwork: 'tcp,udp', followRedirect: false };
     case 'tun':
@@ -96,11 +92,4 @@ export function defaultTapxListenerFields() {
       DtlsReplayWindow: 0,
     },
   };
-}
-
-function mtprotoSecret(domain: string): string {
-  const random = randomBytes(16);
-  const randomHex = Array.from(random, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  const domainHex = Array.from(new TextEncoder().encode(domain), (byte) => byte.toString(16).padStart(2, '0')).join('');
-  return `ee${randomHex}${domainHex}`;
 }

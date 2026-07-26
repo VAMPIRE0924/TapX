@@ -53,7 +53,7 @@ write_connector() {
   "Routes":[{"ID":"route-${device_id}","Enabled":true,"Action":"bind-device","VKeyID":"${key_id}","DeviceID":"${device_id}"}],
   "Connectors":[{
     "ID":"connector-${device_id}","Enabled":true,"Remote":"198.18.80.1","Port":44510,"Transport":"udp",
-    "RawUDP":{"PeerMode":"any"${DTLS_CONNECTOR_JSON}},"Binding":{"RouteID":"route-${device_id}"}
+    "RawUDP":{${DTLS_CONNECTOR_JSON#?}},"Binding":{"RouteID":"route-${device_id}"}
   }]
 }
 JSON
@@ -113,7 +113,7 @@ if [[ "$SECURITY" == "dtls" ]]; then
     -days 1 -subj "/CN=tapx.local" \
     -addext "subjectAltName = DNS:tapx.local,IP:198.18.80.1" >/dev/null 2>&1
   DTLS_LISTENER_JSON=",\"DTLS\":{\"Enabled\":true,\"CertFile\":\"${BUILD_DIR}/tls/server.crt\",\"KeyFile\":\"${BUILD_DIR}/tls/server.key\"}"
-  DTLS_CONNECTOR_JSON=",\"DTLS\":{\"Enabled\":true,\"CAFile\":\"${BUILD_DIR}/tls/server.crt\",\"ServerName\":\"tapx.local\"}"
+  DTLS_CONNECTOR_JSON=",\"DTLS\":{\"Enabled\":true,\"ServerName\":\"tapx.local\",\"AllowInsecure\":true}"
 fi
 
 cat >"${BUILD_DIR}/a.json" <<JSON
@@ -138,7 +138,7 @@ cat >"${BUILD_DIR}/a.json" <<JSON
   ],
   "Listeners":[{
     "ID":"raw-in","Enabled":true,"BindHost":"198.18.80.1","BindPort":44510,"Transport":"udp",
-    "RawUDP":{"PeerMode":"learn"${DTLS_LISTENER_JSON}}
+    "RawUDP":{${DTLS_LISTENER_JSON#?}}
   }]
 }
 JSON

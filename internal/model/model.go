@@ -23,33 +23,131 @@ const (
 )
 
 type Device struct {
-	ID                   string
-	Enabled              bool
-	Name                 string
-	Type                 DeviceType
-	IfName               string
-	MTU                  int
-	MSSClamp             int
-	LinkAutoOptimize     bool
-	AddressConfigEnabled bool
-	AddressAssignMode    string
-	IPv4CIDR             string
-	IPv6CIDR             string
-	Gateway              string
-	Bridge               *BridgeConfig
-	Routes               []DeviceRoute
-	DNS                  *DNSConfig
-	DNSSearch            []string
-	AllowDefaultRoute    bool
-	BridgeEnabled        bool
-	BridgeName           string
-	BridgeMember         string
-	Source               string
-	LinkedListenerIDs    []string
-	LinkedListenerNames  []string
-	LinkedConnectorIDs   []string
-	LinkedConnectorNames []string
-	Remark               string
+	ID                    string
+	Enabled               bool
+	Name                  string
+	Type                  DeviceType
+	IfName                string
+	MTU                   int
+	MSSClamp              int
+	LinkAutoOptimize      bool
+	Bridge                *BridgeConfig
+	Routes                []DeviceRoute
+	TapMode               TapMode
+	AccessRole            AccessRole
+	DHCP                  *DHCPConfig
+	SharedIP              *SharedIPConfig
+	TUNDHCP               *TUNDHCPConfig
+	OneArmRollbackSeconds int
+	Source                string
+	Remark                string
+}
+
+type TapMode string
+
+const (
+	TapModeStandalone  TapMode = "standalone"
+	TapModeTransparent TapMode = "transparent"
+	TapModeOneArm      TapMode = "one-arm"
+	TapModeSharedIP    TapMode = "shared-ip"
+)
+
+type AccessRole string
+
+const (
+	AccessRoleClient AccessRole = "client"
+	AccessRoleServer AccessRole = "server"
+)
+
+type DHCPMode string
+
+const (
+	DHCPModeOff         DHCPMode = "off"
+	DHCPModePassthrough DHCPMode = "passthrough"
+	DHCPModeServer      DHCPMode = "server"
+	DHCPModeMirror      DHCPMode = "mirror"
+)
+
+type DHCPStaticLease struct {
+	Name    string
+	MAC     string
+	Address string
+}
+
+type DHCPConfig struct {
+	Mode              DHCPMode
+	IPv4CIDR          string
+	PoolStart         string
+	PoolEnd           string
+	PrefixLength      int
+	Gateway           string
+	DNS               []string
+	LeaseSeconds      int
+	Authoritative     bool
+	ConflictDetection bool
+	StaticLeases      []DHCPStaticLease
+}
+
+type SharedIPRole string
+
+const (
+	SharedIPRoleService SharedIPRole = "service"
+	SharedIPRoleAccess  SharedIPRole = "access"
+)
+
+type FirewallBackend string
+
+const (
+	FirewallAuto     FirewallBackend = "auto"
+	FirewallNFTables FirewallBackend = "nftables"
+	FirewallIPTables FirewallBackend = "iptables"
+)
+
+type SharedIPConfig struct {
+	Role                SharedIPRole
+	UplinkInterface     string
+	AddressSource       string
+	IPv4CIDR            string
+	Gateway             string
+	DNS                 []string
+	FirewallBackend     FirewallBackend
+	HostPortPriority    bool
+	TrackAddressChanges bool
+	ReservedTCPPorts    []string
+	ReservedUDPPorts    []string
+	ClientMAC           string
+}
+
+type TUNDHCPMode string
+
+const (
+	TUNDHCPModeOff    TUNDHCPMode = "off"
+	TUNDHCPModeClient TUNDHCPMode = "client"
+	TUNDHCPModeServer TUNDHCPMode = "server"
+	TUNDHCPModeManual TUNDHCPMode = "manual"
+)
+
+type TUNDHCPConfig struct {
+	Mode                      TUNDHCPMode
+	Protocol                  string
+	RelayEnabled              bool
+	RelayProtocol             string
+	IPv4CIDR                  string
+	IPv6CIDR                  string
+	PoolStart                 string
+	PoolEnd                   string
+	IPv6PoolStart             string
+	IPv6PoolEnd               string
+	Gateway                   string
+	DNS                       []string
+	OfferedGateway            string
+	OfferedDNS                []string
+	LeaseSeconds              int
+	Authoritative             bool
+	ConflictDetection         bool
+	RelayDownstreamInterfaces []string
+	RelayServers              []string
+	MaxHops                   int
 }
 
 type BridgeConfig struct {
@@ -67,14 +165,6 @@ type DeviceRoute struct {
 	IfName      string
 	Metric      int
 	Table       string
-}
-
-type DNSConfig struct {
-	Enabled       bool
-	Nameservers   []string
-	SearchDomains []string
-	Options       []string
-	OutputPath    string
 }
 
 type Listener struct {
@@ -116,6 +206,8 @@ type Connector struct {
 	TrafficRXOffset        uint64
 	TrafficTXOffset        uint64
 	Remark                 string
+	CreatedAt              int64
+	UpdatedAt              int64
 }
 
 type Client struct {
@@ -125,8 +217,6 @@ type Client struct {
 	Email                  string
 	ListenerID             string
 	ListenerIDs            []string
-	CredentialType         string
-	CredentialValue        string
 	UUID                   string
 	Password               string
 	Auth                   string
@@ -143,6 +233,8 @@ type Client struct {
 	TrafficRXOffset        uint64
 	TrafficTXOffset        uint64
 	Remark                 string
+	CreatedAt              int64
+	UpdatedAt              int64
 }
 
 type Route struct {
@@ -177,23 +269,7 @@ type Binding struct {
 	AddressID   string
 }
 
-type UDPPeerMode string
-
-const (
-	UDPPeerAny   UDPPeerMode = "any"
-	UDPPeerFixed UDPPeerMode = "fixed"
-	UDPPeerLearn UDPPeerMode = "learn"
-)
-
 type RawUDPSettings struct {
-	PeerMode        UDPPeerMode
-	FixedPeer       string
-	BindInterface   string
-	BindAddress     string
-	ReceiveBuffer   int
-	SendBuffer      int
-	ReuseAddr       bool
-	ReusePort       bool
 	KeepAliveSecond int
 	Workers         int
 	QueueSize       int
@@ -212,10 +288,6 @@ const (
 
 type RawTCPSettings struct {
 	LengthMode      TCPLengthMode
-	BindInterface   string
-	BindAddress     string
-	ReceiveBuffer   int
-	SendBuffer      int
 	NoDelay         bool
 	KeepAliveSecond int
 	FastOpen        bool
@@ -225,8 +297,6 @@ type RawTCPSettings struct {
 	QueueSize       int
 	ZeroCopy        bool
 	IdleTimeout     int
-	ReadBuffer      int
-	WriteBuffer     int
 	TLS             RawTLSSettings
 }
 
@@ -234,9 +304,7 @@ type RawTLSSettings struct {
 	Enabled       bool
 	CertFile      string
 	KeyFile       string
-	CAFile        string
 	ServerName    string
-	ALPN          []string
 	MinVersion    string
 	MaxVersion    string
 	AllowInsecure bool
@@ -246,9 +314,7 @@ type RawDTLSSettings struct {
 	Enabled       bool
 	CertFile      string
 	KeyFile       string
-	CAFile        string
 	ServerName    string
-	ALPN          []string
 	MinVersion    string
 	MaxVersion    string
 	AllowInsecure bool
@@ -310,6 +376,7 @@ type Settings struct {
 	ID                     string
 	Enabled                bool
 	Name                   string
+	PanelName              string
 	PanelListen            string
 	PanelDomain            string
 	PanelBasePath          string

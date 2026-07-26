@@ -117,7 +117,7 @@ export function buildLinkTestRows(config: RuntimeConfig): LinkTestRow[] {
           device: device ? labelDevice(device) : '',
           allowedIPs: guard.ips,
           allowedMACs: guard.macs,
-          endpoint: client.CredentialType || '',
+          endpoint: listener ? `${listener.BindHost || '0.0.0.0'}:${listener.BindPort || ''}` : '',
         });
       }
     }

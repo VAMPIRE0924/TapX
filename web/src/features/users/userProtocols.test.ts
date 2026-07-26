@@ -13,10 +13,10 @@ describe('user protocols', () => {
     )).toEqual(['raw-udp', 'wireguard']);
   });
 
-  it('uses the legacy credential type only when no attached protocol resolves', () => {
-    expect(userProtocols({ ID: 'legacy', CredentialType: 'trojan' }, [], [])).toEqual(['trojan']);
+  it('does not infer protocols from credentials without an attached listener', () => {
+    expect(userProtocols({ ID: 'detached' }, [], [])).toEqual([]);
     expect(userProtocols(
-      { ID: 'mixed', CredentialType: 'vless', ListenerID: 'raw' },
+      { ID: 'mixed', ListenerID: 'raw' },
       [{ ID: 'raw', Transport: 'tcp' }],
       [],
     )).toEqual(['raw-tcp']);

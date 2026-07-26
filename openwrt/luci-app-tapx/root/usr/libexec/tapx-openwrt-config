@@ -1,5 +1,5 @@
 #!/bin/sh
-set -eu
+set -e
 
 . /lib/functions.sh
 
@@ -7,13 +7,17 @@ PANEL=/usr/bin/tapx-panel
 PANEL_INIT=/etc/init.d/tapx-panel
 CORE_INIT=/etc/init.d/tapx
 RESTORE_UPLOAD=/tmp/tapx-openwrt-restore.tar.gz
+PASSWORD_UPLOAD=/tmp/tapx-openwrt-panel-password
 MAX_BACKUP_SIZE=$((70 * 1024 * 1024))
 WORKDIR=''
 REMOVE_UPLOAD=0
+REMOVE_PASSWORD=0
 
 cleanup() {
-	[ -n "$WORKDIR" ] && rm -rf "$WORKDIR"
-	[ "$REMOVE_UPLOAD" = '1' ] && rm -f "$RESTORE_UPLOAD"
+	if [ -n "$WORKDIR" ]; then rm -rf "$WORKDIR"; fi
+	if [ "$REMOVE_UPLOAD" = '1' ]; then rm -f "$RESTORE_UPLOAD"; fi
+	if [ "$REMOVE_PASSWORD" = '1' ]; then rm -f "$PASSWORD_UPLOAD"; fi
+	return 0
 }
 
 trap cleanup EXIT INT TERM
@@ -51,6 +55,50 @@ export_config() {
 	tar -C "$tmp" -czf - etc/config/tapx etc/tapx/tapx.db
 }
 
+init_panel() {
+	local db listen base_path username https cert_file key_file password_hash
+	[ "$#" -eq 7 ] || {
+		echo "invalid panel initialization arguments" >&2
+		exit 2
+	}
+	db="$1"
+	listen="$2"
+	base_path="$3"
+	username="$4"
+	https="$5"
+	cert_file="$6"
+	key_file="$7"
+	[ "$db" = "$(database_path)" ] || {
+		echo "unsupported OpenWrt database path" >&2
+		exit 1
+	}
+	[ -s "$PASSWORD_UPLOAD" ] || {
+		echo "panel password upload is missing" >&2
+		exit 1
+	}
+	REMOVE_PASSWORD=1
+	password_hash="$("$PANEL" -hash-password-stdin < "$PASSWORD_UPLOAD")"
+	rm -f "$PASSWORD_UPLOAD"
+	REMOVE_PASSWORD=0
+	case "$password_hash" in
+		pbkdf2-sha256\$*) ;;
+		*) echo "failed to hash panel password" >&2; exit 1 ;;
+	esac
+	if [ "$https" = '1' ]; then
+		[ -r "$cert_file" ] && [ -r "$key_file" ] || {
+			echo "panel certificate or private key is unreadable" >&2
+			exit 1
+		}
+		"$PANEL" -db "$db" -listen "$listen" -base-path "$base_path" \
+			-panel-cert-file "$cert_file" -panel-key-file "$key_file" \
+			-init-admin -admin-username "$username" -admin-password-hash "$password_hash"
+	else
+		"$PANEL" -db "$db" -listen "$listen" -base-path "$base_path" \
+			-disable-panel-https -init-admin -admin-username "$username" \
+			-admin-password-hash "$password_hash"
+	fi
+}
+
 validate_archive() {
 	local archive="$1" entries expected size
 	[ -f "$archive" ] || {
@@ -70,9 +118,21 @@ validate_archive() {
 	}
 }
 
-restore_config() {
-	local archive="${1:-$RESTORE_UPLOAD}" tmp db rollback_db had_db=0
+apply_service_state() {
 	local panel_autostart panel_enabled core_enabled core_autostart
+	config_load tapx
+	config_get_bool panel_autostart panel autostart 0
+	config_get_bool panel_enabled panel enabled 0
+	config_get_bool core_enabled core enabled 0
+	config_get_bool core_autostart core autostart 0
+	if [ "$panel_autostart" = '1' ]; then "$PANEL_INIT" enable; else "$PANEL_INIT" disable; fi
+	if [ "$core_autostart" = '1' ]; then "$CORE_INIT" enable; else "$CORE_INIT" disable; fi
+	if [ "$panel_enabled" = '1' ]; then "$PANEL_INIT" start; fi
+	if [ "$core_enabled" = '1' ]; then "$CORE_INIT" start; fi
+}
+
+restore_config() {
+	local archive="${1:-$RESTORE_UPLOAD}" tmp db rollback_db new_db_path had_db=0
 	[ "$archive" = "$RESTORE_UPLOAD" ] || {
 		echo "invalid restore upload path" >&2
 		exit 1
@@ -114,21 +174,13 @@ restore_config() {
 		exit 1
 	fi
 
-	config_load tapx
-	config_get_bool panel_autostart panel autostart 0
-	config_get_bool panel_enabled panel enabled 0
-	config_get_bool core_enabled core enabled 0
-	config_get_bool core_autostart core autostart 0
-	if [ "$panel_autostart" = '1' ]; then "$PANEL_INIT" enable; else "$PANEL_INIT" disable; fi
-	if [ "$core_autostart" = '1' ]; then "$CORE_INIT" enable; else "$CORE_INIT" disable; fi
-	if [ "$panel_enabled" = '1' ]; then "$PANEL_INIT" start; fi
-	if [ "$core_enabled" = '1' ]; then "$CORE_INIT" start; fi
+	apply_service_state
 	sync
 	echo "TapX configuration restored"
 }
 
 reset_config() {
-	local db panel_autostart panel_enabled core_enabled core_autostart
+	local db
 	local rom_config=/rom/etc/config/tapx rom_db=/rom/etc/tapx/tapx.db
 	[ -s "$rom_config" ] || {
 		echo "firmware does not contain a TapX panel configuration" >&2
@@ -143,25 +195,18 @@ reset_config() {
 	else
 		rm -f "$db" "$db-wal" "$db-shm"
 	fi
-	config_load tapx
-	config_get_bool panel_autostart panel autostart 0
-	config_get_bool panel_enabled panel enabled 0
-	config_get_bool core_enabled core enabled 0
-	config_get_bool core_autostart core autostart 0
-	if [ "$panel_autostart" = '1' ]; then "$PANEL_INIT" enable; else "$PANEL_INIT" disable; fi
-	if [ "$core_autostart" = '1' ]; then "$CORE_INIT" enable; else "$CORE_INIT" disable; fi
-	if [ "$panel_enabled" = '1' ]; then "$PANEL_INIT" start; fi
-	if [ "$core_enabled" = '1' ]; then "$CORE_INIT" start; fi
+	apply_service_state
 	sync
 	echo "TapX configuration reset to the firmware image"
 }
 
 case "${1:-}" in
 	export) export_config ;;
+	init-panel) shift; init_panel "$@" ;;
 	restore) restore_config "${2:-$RESTORE_UPLOAD}" ;;
 	reset) reset_config ;;
 	*)
-		echo "usage: $0 export | restore $RESTORE_UPLOAD | reset" >&2
+		echo "usage: $0 export | init-panel ... | restore $RESTORE_UPLOAD | reset" >&2
 		exit 2
 		;;
 esac

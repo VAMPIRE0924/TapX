@@ -7,3 +7,5 @@ import "errors"
 func Open(OpenOptions) (Device, error) {
 	return nil, errors.New("tuntap: only linux is supported")
 }
+
+func wrapFD(string, int) Device { return nil }

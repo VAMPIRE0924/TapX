@@ -3,12 +3,35 @@
     "title": "TapX",
     "order": 60,
     "action": {
-      "type": "view",
-      "path": "tapx/config"
+      "type": "firstchild"
     },
     "depends": {
       "acl": [ "luci-app-tapx" ],
       "uci": { "tapx": true }
     }
+  },
+  "admin/services/tapx/overview": {
+    "title": "\u6982\u89c8",
+    "order": 10,
+    "action": { "type": "view", "path": "tapx/overview" },
+    "depends": { "acl": [ "luci-app-tapx" ], "uci": { "tapx": true } }
+  },
+  "admin/services/tapx/panel": {
+    "title": "\u9ad8\u7ea7\u8bbe\u7f6e",
+    "order": 20,
+    "action": { "type": "view", "path": "tapx/panel" },
+    "depends": { "acl": [ "luci-app-tapx" ], "uci": { "tapx": true } }
+  },
+  "admin/services/tapx/backup": {
+    "title": "\u5907\u4efd\u6062\u590d",
+    "order": 30,
+    "action": { "type": "view", "path": "tapx/backup" },
+    "depends": { "acl": [ "luci-app-tapx" ], "uci": { "tapx": true } }
+  },
+  "admin/services/tapx/logs": {
+    "title": "\u65e5\u5fd7",
+    "order": 40,
+    "action": { "type": "view", "path": "tapx/logs" },
+    "depends": { "acl": [ "luci-app-tapx" ], "uci": { "tapx": true } }
   }
 }

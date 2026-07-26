@@ -61,8 +61,11 @@ type UDPConfig struct {
 	MaxFrameSize       uint32
 	MaxDatagramPayload uint32
 	PeerMode           UDPPeerMode
+	KeepAliveInterval  uint32
+	IdleTimeout        uint32
 	Peer               netip.AddrPort
 	VKey               []byte
+	AddressResponse    []byte
 	AddressGuard       AddressGuard
 	Counters           *Counters
 }
@@ -73,12 +76,27 @@ type TCPConfig struct {
 	FrameKind    FrameKind
 	MaxFrameSize uint32
 	LengthMode   TCPLengthMode
+	IdleTimeout  uint32
 	VKey         []byte
 	AddressGuard AddressGuard
 	Counters     *Counters
 }
 
+type DeviceSwitchPortConfig struct {
+	FD     int
+	Routes AddressGuard
+}
+
+type DeviceSwitchConfig struct {
+	DeviceFD     int
+	FrameKind    FrameKind
+	MaxFrameSize uint32
+	Ports        []DeviceSwitchPortConfig
+	Counters     *Counters
+}
+
 type Worker struct{}
+type DeviceSwitch struct{}
 
 func ABI() uint32 { return 0 }
 
@@ -90,19 +108,6 @@ func FrameKindFromDevice(deviceType model.DeviceType) (FrameKind, error) {
 		return FrameTAP, nil
 	default:
 		return 0, errors.New("fastpath: unsupported device type")
-	}
-}
-
-func PeerModeFromModel(mode model.UDPPeerMode) (UDPPeerMode, error) {
-	switch mode {
-	case "", model.UDPPeerAny:
-		return UDPPeerAny, nil
-	case model.UDPPeerFixed:
-		return UDPPeerFixed, nil
-	case model.UDPPeerLearn:
-		return UDPPeerLearn, nil
-	default:
-		return 0, errors.New("fastpath: unsupported udp peer mode")
 	}
 }
 
@@ -125,7 +130,13 @@ func StartTCPPipe(TCPConfig) (*Worker, error) {
 	return nil, errors.New("fastpath: linux cgo support is required")
 }
 
+func StartDeviceSwitch(DeviceSwitchConfig) (*DeviceSwitch, error) {
+	return nil, errors.New("fastpath: linux cgo support is required")
+}
+
 func (w *Worker) Stop() error { return nil }
 func (w *Worker) Counters() CountersSnapshot {
 	return CountersSnapshot{}
 }
+func (s *DeviceSwitch) Stop() error                { return nil }
+func (s *DeviceSwitch) Counters() CountersSnapshot { return CountersSnapshot{} }

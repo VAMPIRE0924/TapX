@@ -1,6 +1,7 @@
 import { LocalizedError } from './localized-error';
 import { responseError } from './http-error';
 import { panelFetch as fetch } from '../app/runtime-path';
+import { runtimeConfigForAPI } from './runtime-config-wire';
 
 export interface DashboardReport {
   generatedAt?: string;
@@ -146,6 +147,7 @@ export interface DiagnosticReport {
     panel?: string;
     tapx?: string;
     embeddedXray?: string;
+    externalXray?: string;
   };
   process?: {
     goos?: string;
@@ -182,6 +184,7 @@ export interface ComponentUpdateCatalog {
 export interface AuthSession {
   authEnabled: boolean;
   authenticated: boolean;
+  panelName?: string;
   username?: string;
   twoFactorEnabled?: boolean;
 }
@@ -266,12 +269,70 @@ export interface TapxDeviceRoute {
   Table?: string;
 }
 
-export interface TapxDNSConfig {
-  Enabled?: boolean;
-  Nameservers?: string[];
-  SearchDomains?: string[];
-  Options?: string[];
-  OutputPath?: string;
+export type TapxTapMode = 'standalone' | 'transparent' | 'one-arm' | 'shared-ip';
+export type TapxAccessRole = 'client' | 'server';
+export type TapxDHCPMode = 'off' | 'passthrough' | 'server' | 'mirror';
+export type TapxSharedIPRole = 'service' | 'access';
+export type TapxFirewallBackend = 'auto' | 'nftables' | 'iptables';
+
+export interface TapxDHCPStaticLease {
+  Name?: string;
+  MAC?: string;
+  Address?: string;
+}
+
+export interface TapxDHCPConfig {
+  Mode?: TapxDHCPMode;
+  IPv4CIDR?: string;
+  PoolStart?: string;
+  PoolEnd?: string;
+  PrefixLength?: number;
+  Gateway?: string;
+  DNS?: string[];
+  LeaseSeconds?: number;
+  Authoritative?: boolean;
+  ConflictDetection?: boolean;
+  StaticLeases?: TapxDHCPStaticLease[];
+}
+
+export interface TapxSharedIPConfig {
+  Role?: TapxSharedIPRole;
+  UplinkInterface?: string;
+  AddressSource?: 'auto' | 'manual';
+  IPv4CIDR?: string;
+  Gateway?: string;
+  DNS?: string[];
+  FirewallBackend?: TapxFirewallBackend;
+  HostPortPriority?: boolean;
+  TrackAddressChanges?: boolean;
+  ReservedTCPPorts?: string[];
+  ReservedUDPPorts?: string[];
+  ClientMAC?: string;
+}
+
+export type TapxTUNDHCPMode = 'off' | 'client' | 'server' | 'manual';
+
+export interface TapxTUNDHCPConfig {
+  Mode?: TapxTUNDHCPMode;
+  Protocol?: 'ipv4' | 'ipv6' | 'dual';
+  RelayEnabled?: boolean;
+  RelayProtocol?: 'ipv4' | 'ipv6' | 'dual';
+  IPv4CIDR?: string;
+  IPv6CIDR?: string;
+  PoolStart?: string;
+  PoolEnd?: string;
+  IPv6PoolStart?: string;
+  IPv6PoolEnd?: string;
+  Gateway?: string;
+  DNS?: string[];
+  OfferedGateway?: string;
+  OfferedDNS?: string[];
+  LeaseSeconds?: number;
+  Authoritative?: boolean;
+  ConflictDetection?: boolean;
+  RelayDownstreamInterfaces?: string[];
+  RelayServers?: string[];
+  MaxHops?: number;
 }
 
 export interface TapxBinding {
@@ -292,25 +353,15 @@ export interface TapxDevice {
   MTU?: number;
   MSSClamp?: number;
   LinkAutoOptimize?: boolean;
-  AddressConfigEnabled?: boolean;
-  AddressAssignMode?: 'auto' | 'manual';
-  IPv4CIDR?: string;
-  IPv6CIDR?: string;
-  Gateway?: string;
   Bridge?: TapxBridgeConfig;
-  DNS?: TapxDNSConfig;
-  DNSSearch?: string[];
   Routes?: TapxDeviceRoute[];
-  AllowDefaultRoute?: boolean;
-  BridgeEnabled?: boolean;
-  BridgeName?: string;
-  BridgeMember?: string;
+  TapMode?: TapxTapMode;
+  AccessRole?: TapxAccessRole;
+  DHCP?: TapxDHCPConfig;
+  SharedIP?: TapxSharedIPConfig;
+  TUNDHCP?: TapxTUNDHCPConfig;
+  OneArmRollbackSeconds?: number;
   Source?: 'manual' | 'listener-auto' | 'connector-auto';
-  LinkedListenerIDs?: string[];
-  LinkedListenerNames?: string[];
-  LinkedConnectorIDs?: string[];
-  LinkedConnectorNames?: string[];
-  UpdatedAt?: number;
   Remark?: string;
 }
 
@@ -335,9 +386,7 @@ export interface TapxEndpoint {
       Enabled?: boolean;
       CertFile?: string;
       KeyFile?: string;
-      CAFile?: string;
       ServerName?: string;
-      ALPN?: string[];
       MinVersion?: string;
       MaxVersion?: string;
       AllowInsecure?: boolean;
@@ -360,9 +409,7 @@ export interface TapxEndpoint {
       Enabled?: boolean;
       CertFile?: string;
       KeyFile?: string;
-      CAFile?: string;
       ServerName?: string;
-      ALPN?: string[];
       MinVersion?: string;
       MaxVersion?: string;
       AllowInsecure?: boolean;
@@ -388,21 +435,10 @@ export interface TapxClient {
   Email?: string;
   ListenerID?: string;
   ListenerIDs?: string[];
-  CredentialType?: string;
-  CredentialValue?: string;
   UUID?: string;
   Password?: string;
   Auth?: string;
-  Flow?: string;
-  /** @deprecated Legacy import compatibility only; the user editor strips this field. */
-  Security?: string;
-  /** @deprecated Legacy import compatibility only; reverse routing belongs to connectors. */
-  ReverseTag?: string;
   VKey?: string;
-  WireguardPrivateKey?: string;
-  WireguardPublicKey?: string;
-  WireguardPreSharedKey?: string;
-  WireguardAllowedIPs?: string | string[];
   AllowedDeviceIDs?: string[];
   Binding?: TapxBinding;
   AddressID?: string;
@@ -415,9 +451,6 @@ export interface TapxClient {
   TrafficResetGeneration?: number;
   TrafficRXOffset?: number;
   TrafficTXOffset?: number;
-  AllowedDevices?: string[];
-  AllowedIPs?: string[];
-  AllowedMACs?: string[];
   Remark?: string;
 }
 
@@ -530,18 +563,12 @@ export async function getSystemInterfaces(managedNodeID?: string): Promise<unkno
     if (!response.ok) throw await responseError(response, 'managed node system interfaces');
     return response.json();
   }
-  const urls = ['/api/server/interfaces', '/panel/api/server/interfaces'];
-  for (const url of urls) {
-    try {
-      const response = await fetch(url, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
-      if (!response.ok) continue;
-      const payload = await response.json() as { obj?: unknown } | unknown;
-      return payload && typeof payload === 'object' && 'obj' in payload ? (payload as { obj?: unknown }).obj : payload;
-    } catch {
-      // Continue to the compatibility endpoint.
-    }
-  }
-  return [];
+  const response = await fetch('/api/server/interfaces', {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw await responseError(response, 'system interfaces');
+  return response.json();
 }
 
 export async function getAuthSession(): Promise<AuthSession> {
@@ -685,7 +712,7 @@ export async function saveRuntimeConfig(config: RuntimeConfig): Promise<RuntimeC
       'Content-Type': 'application/json',
     },
     credentials: 'same-origin',
-    body: JSON.stringify(config),
+    body: JSON.stringify(runtimeConfigForAPI(config)),
   });
   if (!response.ok) throw await responseError(response, 'config save');
   return unwrapConfig(await response.json(), config);
@@ -922,7 +949,10 @@ export interface ConnectorTestResult {
   confirmed: boolean;
   active: boolean;
   message: string;
+  messageCode?: string;
   deviceName?: string;
+  addressFamily?: 'ipv4' | 'ipv6';
+  pathMtuSource?: 'kernel' | 'peer' | 'frame';
   confirmedPathMtu?: number;
   effectiveNetworkMtu?: number;
   maxDatagramPayload?: number;
@@ -937,7 +967,7 @@ export interface ConnectorTestResult {
 
 export type ConnectorTestKind = 'channel' | 'path-mtu' | 'throughput';
 
-export async function testConnector(id: string, kind: ConnectorTestKind, durationSeconds?: number, managedNodeID?: string): Promise<ConnectorTestResult> {
+export async function testConnector(id: string, kind: ConnectorTestKind, durationSeconds?: number, managedNodeID?: string, signal?: AbortSignal, direction?: 'both' | 'upload' | 'download'): Promise<ConnectorTestResult> {
   const path = isRemoteManagedNode(managedNodeID)
     ? `/api/nodes/${encodeURIComponent(managedNodeID)}/connectors/test`
     : '/api/connectors/test';
@@ -945,7 +975,8 @@ export async function testConnector(id: string, kind: ConnectorTestKind, duratio
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     credentials: 'same-origin',
-    body: JSON.stringify({ id, kind, durationSeconds }),
+    signal,
+    body: JSON.stringify({ id, kind, durationSeconds, direction }),
   });
   if (!response.ok) throw await responseError(response, 'connector test');
   const payload = await response.json() as { result?: ConnectorTestResult };
@@ -1010,10 +1041,9 @@ export async function getVlessEncryptionAuths(): Promise<VlessEncryptionAuth[]> 
     success?: boolean;
     msg?: string;
     obj?: { auths?: VlessEncryptionAuth[] };
-    auths?: VlessEncryptionAuth[];
   };
   if (payload.success === false) throw new Error(payload.msg || 'VLESS key generation failed');
-  const auths = payload.obj?.auths || payload.auths || [];
+  const auths = payload.obj?.auths || [];
   if (!Array.isArray(auths) || auths.length === 0) throw new LocalizedError('api.vlessAuthMissing');
   return auths;
 }
@@ -1022,21 +1052,6 @@ function unwrapConfig(payload: unknown, fallback: RuntimeConfig = {}): RuntimeCo
   if (payload && typeof payload === 'object' && 'config' in payload) {
     const boxed = payload as { config?: RuntimeConfig };
     return boxed.config || fallback;
-  }
-  if (payload && typeof payload === 'object') {
-    const candidate = payload as RuntimeConfig;
-    const runtimeKeys: Array<keyof RuntimeConfig> = [
-      'Devices',
-      'Listeners',
-      'Connectors',
-      'Clients',
-      'Routes',
-      'VKeys',
-      'Addresses',
-      'XrayProfiles',
-      'Settings',
-    ];
-    if (runtimeKeys.some((key) => key in candidate)) return candidate;
   }
   return fallback;
 }

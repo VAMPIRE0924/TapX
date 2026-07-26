@@ -6,7 +6,7 @@ BUILD_DIR="${ROOT}/build/integration/netns"
 CORE_BIN="${BUILD_DIR}/tapx-core"
 NS="tapx-it-dns"
 TUN="tapxdns0"
-DNS_FILE="${BUILD_DIR}/tapx-dns.resolv.conf"
+DNS_FILE="/run/tapx/resolv/${TUN}.conf"
 PID=""
 
 need() {
@@ -87,13 +87,13 @@ cat >"${BUILD_DIR}/tapx-dns.json" <<JSON
       "Type": "tun",
       "IfName": "${TUN}",
       "MTU": 1400,
-      "IPv4CIDR": "10.97.0.1/30",
-      "DNS": {
-        "Enabled": true,
-        "Nameservers": ["1.1.1.1", "2606:4700:4700::1111"],
-        "SearchDomains": ["example.com", "lan"],
-        "Options": ["timeout:1", "attempts:2"],
-        "OutputPath": "${DNS_FILE}"
+      "AccessRole": "client",
+      "TUNDHCP": {
+        "Mode": "manual",
+        "Protocol": "dual",
+        "IPv4CIDR": "10.97.0.1/30",
+        "IPv6CIDR": "fd97::1/64",
+        "DNS": ["1.1.1.1", "2606:4700:4700::1111"]
       }
     }
   ],
@@ -107,7 +107,7 @@ cat >"${BUILD_DIR}/tapx-dns.json" <<JSON
       "BindHost": "127.0.0.1",
       "BindPort": 45103,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "any"},
+      "RawUDP": {},
       "Binding": {"RouteID": "route-a"}
     }
   ]
@@ -127,8 +127,6 @@ wait_for_log "${BUILD_DIR}/tapx-dns.log" "runtime started" || fail_with_logs
 echo "verify dns file"
 grep -q "nameserver 1.1.1.1" "$DNS_FILE" || fail_with_logs
 grep -q "nameserver 2606:4700:4700::1111" "$DNS_FILE" || fail_with_logs
-grep -q "search example.com lan" "$DNS_FILE" || fail_with_logs
-grep -q "options timeout:1 attempts:2" "$DNS_FILE" || fail_with_logs
 
 echo "verify dns rollback"
 stop_core

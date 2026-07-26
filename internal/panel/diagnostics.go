@@ -3,6 +3,7 @@ package panel
 import (
 	"net/http"
 	goruntime "runtime"
+	"strings"
 	"time"
 
 	"tapx/internal/buildinfo"
@@ -26,6 +27,7 @@ type ComponentVersions struct {
 	Panel        string `json:"panel"`
 	TapX         string `json:"tapx"`
 	EmbeddedXray string `json:"embeddedXray"`
+	ExternalXray string `json:"externalXray,omitempty"`
 }
 
 type ProcessDiagnostic struct {
@@ -75,6 +77,7 @@ func (s *Server) buildDiagnosticReport(cfg config.RuntimeConfig, now time.Time) 
 			Panel:        buildinfo.Version,
 			TapX:         buildinfo.Version,
 			EmbeddedXray: buildinfo.XrayVersion(),
+			ExternalXray: configuredExternalXrayVersion(cfg),
 		},
 		GeneratedAt: now.Format(time.RFC3339Nano),
 		Process: ProcessDiagnostic{
@@ -100,6 +103,15 @@ func (s *Server) buildDiagnosticReport(cfg config.RuntimeConfig, now time.Time) 
 		ObjectCounts: objectCounts(cfg),
 		Runtime:      s.runtime.State(),
 	}
+}
+
+func configuredExternalXrayVersion(cfg config.RuntimeConfig) string {
+	for _, settings := range cfg.Settings {
+		if path := strings.TrimSpace(settings.ExternalXrayPath); path != "" {
+			return inspectXrayBinary(path).Version
+		}
+	}
+	return ""
 }
 
 func objectCounts(cfg config.RuntimeConfig) map[string]int {

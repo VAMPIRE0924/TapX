@@ -11,7 +11,6 @@ import { VmessOutboundFields } from './outbounds/VmessOutboundFields';
 import { WireguardOutboundFields } from './outbounds/WireguardOutboundFields';
 import { HysteriaFields } from './protocols/HysteriaFields';
 import { HttpInboundFields, MixedInboundFields } from './protocols/HttpMixedInboundFields';
-import { MtprotoInboundFields } from './protocols/MtprotoInboundFields';
 import { ShadowsocksInboundFields } from './protocols/ShadowsocksInboundFields';
 import { TunnelInboundFields } from './protocols/TunnelInboundFields';
 import { TunInboundFields } from './protocols/TunInboundFields';
@@ -49,7 +48,6 @@ export const inboundXrayProtocolOptions = [
   'mixed',
   'tunnel',
   'tun',
-  'mtproto',
 ].map((value) => ({ value, label: value }));
 
 export const outboundXrayProtocolOptions = [
@@ -118,7 +116,7 @@ export function shouldShowInboundProtocolTab(
   security: string,
 ): boolean {
   if (runtimeMode === 'tapx') return false;
-  if (['vless', 'shadowsocks', 'http', 'mixed', 'wireguard', 'tunnel', 'tun', 'mtproto'].includes(protocol)) return true;
+  if (['vless', 'shadowsocks', 'http', 'mixed', 'wireguard', 'tunnel', 'tun'].includes(protocol)) return true;
   return protocol === 'trojan' && network === 'tcp' && (security === 'tls' || security === 'reality');
 }
 
@@ -305,17 +303,14 @@ export function XrayInboundProtocolFields({
   protocol,
   network,
   security,
-  outboundTags = [],
 }: {
   form: FormInstance;
   protocol: string;
   network: string;
   security: string;
-  outboundTags?: string[];
 }) {
   const ssMethod = Form.useWatch(['settings', 'method'], form) as string | undefined;
   const mixedUdp = Form.useWatch(['settings', 'udp'], form) === true;
-  const routeThroughXray = Form.useWatch(['settings', 'routeThroughXray'], form) === true;
 
   if (protocol === 'vless') return <VlessInboundFields form={form} network={network} security={security} />;
   if (protocol === 'shadowsocks') return <ShadowsocksInboundFields form={form} method={ssMethod} />;
@@ -324,8 +319,6 @@ export function XrayInboundProtocolFields({
   if (protocol === 'wireguard') return <WireguardInboundFields form={form} />;
   if (protocol === 'tunnel') return <TunnelInboundFields />;
   if (protocol === 'tun') return <TunInboundFields />;
-  if (protocol === 'mtproto') return <MtprotoInboundFields form={form} routeThroughXray={routeThroughXray} outboundTags={outboundTags} />;
-
   return null;
 }
 

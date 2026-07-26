@@ -529,9 +529,6 @@ function Realm({ fieldName }: { fieldName: number }) {
       <Form.Item label="Fingerprint" name={[fieldName, 'settings', 'tlsConfig', 'fingerprint']}>
         <Select allowClear options={utlsOptions.filter((option) => option.value)} />
       </Form.Item>
-      <Form.Item label="Allow Insecure" name={[fieldName, 'settings', 'tlsConfig', 'allowInsecure']} valuePropName="checked">
-        <Switch />
-      </Form.Item>
     </>
   );
 }

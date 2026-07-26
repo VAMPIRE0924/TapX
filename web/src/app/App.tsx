@@ -10,6 +10,7 @@ import { useI18n } from '../i18n/I18nProvider';
 import type { LanguageCode } from '../i18n/dictionaries';
 import { antdLocale } from '../i18n/locales';
 import { appLocation, appPathname, panelPath } from './runtime-path';
+import { applyPanelTitle } from './panel-name';
 
 const DashboardPage = lazy(() => import('../pages/DashboardPage').then((module) => ({ default: module.DashboardPage })));
 const NodePage = lazy(() => import('../pages/NodePage').then((module) => ({ default: module.NodePage })));
@@ -33,6 +34,7 @@ export function App() {
     getAuthSession()
       .then(async (session) => {
         if (!active) return;
+        applyPanelTitle(session.panelName);
         if (session.authEnabled && !session.authenticated) {
           window.location.replace(panelPath('/login.html'));
           return;

@@ -32,6 +32,7 @@ type TCPPipeHandle struct {
 
 	device     tuntap.Device
 	netApply   netapply.Handle
+	address    *deviceAddressControl
 	shared     *tcpSharedDevice
 	owner      bool
 	listener   *net.TCPListener
@@ -78,14 +79,6 @@ func (s *tcpWorkerSession) Stop() error {
 		close(s.done)
 	})
 	return s.stopErr
-}
-
-type tcpSharedDevice struct {
-	device   tuntap.Device
-	netApply netapply.Handle
-
-	mu     sync.Mutex
-	active bool
 }
 
 func startTCPPipe(pipe config.RuntimeTCPPipe, device config.RuntimeDevice) (*TCPPipeHandle, error) {
@@ -155,22 +148,24 @@ func prepareTCPPipeHandle(pipe config.RuntimeTCPPipe, device config.RuntimeDevic
 		if err != nil {
 			return nil, fmt.Errorf("core: open %s %s: %w", device.Type, device.IfName, err)
 		}
-		netHandle, err := netapply.ApplyDevice(netapply.DeviceConfig{
-			Type: device.Type, IfName: tunDevice.Name(), MTU: device.MTU, MSSClamp: device.MSSClamp,
-			LinkAutoOptimize: device.LinkAutoOptimize, IPv4CIDR: device.IPv4CIDR, IPv6CIDR: device.IPv6CIDR,
-			Bridge: netapply.BridgeConfig{Enabled: device.Bridge.Enabled, Name: device.Bridge.Name, IfName: device.Bridge.IfName, MTU: device.Bridge.MTU},
-			Routes: netapplyRoutes(device.Routes), DNS: netapplyDNS(device.DNS),
-		})
+		netHandle, err := netapply.ApplyDevice(netapplyDeviceConfig(device, tunDevice.Name()))
 		if err != nil {
 			_ = tunDevice.Close()
 			return nil, fmt.Errorf("core: apply device %s: %w", tunDevice.Name(), err)
 		}
 		shared = &tcpSharedDevice{device: tunDevice, netApply: netHandle}
+		address, err := newDeviceAddressControl(device, netHandle)
+		if err != nil {
+			_ = netHandle.Rollback()
+			_ = tunDevice.Close()
+			return nil, err
+		}
+		shared.address = address
 		owner = true
 	}
 	return &TCPPipeHandle{
 		Pipe: pipe, DeviceName: shared.device.Name(), device: shared.device, netApply: shared.netApply,
-		shared: shared, owner: owner, counter: fastpath.NewCounters(),
+		shared: shared, owner: owner, counter: fastpath.NewCounters(), address: shared.address,
 	}, nil
 }
 
@@ -203,9 +198,25 @@ func (h *TCPPipeHandle) acceptLoop(listener *net.TCPListener, done chan struct{}
 		h.mu.Unlock()
 		if active {
 			go func() {
-				_ = linkdiag.ServeStream(context.Background(), conn, h.Pipe.Binding.VKeyValue)
+				_ = serveAddressControl(context.Background(), conn, h.Pipe.Binding.VKeyValue, h.address)
 			}()
 			continue
+		}
+		if h.address.isServer() {
+			timeout := time.Duration(h.Pipe.ConnectTimeout) * time.Second
+			if timeout <= 0 {
+				timeout = 5 * time.Second
+			}
+			probe, probeErr := peekTCPDispatch(conn, h.Pipe.LengthMode, h.Pipe.MaxFrameSize, timeout)
+			if probeErr != nil {
+				_ = conn.Close()
+				h.setErr(probeErr)
+				continue
+			}
+			if probe.Diagnostic {
+				go func() { _ = serveAddressControl(context.Background(), conn, probe.VKey, h.address) }()
+				continue
+			}
 		}
 		remote, err := tcpAddrPort(conn.RemoteAddr())
 		if err != nil {
@@ -225,6 +236,11 @@ func (h *TCPPipeHandle) acceptLoop(listener *net.TCPListener, done chan struct{}
 func (h *TCPPipeHandle) startConnector(frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) error {
 	if h.Pipe.ReconnectSecond <= 0 {
 		_, err := h.connectRawTCP(frameKind, lengthMode, addressGuard)
+		if err == nil {
+			h.address.startRenewal(func(context.Context) error {
+				return h.ensureRawTCPAddressLease()
+			}, h.setErr)
+		}
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -235,11 +251,17 @@ func (h *TCPPipeHandle) startConnector(frameKind fastpath.FrameKind, lengthMode 
 	if err != nil {
 		h.setErr(err)
 	}
+	h.address.startRenewal(func(context.Context) error {
+		return h.ensureRawTCPAddressLease()
+	}, h.setErr)
 	go h.rawTCPReconnectLoop(ctx, done, session, frameKind, lengthMode, addressGuard)
 	return nil
 }
 
 func (h *TCPPipeHandle) connectRawTCP(frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) (*tcpWorkerSession, error) {
+	if err := h.ensureRawTCPAddressLease(); err != nil {
+		return nil, err
+	}
 	tcpConn, local, remote, err := dialTCP(h.Pipe)
 	if err != nil {
 		return nil, err
@@ -255,6 +277,20 @@ func (h *TCPPipeHandle) connectRawTCP(frameKind fastpath.FrameKind, lengthMode f
 	h.mu.Unlock()
 	return session, nil
 
+}
+
+func (h *TCPPipeHandle) ensureRawTCPAddressLease() error {
+	if !h.address.isClient() {
+		return nil
+	}
+	conn, _, _, err := dialTCP(h.Pipe)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	ctx, cancel := h.tlsHandshakeContext(context.Background())
+	defer cancel()
+	return h.address.requestLease(ctx, conn, h.Pipe.Binding.VKeyValue, addressLeaseKey(h.Pipe.Binding, h.Pipe.DeviceID, h.Pipe.EndpointID))
 }
 
 func (h *TCPPipeHandle) rawTCPReconnectLoop(ctx context.Context, done chan struct{}, session *tcpWorkerSession, frameKind fastpath.FrameKind, lengthMode fastpath.TCPLengthMode, addressGuard fastpath.AddressGuard) {
@@ -317,6 +353,7 @@ func (h *TCPPipeHandle) startWorkerFromConn(conn *net.TCPConn, frameKind fastpat
 		FrameKind:              frameKind,
 		MaxFrameSize:           uint32(h.Pipe.MaxFrameSize),
 		LengthMode:             lengthMode,
+		IdleTimeout:            keepAliveMilliseconds(h.Pipe.IdleTimeout),
 		AddressGuardRemote:     h.Pipe.AddressGuardRemote,
 		DeviceToNetworkRateBPS: deviceToNetworkRate,
 		NetworkToDeviceRateBPS: networkToDeviceRate,
@@ -430,6 +467,10 @@ func (h *TCPPipeHandle) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.owner && h.shared != nil {
+		if h.shared.address != nil {
+			h.shared.address.Close()
+			h.shared.address = nil
+		}
 		if h.shared.netApply != nil {
 			if err := h.shared.netApply.Rollback(); err != nil && firstErr == nil {
 				firstErr = err
@@ -521,8 +562,16 @@ func (h *TCPPipeHandle) Diagnose(ctx context.Context, kind string, duration time
 	switch kind {
 	case "channel":
 		result.Delay, err = linkdiag.Ping(ctx, conn, h.Pipe.Binding.VKeyValue)
-	case "throughput":
-		measured, measureErr := linkdiag.Throughput(ctx, conn, h.Pipe.Binding.VKeyValue, duration)
+	case "throughput", "throughput-upload", "throughput-download":
+		var measured linkdiag.Result
+		var measureErr error
+		if kind == "throughput-upload" {
+			measured, measureErr = linkdiag.ThroughputOneWay(ctx, conn, h.Pipe.Binding.VKeyValue, duration, true)
+		} else if kind == "throughput-download" {
+			measured, measureErr = linkdiag.ThroughputOneWay(ctx, conn, h.Pipe.Binding.VKeyValue, duration, false)
+		} else {
+			measured, measureErr = linkdiag.Throughput(ctx, conn, h.Pipe.Binding.VKeyValue, duration)
+		}
 		err = measureErr
 		result.Delay = measured.Delay
 		result.UploadBytes = measured.UploadBytes
@@ -537,9 +586,9 @@ func (h *TCPPipeHandle) Diagnose(ctx context.Context, kind string, duration time
 				result.PathMTU = h.Pipe.DeviceMTU
 			}
 		} else {
-			result.TCPMSS = tcpConnMSS(conn)
-			if result.TCPMSS <= 0 {
-				err = errors.New("core: kernel did not report a TCP MSS for the diagnostic stream")
+			result.PathMTU, result.TCPMSS, result.AddressFamily = tcpConnPathMetrics(conn)
+			if result.PathMTU <= 0 && result.TCPMSS <= 0 {
+				err = errors.New("core: kernel did not report path MTU or TCP MSS for the diagnostic stream")
 			}
 		}
 	default:
@@ -574,27 +623,49 @@ func (h *TCPPipeHandle) openDiagnosticStream(ctx context.Context) (net.Conn, str
 	return conn, remote.String(), nil
 }
 
-func tcpConnMSS(conn net.Conn) int {
+func tcpConnPathMetrics(conn net.Conn) (pathMTU int, mss int, family string) {
 	var raw syscall.RawConn
+	var remote net.Addr
 	switch value := conn.(type) {
 	case *net.TCPConn:
 		raw, _ = value.SyscallConn()
+		remote = value.RemoteAddr()
 	case *tls.Conn:
 		if tcp, ok := value.NetConn().(*net.TCPConn); ok {
 			raw, _ = tcp.SyscallConn()
+			remote = tcp.RemoteAddr()
 		}
 	}
 	if raw == nil {
-		return 0
+		return 0, 0, ""
 	}
-	result := 0
+	isIPv6 := false
+	if address, ok := remote.(*net.TCPAddr); ok && address.IP != nil {
+		isIPv6 = address.IP.To4() == nil
+	}
+	if isIPv6 {
+		family = "ipv6"
+	} else {
+		family = "ipv4"
+	}
 	_ = raw.Control(func(fd uintptr) {
-		result, _ = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG)
+		mss, _ = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG)
+		if isIPv6 {
+			pathMTU, _ = unix.GetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_MTU)
+		} else {
+			pathMTU, _ = unix.GetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MTU)
+		}
 	})
-	return result
+	return pathMTU, mss, family
+}
+
+func tcpConnMSS(conn net.Conn) int {
+	_, mss, _ := tcpConnPathMetrics(conn)
+	return mss
 }
 
 func configureTCPConn(conn *net.TCPConn, pipe config.RuntimeTCPPipe) error {
+	queueBytes := socketQueueBytes(pipe.QueueSize, pipe.MaxFrameSize)
 	if pipe.NoDelay {
 		if err := conn.SetNoDelay(true); err != nil {
 			return fmt.Errorf("core: set tcp nodelay: %w", err)
@@ -608,13 +679,11 @@ func configureTCPConn(conn *net.TCPConn, pipe config.RuntimeTCPPipe) error {
 			return fmt.Errorf("core: set tcp keepalive period: %w", err)
 		}
 	}
-	if pipe.ReceiveBuffer > 0 {
-		if err := conn.SetReadBuffer(pipe.ReceiveBuffer); err != nil {
+	if queueBytes > 0 {
+		if err := conn.SetReadBuffer(queueBytes); err != nil {
 			return fmt.Errorf("core: set tcp receive buffer: %w", err)
 		}
-	}
-	if pipe.SendBuffer > 0 {
-		if err := conn.SetWriteBuffer(pipe.SendBuffer); err != nil {
+		if err := conn.SetWriteBuffer(queueBytes); err != nil {
 			return fmt.Errorf("core: set tcp send buffer: %w", err)
 		}
 	}
@@ -622,7 +691,7 @@ func configureTCPConn(conn *net.TCPConn, pipe config.RuntimeTCPPipe) error {
 }
 
 func listenTCP(pipe config.RuntimeTCPPipe) (*net.TCPListener, netip.AddrPort, error) {
-	addr, err := resolveListenTCPAddr(pipe.BindHost, pipe.BindAddress, pipe.BindPort)
+	addr, err := resolveListenTCPAddr(pipe.BindHost, pipe.BindPort)
 	if err != nil {
 		return nil, netip.AddrPort{}, err
 	}
@@ -650,13 +719,6 @@ func dialTCP(pipe config.RuntimeTCPPipe) (*net.TCPConn, netip.AddrPort, netip.Ad
 	dialer := net.Dialer{
 		Timeout: timeout,
 		Control: tcpSocketControl(pipe, false),
-	}
-	if pipe.BindAddress != "" {
-		bind, err := netip.ParseAddr(pipe.BindAddress)
-		if err != nil {
-			return nil, netip.AddrPort{}, netip.AddrPort{}, fmt.Errorf("core: parse tcp bind address %q: %w", pipe.BindAddress, err)
-		}
-		dialer.LocalAddr = &net.TCPAddr{IP: net.IP(bind.AsSlice())}
 	}
 	conn, err := dialer.Dial("tcp", addr)
 	if err != nil {
@@ -693,18 +755,12 @@ func tcpSocketControl(pipe config.RuntimeTCPPipe, listener bool) func(string, st
 }
 
 func configureRawTCPSocket(fd int, pipe config.RuntimeTCPPipe, listener bool) error {
-	if pipe.BindInterface != "" {
-		if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, pipe.BindInterface); err != nil {
-			return fmt.Errorf("core: bind tcp socket to interface %q: %w", pipe.BindInterface, err)
-		}
-	}
-	if pipe.ReceiveBuffer > 0 {
-		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, pipe.ReceiveBuffer); err != nil {
+	queueBytes := socketQueueBytes(pipe.QueueSize, pipe.MaxFrameSize)
+	if queueBytes > 0 {
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, queueBytes); err != nil {
 			return fmt.Errorf("core: set tcp socket receive buffer: %w", err)
 		}
-	}
-	if pipe.SendBuffer > 0 {
-		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, pipe.SendBuffer); err != nil {
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, queueBytes); err != nil {
 			return fmt.Errorf("core: set tcp socket send buffer: %w", err)
 		}
 	}
@@ -727,14 +783,7 @@ func configureRawTCPSocket(fd int, pipe config.RuntimeTCPPipe, listener bool) er
 	return nil
 }
 
-func resolveListenTCPAddr(host, bindAddress string, port uint16) (*net.TCPAddr, error) {
-	if bindAddress != "" {
-		addr, err := netip.ParseAddr(bindAddress)
-		if err != nil {
-			return nil, fmt.Errorf("core: parse tcp bind address %q: %w", bindAddress, err)
-		}
-		return &net.TCPAddr{IP: net.IP(addr.AsSlice()), Port: int(port)}, nil
-	}
+func resolveListenTCPAddr(host string, port uint16) (*net.TCPAddr, error) {
 	if host == "" {
 		host = "0.0.0.0"
 	}

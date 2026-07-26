@@ -39,11 +39,12 @@ bridge, and port-mapping rules to that interface. Temporary lab devices may be
 non-persistent and disappear after the owning process stops.
 
 Raw transport security knobs are explicit advanced fields, not presets.
-`RawTCP.TLS` and `RawUDP.DTLS` expose enable flags, cert/key/CA paths, SNI,
-ALPN, version bounds, allow-insecure switches, and DTLS MTU/replay-window
-settings for Listener/Connector objects. Save/apply validation accepts
-logically valid values. Enabled RawTCP TLS uses a dedicated Go TLS frame
-runtime, and enabled RawUDP DTLS uses a dedicated Go DTLS datagram runtime.
+`RawTCP.TLS` and `RawUDP.DTLS` expose enable flags, Listener certificate/key,
+SNI, version bounds, Connector allow-insecure, and DTLS MTU/replay-window
+settings. Connectors use the operating-system trust store; custom CA and ALPN
+fields are not part of the TapX Raw contract. Enabled RawTCP TLS uses a
+dedicated Go TLS frame runtime, and enabled RawUDP DTLS uses a dedicated Go
+DTLS datagram runtime.
 Neither path alters the naked Raw TCP/UDP C fastpaths; raw UDP/TCP
 no-auth/no-encryption remains first-class and unaffected.
 
@@ -75,8 +76,8 @@ There is no top-level Certificates page. Transport certificates live inside List
 
 These objects are not rigid modes. A raw Listener can be left as a pure transport pipe, or it can reference vKey, Client, Route, Device, Connector, and AddressLimit settings. The same applies to Connector and Client objects. Empty references mean no behavior; filled references become generated runtime behavior.
 
-Client objects now carry optional `CredentialType` and `CredentialValue`
-fields. `Binding.ConnectorID` is also available so a Client or endpoint can bind
+Client objects carry explicit `UUID`, `Password`, and `Auth` credentials plus
+optional vKey binding. `Binding.ConnectorID` is also available so a Client or endpoint can bind
 directly to a Connector or inherit it from a Route. AddressLimit carries both
 Guard limits and fixed-client static configuration: MACs, IPv4/IPv6 CIDRs,
 IPv4/IPv6 gateways, DNS servers, pushed routes, and default-route permission.
@@ -118,6 +119,11 @@ fastpath counters remain raw monotonic counters.
 Device MTU, MSS clamp, IPv4/IPv6 CIDR, TAP bridge/member settings, static
 routes, and DNS resolv.conf output are applied by the Linux control plane after
 TUN/TAP creation and before workers start. This is the first tapx-net slice.
+Before that slice or any controller replacement begins, runtime apply rejects
+enabled TUN/TAP interface networks or DHCP pools that overlap existing
+Linux/OpenWrt interface networks, routes, or DHCP pools. The saved configuration
+is retained, the runtime is not started, and the API returns the concrete
+conflicts for the Web panel.
 
 When Device automatic link optimization is enabled for Raw UDP, the Go control
 plane resolves a Linux route candidate, performs exact peer request/response

@@ -81,7 +81,10 @@ expect_ping_ok() {
   local ns="$1"
   local src="$2"
   local dst="$3"
-  ip netns exec "$ns" ping -I "$src" -c 2 -W 1 "$dst" >/dev/null || fail_with_logs
+  if ! ip netns exec "$ns" ping -I "$src" -c 2 -W 1 "$dst" >/dev/null; then
+    echo "expected ping failed: namespace=${ns} source=${src} destination=${dst}" >&2
+    fail_with_logs
+  fi
 }
 
 expect_ping_blocked() {
@@ -137,7 +140,7 @@ cat >"${BUILD_DIR}/tapx-a.json" <<JSON
       "BindHost": "172.31.252.1",
       "BindPort": 44200,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "172.31.252.2:44200"},
+      "RawUDP": {},
       "Binding": {"RouteID": "tun-route-a"}
     },
     {
@@ -146,7 +149,7 @@ cat >"${BUILD_DIR}/tapx-a.json" <<JSON
       "BindHost": "172.31.252.1",
       "BindPort": 44201,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "172.31.252.2:44201"},
+      "RawUDP": {},
       "Binding": {"RouteID": "tap-route-a"}
     }
   ]
@@ -167,23 +170,23 @@ cat >"${BUILD_DIR}/tapx-b.json" <<JSON
     {"ID": "tun-route-b", "Enabled": true, "DeviceID": "tun-b", "AddressID": "tun-guard-b"},
     {"ID": "tap-route-b", "Enabled": true, "DeviceID": "tap-b", "AddressID": "tap-guard-b"}
   ],
-  "Listeners": [
+  "Connectors": [
     {
       "ID": "tun-udp-b",
       "Enabled": true,
-      "BindHost": "172.31.252.2",
-      "BindPort": 44200,
+      "Remote": "172.31.252.1",
+      "Port": 44200,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "172.31.252.1:44200"},
+      "RawUDP": {},
       "Binding": {"RouteID": "tun-route-b"}
     },
     {
       "ID": "tap-udp-b",
       "Enabled": true,
-      "BindHost": "172.31.252.2",
-      "BindPort": 44201,
+      "Remote": "172.31.252.1",
+      "Port": 44201,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "fixed", "FixedPeer": "172.31.252.1:44201"},
+      "RawUDP": {},
       "Binding": {"RouteID": "tap-route-b"}
     }
   ]

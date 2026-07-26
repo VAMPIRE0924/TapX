@@ -10,9 +10,16 @@ DEFAULT_CONFIG=/etc/tapx/runtime.json
 DEFAULT_DB=/etc/tapx/tapx.db
 
 start_service() {
-	local enabled config_path db_path respawn_threshold respawn_timeout respawn_retry
+	local enabled panel_enabled panel_initialized config_path db_path
+	local respawn_threshold respawn_timeout respawn_retry
 
 	config_load tapx
+	config_get_bool panel_enabled panel enabled 0
+	config_get_bool panel_initialized panel initialized 0
+	[ "$panel_enabled" = "1" ] && [ "$panel_initialized" = "1" ] && {
+		echo "tapx: runtime lifecycle is delegated to tapx-panel"
+		return 0
+	}
 	config_get_bool enabled core enabled 0
 	[ "$enabled" = "1" ] || {
 		echo "tapx: disabled in /etc/config/tapx"

@@ -10,7 +10,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"tapx/internal/config"
-	"tapx/internal/fastpath"
 )
 
 const (
@@ -30,7 +29,7 @@ type udpReuseportGroup struct {
 }
 
 func startUDPReuseportGroup(dispatch config.RuntimeUDPDispatch, prototype config.RuntimeUDPPipe) (*udpReuseportGroup, error) {
-	mode, err := fastpath.PeerModeFromModel(prototype.PeerMode)
+	mode, err := runtimeUDPPeerMode(prototype.PeerMode)
 	if err != nil {
 		return nil, err
 	}

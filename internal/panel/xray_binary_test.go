@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -97,6 +98,60 @@ func TestServerExternalXrayDownloadExtractsOfficialZip(t *testing.T) {
 	}
 	if payload, err := os.ReadFile(binaryPath); err != nil || string(payload) != "fake-official-xray" {
 		t.Fatalf("downloaded zip file = %q err=%v", string(payload), err)
+	}
+}
+
+func TestServerExternalXrayMultipartUploadExtractsOfficialZip(t *testing.T) {
+	store := newTestStore(t)
+	binaryPath := filepath.Join(t.TempDir(), "xray")
+	cfg := sampleConfig()
+	cfg.Settings[0].ExternalXrayPath = binaryPath
+	if err := store.ReplaceConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+	server := httptest.NewServer(NewServer(store).Handler())
+	t.Cleanup(server.Close)
+
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	member, err := zw.Create("xray")
+	if err != nil {
+		t.Fatalf("create zip member: %v", err)
+	}
+	if _, err := member.Write([]byte("fake-uploaded-xray")); err != nil {
+		t.Fatalf("write zip member: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	file, err := mw.CreateFormFile("file", "Xray-linux-arm64-v8a.zip")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := file.Write(archive.Bytes()); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart body: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/xray/external/upload", &body)
+	if err != nil {
+		t.Fatalf("create upload request: %v", err)
+	}
+	request.Header.Set("Content-Type", mw.FormDataContentType())
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST multipart upload: %v", err)
+	}
+	uploaded := decodeResponse(t, response, http.StatusOK)["binary"].(map[string]any)
+	if uploaded["exists"] != true || uploaded["size"].(float64) != float64(len("fake-uploaded-xray")) {
+		t.Fatalf("uploaded xray binary status = %+v", uploaded)
+	}
+	if payload, err := os.ReadFile(binaryPath); err != nil || string(payload) != "fake-uploaded-xray" {
+		t.Fatalf("uploaded zip file = %q err=%v", string(payload), err)
 	}
 }
 

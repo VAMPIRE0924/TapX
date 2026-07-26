@@ -11,6 +11,7 @@ import (
 	"tapx/internal/core"
 	"tapx/internal/fastpath"
 	"tapx/internal/model"
+	"tapx/internal/netguard"
 	"tapx/internal/xrayruntime"
 )
 
@@ -57,6 +58,15 @@ type RuntimeManager struct {
 	enforcementDone      chan struct{}
 	enforcementEvents    []EnforcementEvent
 	limitConfigRefresher func(RuntimeState, time.Time) (config.RuntimeConfig, error)
+	networkValidator     netguard.Validator
+	oneArmPending        *oneArmPendingApply
+}
+
+type oneArmPendingApply struct {
+	generation uint64
+	oldRuntime *config.GeneratedRuntime
+	oldConfig  *config.RuntimeConfig
+	timer      *time.Timer
 }
 
 type RuntimeState struct {
@@ -85,6 +95,7 @@ type RuntimePipeState struct {
 	RouteID             string                    `json:"routeId,omitempty"`
 	DeviceID            string                    `json:"deviceId"`
 	DeviceName          string                    `json:"deviceName,omitempty"`
+	DeviceMTU           int                       `json:"deviceMtu,omitempty"`
 	ClientID            string                    `json:"clientId,omitempty"`
 	AddressID           string                    `json:"addressId,omitempty"`
 	LocalAddr           string                    `json:"localAddr,omitempty"`
@@ -118,13 +129,19 @@ func NewRuntimeManagerWithFactory(factory func() RuntimeController) *RuntimeMana
 	if factory == nil {
 		factory = func() RuntimeController { return core.NewSupervisor() }
 	}
-	return &RuntimeManager{newController: factory}
+	return &RuntimeManager{newController: factory, networkValidator: netguard.ValidateConfig}
 }
 
 func (m *RuntimeManager) SetLimitConfigRefresher(refresher func(RuntimeState, time.Time) (config.RuntimeConfig, error)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.limitConfigRefresher = refresher
+}
+
+func (m *RuntimeManager) SetNetworkValidator(validator netguard.Validator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.networkValidator = validator
 }
 
 func (m *RuntimeManager) Apply(runtime *config.GeneratedRuntime, cfg ...config.RuntimeConfig) (RuntimeState, error) {
@@ -134,6 +151,19 @@ func (m *RuntimeManager) Apply(runtime *config.GeneratedRuntime, cfg ...config.R
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// This guard must run before stopping the active controller or starting a
+	// controller that can create TUN/TAP devices and mutate host networking.
+	if len(cfg) > 0 && m.networkValidator != nil {
+		if err := m.networkValidator(cfg[0]); err != nil {
+			m.lastError = err.Error()
+			return m.stateLocked(), err
+		}
+	}
+
+	oldRuntime := cloneGeneratedRuntime(m.activeRuntime)
+	oldConfig := cloneOptionalRuntimeConfig(m.activeConfig)
+	m.cancelOneArmPendingLocked()
 
 	m.stopEnforcementLocked()
 	if m.controller != nil && canPrepareRuntimeInParallel(m.activeRuntime, runtime) {
@@ -166,6 +196,7 @@ func (m *RuntimeManager) Apply(runtime *config.GeneratedRuntime, cfg ...config.R
 	m.lastError = ""
 	m.enforcementEvents = nil
 	m.startAppliedEnforcementLocked(cfg...)
+	m.armOneArmRollbackLocked(runtime, oldRuntime, oldConfig)
 	return m.stateLocked(), nil
 }
 
@@ -173,6 +204,7 @@ func (m *RuntimeManager) Stop() (RuntimeState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.cancelOneArmPendingLocked()
 	m.stopEnforcementLocked()
 	if m.controller == nil {
 		return m.stateLocked(), nil
@@ -353,6 +385,7 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 			RouteID:      pipe.Pipe.RouteID,
 			DeviceID:     pipe.Pipe.DeviceID,
 			DeviceName:   pipe.DeviceName,
+			DeviceMTU:    pipe.Pipe.DeviceMTU,
 			ClientID:     pipe.Pipe.Binding.ClientID,
 			AddressID:    pipe.Pipe.Binding.AddressID,
 			LocalAddr:    addrString(pipe.LocalAddr),
@@ -376,6 +409,7 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 			RouteID:      pipe.Pipe.RouteID,
 			DeviceID:     pipe.Pipe.DeviceID,
 			DeviceName:   pipe.DeviceName,
+			DeviceMTU:    pipe.Pipe.DeviceMTU,
 			ClientID:     pipe.Pipe.Binding.ClientID,
 			AddressID:    pipe.Pipe.Binding.AddressID,
 			RemoteAddr:   xrayRemoteAddr(pipe.Pipe),
@@ -388,6 +422,8 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 }
 
 func (m *RuntimeManager) applyPreparedRuntimeLocked(runtime *config.GeneratedRuntime, cfg ...config.RuntimeConfig) (RuntimeState, error) {
+	oldRuntime := cloneGeneratedRuntime(m.activeRuntime)
+	oldConfig := cloneOptionalRuntimeConfig(m.activeConfig)
 	old := m.controller
 	next := m.newController()
 	if err := next.Start(runtime); err != nil {
@@ -417,7 +453,126 @@ func (m *RuntimeManager) applyPreparedRuntimeLocked(runtime *config.GeneratedRun
 	m.lastError = ""
 	m.enforcementEvents = nil
 	m.startAppliedEnforcementLocked(cfg...)
+	m.armOneArmRollbackLocked(runtime, oldRuntime, oldConfig)
 	return m.stateLocked(), nil
+}
+
+// ConfirmOneArmApply commits a pending one-arm network change. The auth
+// middleware calls this before serving the request, so the apply request that
+// arms the timer cannot confirm itself; the next authenticated request does.
+func (m *RuntimeManager) ConfirmOneArmApply() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.oneArmPending == nil {
+		return false
+	}
+	m.cancelOneArmPendingLocked()
+	return true
+}
+
+func (m *RuntimeManager) armOneArmRollbackLocked(runtime, oldRuntime *config.GeneratedRuntime, oldConfig *config.RuntimeConfig) {
+	timeout := oneArmRollbackTimeout(runtime)
+	if timeout <= 0 {
+		return
+	}
+	pending := &oneArmPendingApply{
+		generation: m.generation,
+		oldRuntime: oldRuntime,
+		oldConfig:  oldConfig,
+	}
+	pending.timer = time.AfterFunc(timeout, func() {
+		m.rollbackUnconfirmedOneArm(pending.generation)
+	})
+	m.oneArmPending = pending
+}
+
+func (m *RuntimeManager) cancelOneArmPendingLocked() {
+	if m.oneArmPending == nil {
+		return
+	}
+	if m.oneArmPending.timer != nil {
+		m.oneArmPending.timer.Stop()
+	}
+	m.oneArmPending = nil
+}
+
+func (m *RuntimeManager) rollbackUnconfirmedOneArm(generation uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pending := m.oneArmPending
+	if pending == nil || pending.generation != generation || m.generation != generation {
+		return
+	}
+	m.oneArmPending = nil
+	m.stopEnforcementLocked()
+	if m.controller != nil {
+		if err := m.controller.Stop(); err != nil {
+			m.lastRollbackAt = time.Now()
+			m.lastRollbackError = err.Error()
+			m.lastError = "one-arm safety rollback failed to stop the unconfirmed runtime: " + err.Error()
+			return
+		}
+	}
+	m.controller = nil
+	m.activeRuntime = nil
+	m.activeConfig = nil
+
+	now := time.Now()
+	m.lastRollbackAt = now
+	m.lastReloadMode = "one-arm-safety-rollback"
+	if pending.oldRuntime == nil {
+		m.generation++
+		m.startedAt = time.Time{}
+		m.stoppedAt = now
+		m.lastRollbackError = ""
+		m.lastError = "unconfirmed one-arm network change was stopped"
+		return
+	}
+
+	rollback := m.newController()
+	if err := rollback.Start(pending.oldRuntime); err != nil {
+		_ = rollback.Stop()
+		m.generation++
+		m.startedAt = time.Time{}
+		m.stoppedAt = now
+		m.lastRollbackError = err.Error()
+		m.lastError = "unconfirmed one-arm network change rollback failed: " + err.Error()
+		return
+	}
+	m.controller = rollback
+	m.activeRuntime = cloneGeneratedRuntime(pending.oldRuntime)
+	m.activeConfig = cloneOptionalRuntimeConfig(pending.oldConfig)
+	m.generation++
+	m.startedAt = now
+	m.stoppedAt = time.Time{}
+	m.lastRollbackError = ""
+	m.lastError = "unconfirmed one-arm network change was rolled back"
+	m.restartActiveEnforcementLocked()
+}
+
+func oneArmRollbackTimeout(runtime *config.GeneratedRuntime) time.Duration {
+	if runtime == nil {
+		return 0
+	}
+	var timeout time.Duration
+	for _, device := range runtime.Devices {
+		if device.Type != model.DeviceTAP || device.TapMode != model.TapModeOneArm || device.OneArmRollbackSeconds <= 0 {
+			continue
+		}
+		value := time.Duration(device.OneArmRollbackSeconds) * time.Second
+		if timeout == 0 || value < timeout {
+			timeout = value
+		}
+	}
+	return timeout
+}
+
+func cloneOptionalRuntimeConfig(in *config.RuntimeConfig) *config.RuntimeConfig {
+	if in == nil {
+		return nil
+	}
+	cloned := cloneRuntimeConfigForEnforcement(*in)
+	return &cloned
 }
 
 func (m *RuntimeManager) rollbackAfterFailedApplyLocked(applyErr error) (RuntimeState, error) {
@@ -627,9 +782,6 @@ func cloneRuntimeDevices(in []config.RuntimeDevice) []config.RuntimeDevice {
 	out := append([]config.RuntimeDevice(nil), in...)
 	for i := range out {
 		out[i].Routes = append([]config.RuntimeDeviceRoute(nil), in[i].Routes...)
-		out[i].DNS.Nameservers = append([]string(nil), in[i].DNS.Nameservers...)
-		out[i].DNS.SearchDomains = append([]string(nil), in[i].DNS.SearchDomains...)
-		out[i].DNS.Options = append([]string(nil), in[i].DNS.Options...)
 	}
 	return out
 }

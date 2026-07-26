@@ -140,7 +140,17 @@ fi
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500, "LinkAutoOptimize": true}
+    {
+      "ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500,
+      "LinkAutoOptimize": true, "AccessRole": "server",
+      "TUNDHCP": {
+        "Mode": "server", "Protocol": "dual",
+        "IPv4CIDR": "10.90.0.1/30", "IPv6CIDR": "fd90::1/126",
+        "PoolStart": "10.90.0.2", "PoolEnd": "10.90.0.2",
+        "IPv6PoolStart": "fd90::2", "IPv6PoolEnd": "fd90::2",
+        "OfferedDNS": ["1.1.1.1"], "LeaseSeconds": 300
+      }
+    }
   ],
   "Routes": [
     {"ID": "route-a", "Enabled": true, "DeviceID": "tun-a"}
@@ -162,7 +172,11 @@ JSON
 cat >"${BUILD_DIR}/tapx-b.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500, "LinkAutoOptimize": true}
+    {
+      "ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500,
+      "LinkAutoOptimize": true, "AccessRole": "client",
+      "TUNDHCP": {"Mode": "client", "Protocol": "dual"}
+    }
   ],
   "Routes": [
     {"ID": "route-b", "Enabled": true, "DeviceID": "tun-b"}
@@ -211,13 +225,11 @@ wait_for_log "${BUILD_DIR}/tapx-b.log" "runtime started" || fail_with_logs
 wait_for_link "$NS_B" "$TUN_B" || fail_with_logs
 show_interface_evidence "$NS_B" "$TUN_B"
 
-echo "configure tunnel interfaces"
-ip -n "$NS_A" addr add 10.90.0.1/30 dev "$TUN_A"
-ip -n "$NS_B" addr add 10.90.0.2/30 dev "$TUN_B"
-ip -n "$NS_A" addr add fd90::1/126 dev "$TUN_A" nodad
-ip -n "$NS_B" addr add fd90::2/126 dev "$TUN_B" nodad
-ip -n "$NS_A" link set "$TUN_A" up
-ip -n "$NS_B" link set "$TUN_B" up
+echo "verify TapX address control assigned the tunnel interfaces"
+ip -n "$NS_A" addr show dev "$TUN_A" | grep -q "10.90.0.1/30" || fail_with_logs
+ip -n "$NS_B" addr show dev "$TUN_B" | grep -q "10.90.0.2/30" || fail_with_logs
+ip -n "$NS_A" addr show dev "$TUN_A" | grep -q "fd90::1/126" || fail_with_logs
+ip -n "$NS_B" addr show dev "$TUN_B" | grep -q "fd90::2/126" || fail_with_logs
 
 echo "verify underlay"
 ip netns exec "$NS_B" ping "${UNDERLAY_PING_ARGS[@]}" -c 1 -W 1 "$UNDERLAY_A" >/dev/null || fail_with_logs
@@ -242,9 +254,6 @@ ip netns exec "$NS_A" "$CORE_BIN" -config "${BUILD_DIR}/tapx-a.json" >"${BUILD_D
 PID_A="$!"
 wait_for_log "${BUILD_DIR}/tapx-a.log" "runtime started" || fail_with_logs
 wait_for_link "$NS_A" "$TUN_A" || fail_with_logs
-ip -n "$NS_A" addr add 10.90.0.1/30 dev "$TUN_A"
-ip -n "$NS_A" addr add fd90::1/126 dev "$TUN_A" nodad
-ip -n "$NS_A" link set "$TUN_A" up
 wait_for_ping "$NS_B" 10.90.0.1 || fail_with_logs
 
 echo "raw TCP/TUN over ${UNDERLAY_FAMILY} underlay integration: ok"

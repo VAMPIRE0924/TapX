@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ const (
 	maxChunkSize      = 256 << 10
 	defaultChunkSize  = 64 << 10
 	maxDuration       = 10 * time.Second
+	maxControlSize    = 64 << 10
 )
 
 type operation uint8
@@ -30,7 +32,32 @@ const (
 	opUpload
 	opDownload
 	opFrameProbe
+	opAddressLease
 )
+
+type AddressLeaseRequest struct {
+	Key      string `json:"key"`
+	Protocol string `json:"protocol,omitempty"`
+}
+
+type AddressLease struct {
+	IPv4CIDR    string   `json:"ipv4Cidr,omitempty"`
+	IPv6CIDR    string   `json:"ipv6Cidr,omitempty"`
+	Gateway     string   `json:"gateway,omitempty"`
+	DNS         []string `json:"dns,omitempty"`
+	LeaseSecond int      `json:"leaseSecond"`
+	ExpiresAt   int64    `json:"expiresAt"`
+}
+
+type StreamOptions struct {
+	Credential   string
+	AddressLease func(AddressLeaseRequest) (AddressLease, error)
+}
+
+type addressLeaseResponse struct {
+	Lease AddressLease `json:"lease"`
+	Error string       `json:"error,omitempty"`
+}
 
 type Result struct {
 	Delay         time.Duration
@@ -83,6 +110,10 @@ func InspectStreamHelloPrefix(payload []byte) (StreamHelloInspection, error) {
 // ServeStream handles diagnostics on a stream dedicated to TapX control
 // traffic. It never reads from or writes to a TUN/TAP device.
 func ServeStream(ctx context.Context, conn net.Conn, credential string) error {
+	return ServeStreamWithOptions(ctx, conn, StreamOptions{Credential: credential})
+}
+
+func ServeStreamWithOptions(ctx context.Context, conn net.Conn, options StreamOptions) error {
 	if conn == nil {
 		return errors.New("diagnostic stream is required")
 	}
@@ -95,7 +126,7 @@ func ServeStream(ctx context.Context, conn net.Conn, credential string) error {
 	if err != nil {
 		return err
 	}
-	if provided != credential {
+	if provided != options.Credential {
 		return errors.New("diagnostic credential rejected")
 	}
 	if err := writeAll(conn, []byte{streamVersion}); err != nil {
@@ -153,10 +184,88 @@ func ServeStream(ctx context.Context, conn net.Conn, credential string) error {
 			if err := writeAll(conn, digest[:]); err != nil {
 				return err
 			}
+		case opAddressLease:
+			if options.AddressLease == nil {
+				return errors.New("address lease service is unavailable")
+			}
+			if chunkSize <= 0 || chunkSize > maxControlSize {
+				return fmt.Errorf("invalid address lease request size %d", chunkSize)
+			}
+			payload := make([]byte, chunkSize)
+			if _, err := io.ReadFull(reader, payload); err != nil {
+				return err
+			}
+			var request AddressLeaseRequest
+			if err := json.Unmarshal(payload, &request); err != nil {
+				return fmt.Errorf("decode address lease request: %w", err)
+			}
+			lease, leaseErr := options.AddressLease(request)
+			response := addressLeaseResponse{Lease: lease}
+			if leaseErr != nil {
+				response.Error = leaseErr.Error()
+			}
+			encoded, err := json.Marshal(response)
+			if err != nil {
+				return err
+			}
+			if len(encoded) > maxControlSize {
+				return errors.New("address lease response is too large")
+			}
+			if err := writeAll(conn, []byte{byte(opAddressLease)}); err != nil {
+				return err
+			}
+			if err := writeUint32(conn, uint32(len(encoded))); err != nil {
+				return err
+			}
+			if err := writeAll(conn, encoded); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("unsupported diagnostic operation %d", op)
 		}
 	}
+}
+
+func RequestAddressLease(ctx context.Context, conn net.Conn, credential string, request AddressLeaseRequest) (AddressLease, error) {
+	reader, err := startClient(ctx, conn, credential)
+	if err != nil {
+		return AddressLease{}, err
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return AddressLease{}, err
+	}
+	if len(payload) == 0 || len(payload) > maxControlSize {
+		return AddressLease{}, fmt.Errorf("address lease request size %d is invalid", len(payload))
+	}
+	if err := writeCommand(conn, opAddressLease, 0, len(payload)); err != nil {
+		return AddressLease{}, err
+	}
+	if err := writeAll(conn, payload); err != nil {
+		return AddressLease{}, err
+	}
+	if err := expectOperation(reader, opAddressLease); err != nil {
+		return AddressLease{}, err
+	}
+	size, err := readUint32(reader)
+	if err != nil {
+		return AddressLease{}, err
+	}
+	if size == 0 || size > maxControlSize {
+		return AddressLease{}, fmt.Errorf("address lease response size %d is invalid", size)
+	}
+	responsePayload := make([]byte, int(size))
+	if _, err := io.ReadFull(reader, responsePayload); err != nil {
+		return AddressLease{}, err
+	}
+	var response addressLeaseResponse
+	if err := json.Unmarshal(responsePayload, &response); err != nil {
+		return AddressLease{}, fmt.Errorf("decode address lease response: %w", err)
+	}
+	if response.Error != "" {
+		return AddressLease{}, errors.New(response.Error)
+	}
+	return response.Lease, nil
 }
 
 // ProbeFrame confirms that a full logical TUN/TAP frame can cross the stream
@@ -211,10 +320,22 @@ func Ping(ctx context.Context, conn net.Conn, credential string) (time.Duration,
 }
 
 func Throughput(ctx context.Context, conn net.Conn, credential string, duration time.Duration) (Result, error) {
-	return ThroughputWithChunkSize(ctx, conn, credential, duration, defaultChunkSize)
+	return throughputWithChunkSize(ctx, conn, credential, duration, defaultChunkSize, true, true)
 }
 
 func ThroughputWithChunkSize(ctx context.Context, conn net.Conn, credential string, duration time.Duration, chunkSize int) (Result, error) {
+	return throughputWithChunkSize(ctx, conn, credential, duration, chunkSize, true, true)
+}
+
+func ThroughputOneWay(ctx context.Context, conn net.Conn, credential string, duration time.Duration, upload bool) (Result, error) {
+	return throughputWithChunkSize(ctx, conn, credential, duration, defaultChunkSize, upload, !upload)
+}
+
+func ThroughputOneWayWithChunkSize(ctx context.Context, conn net.Conn, credential string, duration time.Duration, chunkSize int, upload bool) (Result, error) {
+	return throughputWithChunkSize(ctx, conn, credential, duration, chunkSize, upload, !upload)
+}
+
+func throughputWithChunkSize(ctx context.Context, conn net.Conn, credential string, duration time.Duration, chunkSize int, measureUpload, measureDownload bool) (Result, error) {
 	if duration <= 0 {
 		duration = 2 * time.Second
 	}
@@ -234,43 +355,44 @@ func ThroughputWithChunkSize(ctx context.Context, conn net.Conn, credential stri
 		return Result{}, err
 	}
 
-	if err := writeCommand(conn, opUpload, duration, len(payload)); err != nil {
-		return Result{}, err
-	}
-	if err := expectOperation(reader, opUpload); err != nil {
-		return Result{}, err
-	}
-	uploadStarted := time.Now()
-	uploadBytes, err := sendChunks(conn, payload, duration)
-	if err != nil {
-		return Result{}, err
-	}
-	acknowledged, err := readUint64(reader)
-	if err != nil {
-		return Result{}, err
-	}
-	uploadElapsed := time.Since(uploadStarted)
-	if acknowledged < uploadBytes {
-		uploadBytes = acknowledged
+	if measureUpload {
+		if err := writeCommand(conn, opUpload, duration, len(payload)); err != nil {
+			return Result{}, err
+		}
+		if err := expectOperation(reader, opUpload); err != nil {
+			return Result{}, err
+		}
+		uploadStarted := time.Now()
+		uploadBytes, err := sendChunks(conn, payload, duration)
+		if err != nil {
+			return Result{}, err
+		}
+		acknowledged, err := readUint64(reader)
+		if err != nil {
+			return Result{}, err
+		}
+		if acknowledged < uploadBytes {
+			uploadBytes = acknowledged
+		}
+		result.UploadBytes = uploadBytes
+		result.UploadBPS = bitsPerSecond(uploadBytes, time.Since(uploadStarted))
 	}
 
-	if err := writeCommand(conn, opDownload, duration, len(payload)); err != nil {
-		return Result{}, err
+	if measureDownload {
+		if err := writeCommand(conn, opDownload, duration, len(payload)); err != nil {
+			return Result{}, err
+		}
+		if err := expectOperation(reader, opDownload); err != nil {
+			return Result{}, err
+		}
+		downloadStarted := time.Now()
+		downloadBytes, err := receiveChunks(reader, make([]byte, maxChunkSize))
+		if err != nil {
+			return Result{}, err
+		}
+		result.DownloadBytes = downloadBytes
+		result.DownloadBPS = bitsPerSecond(downloadBytes, time.Since(downloadStarted))
 	}
-	if err := expectOperation(reader, opDownload); err != nil {
-		return Result{}, err
-	}
-	downloadStarted := time.Now()
-	downloadBytes, err := receiveChunks(reader, make([]byte, maxChunkSize))
-	if err != nil {
-		return Result{}, err
-	}
-	downloadElapsed := time.Since(downloadStarted)
-
-	result.UploadBytes = uploadBytes
-	result.DownloadBytes = downloadBytes
-	result.UploadBPS = bitsPerSecond(uploadBytes, uploadElapsed)
-	result.DownloadBPS = bitsPerSecond(downloadBytes, downloadElapsed)
 	return result, nil
 }
 
@@ -417,6 +539,12 @@ func writeUint64(writer io.Writer, value uint64) error {
 	return writeAll(writer, encoded[:])
 }
 
+func writeUint32(writer io.Writer, value uint32) error {
+	var encoded [4]byte
+	binary.BigEndian.PutUint32(encoded[:], value)
+	return writeAll(writer, encoded[:])
+}
+
 func writeAll(writer io.Writer, payload []byte) error {
 	for len(payload) > 0 {
 		n, err := writer.Write(payload)
@@ -437,6 +565,14 @@ func readUint64(reader io.Reader) (uint64, error) {
 		return 0, err
 	}
 	return binary.BigEndian.Uint64(encoded[:]), nil
+}
+
+func readUint32(reader io.Reader) (uint32, error) {
+	var encoded [4]byte
+	if _, err := io.ReadFull(reader, encoded[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint32(encoded[:]), nil
 }
 
 func bitsPerSecond(bytes uint64, elapsed time.Duration) uint64 {

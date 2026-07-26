@@ -9,6 +9,7 @@ import (
 	"tapx/internal/config"
 	"tapx/internal/core"
 	"tapx/internal/model"
+	"tapx/internal/netguard"
 	"tapx/internal/xrayruntime"
 )
 
@@ -53,6 +54,28 @@ func TestRuntimeManagerRejectsNilRuntime(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerRejectsNetworkConflictBeforeControllerMutation(t *testing.T) {
+	active := &fakeRuntimeController{}
+	manager := newFakeRuntimeManager(active)
+	if _, err := manager.Apply(&config.GeneratedRuntime{}); err != nil {
+		t.Fatalf("start initial runtime: %v", err)
+	}
+	manager.SetNetworkValidator(func(config.RuntimeConfig) error {
+		return &netguard.ConflictError{Problems: []string{"conflicts with br-lan 192.168.1.0/24"}}
+	})
+
+	state, err := manager.Apply(&config.GeneratedRuntime{}, config.RuntimeConfig{})
+	if err == nil || !strings.Contains(err.Error(), "br-lan") {
+		t.Fatalf("apply conflict error = %v, want br-lan detail", err)
+	}
+	if active.stopCalls != 0 || active.startCalls != 1 {
+		t.Fatalf("controller mutated before guard completed: starts=%d stops=%d", active.startCalls, active.stopCalls)
+	}
+	if !state.Running || state.Generation != 1 {
+		t.Fatalf("active runtime changed after rejected apply: %+v", state)
+	}
+}
+
 func TestRuntimeManagerControlsComponentsWithoutReplacingController(t *testing.T) {
 	controller := &fakeRuntimeController{}
 	manager := newFakeRuntimeManager(controller)
@@ -94,7 +117,6 @@ func TestRuntimeManagerRollsBackWhenReplacementStartFails(t *testing.T) {
 		Devices: []config.RuntimeDevice{{
 			ID:     "tun-a",
 			Routes: []config.RuntimeDeviceRoute{{Enabled: true, Destination: "10.10.0.0/24"}},
-			DNS:    config.RuntimeDNS{Enabled: true, Nameservers: []string{"1.1.1.1"}},
 		}},
 		Settings: []config.RuntimeSettings{{ID: "old"}},
 	}
@@ -103,7 +125,6 @@ func TestRuntimeManagerRollsBackWhenReplacementStartFails(t *testing.T) {
 	}
 	first.Settings[0].ID = "mutated-after-apply"
 	first.Devices[0].Routes[0].Destination = "mutated"
-	first.Devices[0].DNS.Nameservers[0] = "9.9.9.9"
 
 	state, err := manager.Apply(&config.GeneratedRuntime{Settings: []config.RuntimeSettings{{ID: "new"}}})
 	if err == nil {
@@ -135,9 +156,6 @@ func TestRuntimeManagerRollsBackWhenReplacementStartFails(t *testing.T) {
 	}
 	if got := rollback.runtime.Devices[0].Routes[0].Destination; got != "10.10.0.0/24" {
 		t.Fatalf("rollback device route = %q, want cloned destination", got)
-	}
-	if got := rollback.runtime.Devices[0].DNS.Nameservers[0]; got != "1.1.1.1" {
-		t.Fatalf("rollback DNS nameserver = %q, want cloned nameserver", got)
 	}
 }
 
@@ -354,6 +372,78 @@ func TestRuntimeManagerReportsExternalXrayBridgeAsXray(t *testing.T) {
 	if pipe.Transport != "xray" || pipe.XrayRuntime != "external" || pipe.RemoteAddr != "example.com:443" {
 		t.Fatalf("external xray bridge state = %+v", pipe)
 	}
+}
+
+func TestRuntimeManagerConfirmsOneArmApply(t *testing.T) {
+	old := &fakeRuntimeController{}
+	next := &fakeRuntimeController{}
+	manager := newFakeRuntimeManager(old, next)
+	if _, err := manager.Apply(&config.GeneratedRuntime{
+		Devices: []config.RuntimeDevice{{ID: "old", Type: model.DeviceTAP, IfName: "tapx0"}},
+	}); err != nil {
+		t.Fatalf("apply old runtime: %v", err)
+	}
+	if _, err := manager.Apply(oneArmTestRuntime()); err != nil {
+		t.Fatalf("apply one-arm runtime: %v", err)
+	}
+	if !manager.ConfirmOneArmApply() {
+		t.Fatal("expected pending one-arm apply to be confirmed")
+	}
+	if manager.ConfirmOneArmApply() {
+		t.Fatal("second confirmation unexpectedly found a pending apply")
+	}
+	if state := manager.State(); !state.Running || state.Generation != 2 {
+		t.Fatalf("confirmed state = %+v", state)
+	}
+	if old.stopCalls != 1 || next.stopCalls != 0 {
+		t.Fatalf("controller stops old=%d next=%d", old.stopCalls, next.stopCalls)
+	}
+}
+
+func TestRuntimeManagerRollsBackUnconfirmedOneArmApply(t *testing.T) {
+	old := &fakeRuntimeController{}
+	next := &fakeRuntimeController{}
+	rollback := &fakeRuntimeController{}
+	manager := newFakeRuntimeManager(old, next, rollback)
+	oldRuntime := &config.GeneratedRuntime{
+		Devices:  []config.RuntimeDevice{{ID: "old", Type: model.DeviceTAP, IfName: "tapx0"}},
+		Settings: []config.RuntimeSettings{{ID: "old-settings"}},
+	}
+	if _, err := manager.Apply(oldRuntime); err != nil {
+		t.Fatalf("apply old runtime: %v", err)
+	}
+	if _, err := manager.Apply(oneArmTestRuntime()); err != nil {
+		t.Fatalf("apply one-arm runtime: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state := manager.State()
+		if state.LastReloadMode == "one-arm-safety-rollback" {
+			if !state.Running || state.Generation != 3 {
+				t.Fatalf("rollback state = %+v", state)
+			}
+			if next.stopCalls != 1 || rollback.startCalls != 1 {
+				t.Fatalf("rollback controller calls next.stop=%d rollback.start=%d", next.stopCalls, rollback.startCalls)
+			}
+			if rollback.runtime == nil || len(rollback.runtime.Settings) != 1 || rollback.runtime.Settings[0].ID != "old-settings" {
+				t.Fatalf("restored runtime = %+v", rollback.runtime)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("one-arm rollback did not run: %+v", manager.State())
+}
+
+func oneArmTestRuntime() *config.GeneratedRuntime {
+	return &config.GeneratedRuntime{Devices: []config.RuntimeDevice{{
+		ID:                    "new",
+		Type:                  model.DeviceTAP,
+		IfName:                "tapx0",
+		TapMode:               model.TapModeOneArm,
+		OneArmRollbackSeconds: 1,
+	}}}
 }
 
 func newFakeRuntimeManager(controllers ...*fakeRuntimeController) *RuntimeManager {

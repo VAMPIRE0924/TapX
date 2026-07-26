@@ -26,7 +26,6 @@ export function userProtocols(
   const protocols = listenerIDs
     .map((id) => listenerProtocol(listenerByID.get(id), profileByID))
     .filter((protocol): protocol is string => Boolean(protocol));
-  if (protocols.length === 0 && user.CredentialType) protocols.push(user.CredentialType);
   return [...new Set(protocols)];
 }
 

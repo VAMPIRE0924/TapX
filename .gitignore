@@ -27,6 +27,7 @@ id_ed25519*
 *.out
 *.prof
 core/fastpath/*.plist
+/tapx.db
 
 # Go
 vendor/

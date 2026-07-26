@@ -29,12 +29,14 @@ func netapplyRoutes(input []config.RuntimeDeviceRoute) []netapply.RouteConfig {
 	return out
 }
 
-func netapplyDNS(input config.RuntimeDNS) netapply.DNSConfig {
-	return netapply.DNSConfig{
-		Enabled:       input.Enabled,
-		Nameservers:   append([]string(nil), input.Nameservers...),
-		SearchDomains: append([]string(nil), input.SearchDomains...),
-		Options:       append([]string(nil), input.Options...),
-		OutputPath:    input.OutputPath,
+func netapplyDeviceConfig(device config.RuntimeDevice, ifName string) netapply.DeviceConfig {
+	return netapply.DeviceConfig{
+		Type: device.Type, IfName: ifName, MTU: device.MTU, MSSClamp: device.MSSClamp,
+		LinkAutoOptimize: device.LinkAutoOptimize,
+		Bridge:           netapply.BridgeConfig{Enabled: device.Bridge.Enabled, Name: device.Bridge.Name, IfName: device.Bridge.IfName, MTU: device.Bridge.MTU},
+		Routes:           netapplyRoutes(device.Routes),
+		TapMode:          device.TapMode, AccessRole: device.AccessRole, DHCP: device.DHCP,
+		SharedIP: device.SharedIP, TUNDHCP: device.TUNDHCP, AllowDefaultRoute: device.AllowDefaultRoute,
+		OneArmRollbackSeconds: device.OneArmRollbackSeconds,
 	}
 }

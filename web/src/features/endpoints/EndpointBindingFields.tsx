@@ -5,17 +5,23 @@ import type { AddressAssignMode, DeviceBindMode } from './endpoint-types';
 type DeviceOption = { value: string; label: string };
 
 export function EndpointBindingFields({
+  bindingEnabled,
   bindMode,
   linkAutoOptimize,
   addressConfigEnabled,
   addressAssignMode,
+  interfaceType,
+  role,
   deviceOptions,
   addressPlaceholders,
 }: {
+  bindingEnabled: boolean;
   bindMode: DeviceBindMode;
   linkAutoOptimize: boolean;
   addressConfigEnabled: boolean;
   addressAssignMode: AddressAssignMode;
+  interfaceType: 'tun' | 'tap';
+  role: 'listener' | 'connector';
   deviceOptions: DeviceOption[];
   addressPlaceholders: { ipv4: string; ipv6: string; gateway: string };
 }) {
@@ -24,6 +30,15 @@ export function EndpointBindingFields({
 
   return (
     <>
+      <Form.Item
+        name={['Binding', 'DeviceBindingEnabled']}
+        label={t('listener.boundDevice')}
+        tooltip={t('listener.deviceBindingEnabledHelp')}
+        valuePropName="checked"
+      >
+        <Switch />
+      </Form.Item>
+      {bindingEnabled ? <>
       <Form.Item name={['Binding', 'DeviceBindMode']} label={t('listener.deviceBindMode')} tooltip={t('listener.deviceBindModeHelp')}>
         <Radio.Group buttonStyle="solid" onChange={(event) => {
           const mode = event.target.value as DeviceBindMode;
@@ -35,7 +50,9 @@ export function EndpointBindingFields({
       </Form.Item>
       <Form.Item name={['Binding', 'AutoCreateDevice']} hidden valuePropName="checked"><Switch /></Form.Item>
       <Form.Item name={['Binding', 'InterfaceType']} label={t('listener.interfaceType')} tooltip={t('device.typeHelp')}>
-        <Radio.Group buttonStyle="solid">
+        <Radio.Group buttonStyle="solid" onChange={(event) => {
+          if (event.target.value === 'tap') form.setFieldValue(['Binding', 'AddressConfigEnabled'], false);
+        }}>
           <Radio.Button value="tun">TUN</Radio.Button>
           <Radio.Button value="tap">TAP</Radio.Button>
         </Radio.Group>
@@ -76,16 +93,20 @@ export function EndpointBindingFields({
               <InputNumber min={0} max={9000} placeholder="0" />
             </Form.Item>
           ) : null}
-          <Form.Item name={['Binding', 'AddressConfigEnabled']} label={t('device.configureAddress')} tooltip={t('device.configureAddressHelp')} valuePropName="checked"><Switch /></Form.Item>
-          {addressConfigEnabled ? (
+          {interfaceType === 'tun' ? (
+            <Form.Item name={['Binding', 'AddressConfigEnabled']} label={t('device.configureAddress')} tooltip={t('device.configureAddressHelp')} valuePropName="checked"><Switch /></Form.Item>
+          ) : null}
+          {interfaceType === 'tun' && addressConfigEnabled ? (
             <>
-              <Form.Item name={['Binding', 'AddressAssignMode']} label={t('device.addressMode')} tooltip={t('device.addressModeHelp')}>
-                <Radio.Group buttonStyle="solid">
-                  <Radio.Button value="auto">{t('device.auto')}</Radio.Button>
-                  <Radio.Button value="manual">{t('device.manual')}</Radio.Button>
-                </Radio.Group>
-              </Form.Item>
-              {addressAssignMode === 'manual' ? (
+              {role === 'connector' ? (
+                <Form.Item name={['Binding', 'AddressAssignMode']} label={t('device.addressMode')} tooltip={t('device.addressModeHelp')}>
+                  <Radio.Group buttonStyle="solid">
+                    <Radio.Button value="auto">{t('device.auto')}</Radio.Button>
+                    <Radio.Button value="manual">{t('device.manual')}</Radio.Button>
+                  </Radio.Group>
+                </Form.Item>
+              ) : null}
+              {role === 'listener' || addressAssignMode === 'manual' ? (
                 <>
                   <Form.Item name={['Binding', 'IPv4CIDR']} label={t('device.ipv4Cidr')}><Input placeholder={addressPlaceholders.ipv4} /></Form.Item>
                   <Form.Item name={['Binding', 'IPv6CIDR']} label={t('device.ipv6Cidr')}><Input placeholder={addressPlaceholders.ipv6} /></Form.Item>
@@ -96,6 +117,7 @@ export function EndpointBindingFields({
           ) : null}
         </>
       )}
+      </> : null}
     </>
   );
 }

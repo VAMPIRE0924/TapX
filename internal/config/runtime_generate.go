@@ -27,17 +27,21 @@ type GeneratedRuntime struct {
 }
 
 type RuntimeDevice struct {
-	ID               string
-	Type             model.DeviceType
-	IfName           string
-	MTU              int
-	MSSClamp         int
-	LinkAutoOptimize bool
-	IPv4CIDR         string
-	IPv6CIDR         string
-	Bridge           RuntimeBridge
-	Routes           []RuntimeDeviceRoute
-	DNS              RuntimeDNS
+	ID                    string
+	Type                  model.DeviceType
+	IfName                string
+	MTU                   int
+	MSSClamp              int
+	LinkAutoOptimize      bool
+	Bridge                RuntimeBridge
+	Routes                []RuntimeDeviceRoute
+	TapMode               model.TapMode
+	AccessRole            model.AccessRole
+	DHCP                  model.DHCPConfig
+	SharedIP              model.SharedIPConfig
+	TUNDHCP               model.TUNDHCPConfig
+	AllowDefaultRoute     bool
+	OneArmRollbackSeconds int
 }
 
 type RuntimeBridge struct {
@@ -57,14 +61,6 @@ type RuntimeDeviceRoute struct {
 	Table       string
 }
 
-type RuntimeDNS struct {
-	Enabled       bool
-	Nameservers   []string
-	SearchDomains []string
-	Options       []string
-	OutputPath    string
-}
-
 type RuntimeEndpoint struct {
 	ID                 string
 	Transport          model.Transport
@@ -81,6 +77,16 @@ type RuntimeEndpoint struct {
 	TrafficCap         uint64
 	TrafficReset       string
 }
+
+// RuntimeUDPPeerMode is derived from the endpoint role. It is deliberately not
+// part of the saved model: listeners learn a peer and connectors use their
+// configured remote endpoint.
+type RuntimeUDPPeerMode string
+
+const (
+	RuntimeUDPPeerFixed RuntimeUDPPeerMode = "fixed"
+	RuntimeUDPPeerLearn RuntimeUDPPeerMode = "learn"
+)
 
 type RuntimeRoute struct {
 	ID           string
@@ -104,14 +110,10 @@ type RuntimeUDPPipe struct {
 	BindPort            uint16
 	Remote              string
 	Port                uint16
-	PeerMode            model.UDPPeerMode
-	FixedPeer           string
-	BindInterface       string
-	BindAddress         string
-	ReceiveBuffer       int
-	SendBuffer          int
-	ReuseAddr           bool
+	PeerMode            RuntimeUDPPeerMode
 	ReusePort           bool
+	KeepAliveSecond     int
+	Workers             int
 	QueueSize           int
 	ZeroCopy            bool
 	ConnectTimeout      int
@@ -158,15 +160,12 @@ type RuntimeTCPPipe struct {
 	DeviceMTU          int
 	TCPMaxSeg          int
 	LinkAutoOptimize   bool
-	BindInterface      string
-	BindAddress        string
-	ReceiveBuffer      int
-	SendBuffer         int
 	NoDelay            bool
 	KeepAliveSecond    int
 	FastOpen           bool
 	ConnectTimeout     int
 	ReconnectSecond    int
+	Workers            int
 	QueueSize          int
 	ZeroCopy           bool
 	IdleTimeout        int
@@ -302,17 +301,21 @@ func GenerateRuntime(cfg RuntimeConfig) (*GeneratedRuntime, error) {
 			continue
 		}
 		out.Devices = append(out.Devices, RuntimeDevice{
-			ID:               item.ID,
-			Type:             item.Type,
-			IfName:           item.IfName,
-			MTU:              item.MTU,
-			MSSClamp:         item.MSSClamp,
-			LinkAutoOptimize: item.LinkAutoOptimize,
-			IPv4CIDR:         item.IPv4CIDR,
-			IPv6CIDR:         item.IPv6CIDR,
-			Bridge:           runtimeBridge(item.Bridge),
-			Routes:           runtimeDeviceRoutes(item.Routes),
-			DNS:              runtimeDNS(item.DNS),
+			ID:                    item.ID,
+			Type:                  item.Type,
+			IfName:                item.IfName,
+			MTU:                   item.MTU,
+			MSSClamp:              item.MSSClamp,
+			LinkAutoOptimize:      item.LinkAutoOptimize,
+			Bridge:                runtimeBridge(item.Bridge),
+			Routes:                runtimeDeviceRoutes(item.Routes),
+			TapMode:               item.TapMode,
+			AccessRole:            item.AccessRole,
+			DHCP:                  derefDHCP(item.DHCP),
+			SharedIP:              derefSharedIP(item.SharedIP),
+			TUNDHCP:               derefTUNDHCP(item.TUNDHCP),
+			AllowDefaultRoute:     deviceAllowsDefaultRoute(cfg.Addresses, item.ID),
+			OneArmRollbackSeconds: item.OneArmRollbackSeconds,
 		})
 	}
 	for _, item := range cfg.Routes {
@@ -452,7 +455,7 @@ func GenerateRuntime(cfg RuntimeConfig) (*GeneratedRuntime, error) {
 			XrayProfileID: item.XrayProfileID,
 			RawUDP:        item.RawUDP,
 			RawTCP:        item.RawTCP,
-			Binding:       index.binding(item.Binding),
+			Binding:       index.connectorBinding(item),
 		})
 		if item.Transport == model.TransportUDP {
 			if pipe, ok := index.udpPipeFromConnector(item); ok {
@@ -471,6 +474,15 @@ func GenerateRuntime(cfg RuntimeConfig) (*GeneratedRuntime, error) {
 		}
 	}
 	return out, nil
+}
+
+func deviceAllowsDefaultRoute(addresses []model.AddressLimit, deviceID string) bool {
+	for _, address := range addresses {
+		if address.Enabled && address.DeviceID == deviceID && address.AllowDefaultRoute {
+			return true
+		}
+	}
+	return false
 }
 
 type builtInKernelSettings struct {
@@ -565,14 +577,9 @@ func (idx generatorIndex) udpPipeFromListenerBinding(input model.Listener, bindi
 		FrameKind:          device.Type,
 		BindHost:           input.BindHost,
 		BindPort:           input.BindPort,
-		PeerMode:           normalizeUDPPeerMode(input.RawUDP.PeerMode),
-		FixedPeer:          input.RawUDP.FixedPeer,
-		BindInterface:      input.RawUDP.BindInterface,
-		BindAddress:        input.RawUDP.BindAddress,
-		ReceiveBuffer:      input.RawUDP.ReceiveBuffer,
-		SendBuffer:         input.RawUDP.SendBuffer,
-		ReuseAddr:          input.RawUDP.ReuseAddr,
-		ReusePort:          input.RawUDP.ReusePort,
+		PeerMode:           RuntimeUDPPeerLearn,
+		KeepAliveSecond:    input.RawUDP.KeepAliveSecond,
+		Workers:            input.RawUDP.Workers,
 		QueueSize:          input.RawUDP.QueueSize,
 		ZeroCopy:           input.RawUDP.ZeroCopy,
 		ConnectTimeout:     input.RawUDP.ConnectTimeout,
@@ -711,7 +718,7 @@ func (idx generatorIndex) rawListenerPolicies(input model.Listener, routes []Run
 }
 
 func (idx generatorIndex) udpPipeFromConnector(input model.Connector) (RuntimeUDPPipe, bool) {
-	binding := idx.binding(input.Binding)
+	binding := idx.connectorBinding(input)
 	device, ok := idx.deviceForBinding(binding)
 	if !ok {
 		return RuntimeUDPPipe{}, false
@@ -724,14 +731,9 @@ func (idx generatorIndex) udpPipeFromConnector(input model.Connector) (RuntimeUD
 		FrameKind:          device.Type,
 		Remote:             input.Remote,
 		Port:               input.Port,
-		PeerMode:           normalizeUDPPeerMode(input.RawUDP.PeerMode),
-		FixedPeer:          input.RawUDP.FixedPeer,
-		BindInterface:      input.RawUDP.BindInterface,
-		BindAddress:        input.RawUDP.BindAddress,
-		ReceiveBuffer:      input.RawUDP.ReceiveBuffer,
-		SendBuffer:         input.RawUDP.SendBuffer,
-		ReuseAddr:          input.RawUDP.ReuseAddr,
-		ReusePort:          input.RawUDP.ReusePort,
+		PeerMode:           RuntimeUDPPeerFixed,
+		KeepAliveSecond:    input.RawUDP.KeepAliveSecond,
+		Workers:            input.RawUDP.Workers,
 		QueueSize:          input.RawUDP.QueueSize,
 		ZeroCopy:           input.RawUDP.ZeroCopy,
 		ConnectTimeout:     input.RawUDP.ConnectTimeout,
@@ -761,17 +763,14 @@ func (idx generatorIndex) tcpPipeFromListenerBinding(input model.Listener, bindi
 		LengthMode:         normalizeTCPLengthMode(input.RawTCP.LengthMode),
 		MaxFrameSize:       maxFrameSize(device),
 		DeviceMTU:          device.MTU,
-		TCPMaxSeg:          automaticTCPMaxSeg(device, first(input.RawTCP.BindAddress, input.BindHost)),
+		TCPMaxSeg:          automaticTCPMaxSeg(device, input.BindHost),
 		LinkAutoOptimize:   device.LinkAutoOptimize,
-		BindInterface:      input.RawTCP.BindInterface,
-		BindAddress:        input.RawTCP.BindAddress,
-		ReceiveBuffer:      input.RawTCP.ReceiveBuffer,
-		SendBuffer:         input.RawTCP.SendBuffer,
 		NoDelay:            input.RawTCP.NoDelay,
 		KeepAliveSecond:    input.RawTCP.KeepAliveSecond,
 		FastOpen:           input.RawTCP.FastOpen,
 		ConnectTimeout:     input.RawTCP.ConnectTimeout,
 		ReconnectSecond:    input.RawTCP.ReconnectSecond,
+		Workers:            input.RawTCP.Workers,
 		QueueSize:          input.RawTCP.QueueSize,
 		ZeroCopy:           input.RawTCP.ZeroCopy,
 		IdleTimeout:        input.RawTCP.IdleTimeout,
@@ -851,7 +850,7 @@ func (idx generatorIndex) tcpPipesFromListener(input model.Listener, routes []Ru
 }
 
 func (idx generatorIndex) tcpPipeFromConnector(input model.Connector) (RuntimeTCPPipe, bool) {
-	binding := idx.binding(input.Binding)
+	binding := idx.connectorBinding(input)
 	device, ok := idx.deviceForBinding(binding)
 	if !ok {
 		return RuntimeTCPPipe{}, false
@@ -869,15 +868,12 @@ func (idx generatorIndex) tcpPipeFromConnector(input model.Connector) (RuntimeTC
 		DeviceMTU:          device.MTU,
 		TCPMaxSeg:          automaticTCPMaxSeg(device, input.Remote),
 		LinkAutoOptimize:   device.LinkAutoOptimize,
-		BindInterface:      input.RawTCP.BindInterface,
-		BindAddress:        input.RawTCP.BindAddress,
-		ReceiveBuffer:      input.RawTCP.ReceiveBuffer,
-		SendBuffer:         input.RawTCP.SendBuffer,
 		NoDelay:            input.RawTCP.NoDelay,
 		KeepAliveSecond:    input.RawTCP.KeepAliveSecond,
 		FastOpen:           input.RawTCP.FastOpen,
 		ConnectTimeout:     input.RawTCP.ConnectTimeout,
 		ReconnectSecond:    input.RawTCP.ReconnectSecond,
+		Workers:            input.RawTCP.Workers,
 		QueueSize:          input.RawTCP.QueueSize,
 		ZeroCopy:           input.RawTCP.ZeroCopy,
 		IdleTimeout:        input.RawTCP.IdleTimeout,
@@ -984,6 +980,7 @@ func (idx generatorIndex) externalXrayBridgeFromPolicy(input model.Listener, pol
 		DeviceMTU:          device.MTU,
 		NoDelay:            true,
 		KeepAliveSecond:    input.RawTCP.KeepAliveSecond,
+		Workers:            input.RawTCP.Workers,
 		QueueSize:          input.RawTCP.QueueSize,
 		ZeroCopy:           input.RawTCP.ZeroCopy,
 		IdleTimeout:        input.RawTCP.IdleTimeout,
@@ -1000,7 +997,7 @@ func (idx generatorIndex) xrayPipeFromConnector(input model.Connector) (RuntimeX
 	if !idx.hasEmbeddedXrayProfile(input.XrayProfileID) {
 		return RuntimeXrayPipe{}, false
 	}
-	binding := idx.binding(input.Binding)
+	binding := idx.connectorBinding(input)
 	device, ok := idx.deviceForBinding(binding)
 	if !ok {
 		return RuntimeXrayPipe{}, false
@@ -1031,7 +1028,7 @@ func (idx generatorIndex) externalXrayBridgeFromConnector(input model.Connector)
 	if !idx.hasExternalXrayProfile(input.XrayProfileID) {
 		return RuntimeTCPPipe{}, false
 	}
-	binding := idx.binding(input.Binding)
+	binding := idx.connectorBinding(input)
 	device, ok := idx.deviceForBinding(binding)
 	if !ok {
 		return RuntimeTCPPipe{}, false
@@ -1050,6 +1047,7 @@ func (idx generatorIndex) externalXrayBridgeFromConnector(input model.Connector)
 		NoDelay:            true,
 		KeepAliveSecond:    input.RawTCP.KeepAliveSecond,
 		ConnectTimeout:     max(input.RawTCP.ConnectTimeout, 5),
+		Workers:            input.RawTCP.Workers,
 		QueueSize:          input.RawTCP.QueueSize,
 		ZeroCopy:           input.RawTCP.ZeroCopy,
 		IdleTimeout:        input.RawTCP.IdleTimeout,
@@ -1098,6 +1096,42 @@ func (idx generatorIndex) binding(input model.Binding) RuntimeBinding {
 	out.AddressID = first(out.AddressID, client.AddressID, clientBinding.AddressID)
 	out.UploadRateLimit = client.UploadRateLimit
 	out.DownloadRateLimit = client.DownloadRateLimit
+	return out
+}
+
+func (idx generatorIndex) connectorBinding(input model.Connector) RuntimeBinding {
+	out := idx.binding(input.Binding)
+	if out.DeviceID != "" {
+		return out
+	}
+
+	var selected *model.Route
+	for _, route := range idx.routes {
+		if !route.Enabled || route.ConnectorID != input.ID || route.DeviceID == "" {
+			continue
+		}
+		action := normalizeRouteAction(route.Action)
+		if action != model.RouteActionBindDevice && action != model.RouteActionAllow {
+			continue
+		}
+		if selected == nil || route.Priority < selected.Priority || (route.Priority == selected.Priority && route.ID < selected.ID) {
+			candidate := route
+			selected = &candidate
+		}
+	}
+	if selected == nil {
+		return out
+	}
+
+	routed := idx.routeBinding(*selected)
+	out.VKeyValue = first(out.VKeyValue, routed.VKeyValue)
+	out.ClientID = first(out.ClientID, routed.ClientID)
+	out.RouteID = first(out.RouteID, routed.RouteID)
+	out.DeviceID = first(out.DeviceID, routed.DeviceID)
+	out.ConnectorID = first(out.ConnectorID, routed.ConnectorID)
+	out.AddressID = first(out.AddressID, routed.AddressID)
+	out.UploadRateLimit = routed.UploadRateLimit
+	out.DownloadRateLimit = routed.DownloadRateLimit
 	return out
 }
 
@@ -1233,13 +1267,6 @@ func (idx generatorIndex) listenerAddressGuardRemote(listenerID string, binding 
 	return route.ListenerID == listenerID || route.ClientID != "" || route.VKeyID != ""
 }
 
-func normalizeUDPPeerMode(mode model.UDPPeerMode) model.UDPPeerMode {
-	if mode == "" {
-		return model.UDPPeerAny
-	}
-	return mode
-}
-
 func normalizeTCPLengthMode(mode model.TCPLengthMode) model.TCPLengthMode {
 	if mode == "" {
 		return model.TCPLength16
@@ -1310,17 +1337,37 @@ func runtimeDeviceRoutes(input []model.DeviceRoute) []RuntimeDeviceRoute {
 	return out
 }
 
-func runtimeDNS(input *model.DNSConfig) RuntimeDNS {
+func derefDHCP(input *model.DHCPConfig) model.DHCPConfig {
 	if input == nil {
-		return RuntimeDNS{}
+		return model.DHCPConfig{}
 	}
-	return RuntimeDNS{
-		Enabled:       input.Enabled,
-		Nameservers:   append([]string(nil), input.Nameservers...),
-		SearchDomains: append([]string(nil), input.SearchDomains...),
-		Options:       append([]string(nil), input.Options...),
-		OutputPath:    input.OutputPath,
+	out := *input
+	out.DNS = append([]string(nil), input.DNS...)
+	out.StaticLeases = append([]model.DHCPStaticLease(nil), input.StaticLeases...)
+	return out
+}
+
+func derefSharedIP(input *model.SharedIPConfig) model.SharedIPConfig {
+	if input == nil {
+		return model.SharedIPConfig{}
 	}
+	out := *input
+	out.DNS = append([]string(nil), input.DNS...)
+	out.ReservedTCPPorts = append([]string(nil), input.ReservedTCPPorts...)
+	out.ReservedUDPPorts = append([]string(nil), input.ReservedUDPPorts...)
+	return out
+}
+
+func derefTUNDHCP(input *model.TUNDHCPConfig) model.TUNDHCPConfig {
+	if input == nil {
+		return model.TUNDHCPConfig{}
+	}
+	out := *input
+	out.DNS = append([]string(nil), input.DNS...)
+	out.OfferedDNS = append([]string(nil), input.OfferedDNS...)
+	out.RelayDownstreamInterfaces = append([]string(nil), input.RelayDownstreamInterfaces...)
+	out.RelayServers = append([]string(nil), input.RelayServers...)
+	return out
 }
 
 func maxFrameSize(device model.Device) int {

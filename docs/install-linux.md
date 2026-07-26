@@ -39,9 +39,24 @@ password values are generated randomly. PostgreSQL requires a
 `postgres://` or `postgresql://` URL DSN.
 
 The same script is the `tapx` management command after installation. Run
-`sudo tapx` for its menu or `sudo tapx set-panel` to change the database and
-panel parameters. Existing data is not migrated merely by changing the DSN;
-export a `.db` backup first and restore it after switching backend.
+`sudo tapx` for its menu. The management script provides separate operations
+for updating TapX and updating only the management script.
+
+```bash
+sudo tapx update
+sudo tapx update-script
+sudo tapx reset-password
+```
+
+`reset-password` generates a random administrator username and password,
+updates only the authentication settings in the configured database, restarts
+the panel, and prints the new credentials once. `update-script` downloads and
+validates `linux-install.sh`, then atomically replaces `/usr/local/bin/tapx`
+without changing the TapX binaries, service, database, or panel settings.
+
+Use `sudo tapx set-panel` to change the panel endpoint and certificate, or
+`sudo tapx set-database` to migrate between SQLite and PostgreSQL. Database
+migration uses a portable `.db` snapshot and preserves the current data.
 
 ## Defaults
 

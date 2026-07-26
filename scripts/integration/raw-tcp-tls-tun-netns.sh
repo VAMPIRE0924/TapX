@@ -133,7 +133,7 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 cat >"${BUILD_DIR}/tapx-a.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-a", "Enabled": true, "Type": "tun", "IfName": "${TUN_A}", "MTU": 1500, "LinkAutoOptimize": true}
+    {"ID":"tun-a","Enabled":true,"Type":"tun","IfName":"${TUN_A}","MTU":1500,"LinkAutoOptimize":true,"AccessRole":"server","TUNDHCP":{"Mode":"server","Protocol":"ipv4","IPv4CIDR":"10.92.0.1/30","PoolStart":"10.92.0.2","PoolEnd":"10.92.0.2","LeaseSeconds":300}}
   ],
   "VKeys": [
     {"ID": "vk-a", "Enabled": true, "Value": "${VKEY}"}
@@ -156,7 +156,6 @@ cat >"${BUILD_DIR}/tapx-a.json" <<JSON
           "Enabled": true,
           "CertFile": "${BUILD_DIR}/tls/server.crt",
           "KeyFile": "${BUILD_DIR}/tls/server.key",
-          "ALPN": ["tapx"],
           "MinVersion": "1.2"
         }
       },
@@ -169,7 +168,7 @@ JSON
 cat >"${BUILD_DIR}/tapx-b.json" <<JSON
 {
   "Devices": [
-    {"ID": "tun-b", "Enabled": true, "Type": "tun", "IfName": "${TUN_B}", "MTU": 1500, "LinkAutoOptimize": true}
+    {"ID":"tun-b","Enabled":true,"Type":"tun","IfName":"${TUN_B}","MTU":1500,"LinkAutoOptimize":true,"AccessRole":"client","TUNDHCP":{"Mode":"client","Protocol":"ipv4"}}
   ],
   "VKeys": [
     {"ID": "vk-b", "Enabled": true, "Value": "${VKEY}"}
@@ -192,9 +191,8 @@ cat >"${BUILD_DIR}/tapx-b.json" <<JSON
         "KeepAliveSecond": 30,
         "TLS": {
           "Enabled": true,
-          "CAFile": "${BUILD_DIR}/tls/server.crt",
           "ServerName": "tapx.local",
-          "ALPN": ["tapx"],
+          "AllowInsecure": true,
           "MinVersion": "1.2"
         }
       },
@@ -234,11 +232,9 @@ wait_for_log "${BUILD_DIR}/tapx-b.log" "runtime started" || fail_with_logs
 wait_for_link "$NS_B" "$TUN_B" || fail_with_logs
 show_interface_evidence "$NS_B" "$TUN_B"
 
-echo "configure tunnel interfaces"
-ip -n "$NS_A" addr add 10.92.0.1/30 dev "$TUN_A"
-ip -n "$NS_B" addr add 10.92.0.2/30 dev "$TUN_B"
-ip -n "$NS_A" link set "$TUN_A" up
-ip -n "$NS_B" link set "$TUN_B" up
+echo "verify TapX address control over TLS"
+ip -n "$NS_A" addr show dev "$TUN_A" | grep -q "10.92.0.1/30" || fail_with_logs
+ip -n "$NS_B" addr show dev "$TUN_B" | grep -q "10.92.0.2/30" || fail_with_logs
 
 echo "verify underlay"
 ip netns exec "$NS_B" ping -c 1 -W 1 172.31.254.1 >/dev/null || fail_with_logs
@@ -259,8 +255,6 @@ ip netns exec "$NS_A" "$CORE_BIN" -config "${BUILD_DIR}/tapx-a.json" >"${BUILD_D
 PID_A="$!"
 wait_for_log "${BUILD_DIR}/tapx-a.log" "runtime started" || fail_with_logs
 wait_for_link "$NS_A" "$TUN_A" || fail_with_logs
-ip -n "$NS_A" addr add 10.92.0.1/30 dev "$TUN_A"
-ip -n "$NS_A" link set "$TUN_A" up
 wait_for_ping "$NS_A" 10.92.0.2 || fail_with_logs
 wait_for_ping "$NS_B" 10.92.0.1 || fail_with_logs
 

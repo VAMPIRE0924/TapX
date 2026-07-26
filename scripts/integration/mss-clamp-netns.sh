@@ -105,7 +105,7 @@ cat >"${BUILD_DIR}/tapx-mss.json" <<JSON
       "BindHost": "127.0.0.1",
       "BindPort": 45102,
       "Transport": "udp",
-      "RawUDP": {"PeerMode": "any"},
+      "RawUDP": {},
       "Binding": {"RouteID": "route-a"}
     }
   ]

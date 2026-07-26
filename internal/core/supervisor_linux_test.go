@@ -31,7 +31,7 @@ func TestSupervisorStartsUDPPipeOptional(t *testing.T) {
 			FrameKind:    model.DeviceTUN,
 			BindHost:     "127.0.0.1",
 			BindPort:     0,
-			PeerMode:     model.UDPPeerLearn,
+			PeerMode:     config.RuntimeUDPPeerLearn,
 			MaxFrameSize: 1500,
 		}},
 	}
@@ -73,7 +73,7 @@ func TestSupervisorStartsTAPUDPPipeOptional(t *testing.T) {
 			FrameKind:    model.DeviceTAP,
 			BindHost:     "127.0.0.1",
 			BindPort:     0,
-			PeerMode:     model.UDPPeerLearn,
+			PeerMode:     config.RuntimeUDPPeerLearn,
 			MaxFrameSize: 1500,
 			AddressGuard: config.RuntimeAddressGuard{
 				MACs:      []string{"02:00:00:00:00:01"},

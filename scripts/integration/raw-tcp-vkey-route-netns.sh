@@ -100,7 +100,7 @@ if [[ "$SECURITY" == "tls" ]]; then
     -days 1 -subj "/CN=tapx.local" \
     -addext "subjectAltName = DNS:tapx.local,IP:198.18.81.1" >/dev/null 2>&1
   TLS_LISTENER_JSON=",\"TLS\":{\"Enabled\":true,\"CertFile\":\"${BUILD_DIR}/tls/server.crt\",\"KeyFile\":\"${BUILD_DIR}/tls/server.key\",\"MinVersion\":\"1.2\"}"
-  TLS_CONNECTOR_JSON=",\"TLS\":{\"Enabled\":true,\"CAFile\":\"${BUILD_DIR}/tls/server.crt\",\"ServerName\":\"tapx.local\",\"MinVersion\":\"1.2\"}"
+  TLS_CONNECTOR_JSON=",\"TLS\":{\"Enabled\":true,\"ServerName\":\"tapx.local\",\"AllowInsecure\":true,\"MinVersion\":\"1.2\"}"
 fi
 
 cat >"${BUILD_DIR}/a.json" <<JSON

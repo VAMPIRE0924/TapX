@@ -340,7 +340,7 @@ func (s *Server) handleManagedNodeStats(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleManagedNodeSystemInterfaces(w http.ResponseWriter, r *http.Request) {
-	s.proxyManagedNodeJSON(w, r, http.MethodGet, "/api/system/interfaces", nil, managedNodeRequestTimeout)
+	s.proxyManagedNodeJSON(w, r, http.MethodGet, "/api/server/interfaces", nil, managedNodeRequestTimeout)
 }
 
 func (s *Server) handleManagedNodeClientShare(w http.ResponseWriter, r *http.Request) {

@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { diagnosticPlatform, officialXrayAsset, officialXrayDownloadURL } from './KernelPage';
+import { applyExternalXrayPathDefaults, diagnosticPlatform, officialXrayAsset, officialXrayDownloadURL } from './KernelPage';
 
 describe('kernel download helpers', () => {
+  it('uses the systemd-writable state directory for Linux external Xray defaults', () => {
+    const values: Record<string, unknown> = {};
+    applyExternalXrayPathDefaults(values, { process: { goos: 'linux' } });
+    expect(values).toMatchObject({
+      externalXrayPath: '/var/lib/tapx/xray/xray',
+      externalXrayConfigFile: '/var/lib/tapx/xray/generated.json',
+      externalXrayWorkDir: '/var/lib/tapx/xray',
+    });
+  });
+
   it('uses the server platform instead of the browser platform', () => {
     expect(diagnosticPlatform({ process: { goos: 'linux', goarch: 'amd64' } })).toBe('linux-amd64');
   });

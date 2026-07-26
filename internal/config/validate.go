@@ -48,6 +48,7 @@ func ValidateForSave(cfg RuntimeConfig) error {
 	v.validateConnectors()
 	v.validateClients()
 	v.validateAddressLimits()
+	v.validateConnectorRouteBindings()
 	return v.err()
 }
 
@@ -63,8 +64,35 @@ func ValidateForApply(cfg RuntimeConfig) error {
 	v.validateConnectors()
 	v.validateClients()
 	v.validateAddressLimits()
+	v.validateConnectorRouteBindings()
 	v.enabledReferences()
 	return v.err()
+}
+
+func (v *validator) validateConnectorRouteBindings() {
+	idx := runtimeIndex(v.cfg)
+	for _, connector := range v.cfg.Connectors {
+		if !connector.Enabled {
+			continue
+		}
+		resolved := idx.binding(connector.Binding).DeviceID
+		for _, route := range v.cfg.Routes {
+			if !route.Enabled || route.ConnectorID != connector.ID || route.DeviceID == "" {
+				continue
+			}
+			action := normalizeRouteAction(route.Action)
+			if action != model.RouteActionBindDevice && action != model.RouteActionAllow {
+				continue
+			}
+			if resolved == "" {
+				resolved = route.DeviceID
+				continue
+			}
+			if resolved != route.DeviceID {
+				v.add("Connector", connector.ID, "Binding.DeviceID", fmt.Sprintf("conflicts with Route[%s].DeviceID", route.ID))
+			}
+		}
+	}
 }
 
 type validator struct {
@@ -268,8 +296,6 @@ func (v *validator) validateDevices() {
 		if item.LinkAutoOptimize && item.MTU == 0 {
 			v.add("Device", item.ID, "MTU", "is required when automatic link optimization is enabled")
 		}
-		v.ipPrefix("Device", item.ID, "IPv4CIDR", item.IPv4CIDR, true)
-		v.ipPrefix("Device", item.ID, "IPv6CIDR", item.IPv6CIDR, false)
 		if item.Bridge != nil && item.Type != model.DeviceTAP {
 			v.add("Device", item.ID, "Bridge", "is only valid for tap devices")
 		}
@@ -284,7 +310,270 @@ func (v *validator) validateDevices() {
 		for i, route := range item.Routes {
 			v.deviceRoute(item.ID, i, route)
 		}
-		v.deviceDNS(item.ID, item.DNS)
+		v.deviceNetworkAccess(item)
+	}
+}
+
+func (v *validator) deviceNetworkAccess(item model.Device) {
+	role := item.AccessRole
+	if role == "" {
+		role = model.AccessRoleClient
+	}
+	if role != model.AccessRoleClient && role != model.AccessRoleServer {
+		v.add("Device", item.ID, "AccessRole", "must be client or server")
+	}
+	if item.Type == model.DeviceTAP {
+		mode := item.TapMode
+		if mode == "" {
+			mode = model.TapModeStandalone
+		}
+		switch mode {
+		case model.TapModeStandalone, model.TapModeTransparent, model.TapModeOneArm, model.TapModeSharedIP:
+		default:
+			v.add("Device", item.ID, "TapMode", "must be standalone, transparent, one-arm, or shared-ip")
+		}
+		if mode == model.TapModeOneArm {
+			if item.Bridge == nil || strings.TrimSpace(item.Bridge.IfName) == "" {
+				v.add("Device", item.ID, "Bridge.IfName", "is required for one-arm mode")
+			}
+			if item.OneArmRollbackSeconds < 15 || item.OneArmRollbackSeconds > 3600 {
+				v.add("Device", item.ID, "OneArmRollbackSeconds", "must be between 15 and 3600")
+			}
+		} else if item.OneArmRollbackSeconds != 0 {
+			v.add("Device", item.ID, "OneArmRollbackSeconds", "is only valid for one-arm mode")
+		}
+		v.validateTapDHCP(item, role, mode)
+		v.validateSharedIP(item, role, mode)
+		if item.TUNDHCP != nil {
+			v.add("Device", item.ID, "TUNDHCP", "is only valid for tun devices")
+		}
+		return
+	}
+
+	if item.TapMode != "" && item.TapMode != model.TapModeStandalone {
+		v.add("Device", item.ID, "TapMode", "is only valid for tap devices")
+	}
+	if item.DHCP != nil {
+		v.add("Device", item.ID, "DHCP", "is only valid for tap devices")
+	}
+	if item.SharedIP != nil {
+		v.add("Device", item.ID, "SharedIP", "is only valid for tap devices")
+	}
+	if item.OneArmRollbackSeconds != 0 {
+		v.add("Device", item.ID, "OneArmRollbackSeconds", "is only valid for tap devices")
+	}
+	v.validateTUNDHCP(item, role)
+}
+
+func (v *validator) validateTapDHCP(item model.Device, role model.AccessRole, tapMode model.TapMode) {
+	if item.DHCP == nil {
+		return
+	}
+	cfg := item.DHCP
+	switch cfg.Mode {
+	case "", model.DHCPModeOff, model.DHCPModePassthrough, model.DHCPModeServer, model.DHCPModeMirror:
+	default:
+		v.add("Device", item.ID, "DHCP.Mode", "must be off, passthrough, server, or mirror")
+	}
+	if cfg.Mode == model.DHCPModeServer {
+		if role != model.AccessRoleServer {
+			v.add("Device", item.ID, "DHCP.Mode", "server mode requires a server device")
+		}
+		v.validateDHCPv4Pool(item.ID, "DHCP", cfg.IPv4CIDR, cfg.PoolStart, cfg.PoolEnd)
+		v.validatePoolReservedAddresses(item.ID, "DHCP", cfg.PoolStart, cfg.PoolEnd, cfg.IPv4CIDR, cfg.Gateway)
+		if cfg.LeaseSeconds < 60 || cfg.LeaseSeconds > 31536000 {
+			v.add("Device", item.ID, "DHCP.LeaseSeconds", "must be between 60 and 31536000")
+		}
+	}
+	if cfg.Mode == model.DHCPModeMirror && tapMode != model.TapModeSharedIP {
+		v.add("Device", item.ID, "DHCP.Mode", "mirror mode requires shared-ip mode")
+	}
+	for i, value := range cfg.DNS {
+		v.anyIPAddress("Device", item.ID, fmt.Sprintf("DHCP.DNS[%d]", i), value)
+	}
+	for i, lease := range cfg.StaticLeases {
+		if strings.TrimSpace(lease.MAC) == "" || strings.TrimSpace(lease.Address) == "" {
+			v.add("Device", item.ID, fmt.Sprintf("DHCP.StaticLeases[%d]", i), "MAC and address are required")
+			continue
+		}
+		if _, err := net.ParseMAC(lease.MAC); err != nil {
+			v.add("Device", item.ID, fmt.Sprintf("DHCP.StaticLeases[%d].MAC", i), "must be a valid MAC address")
+		}
+		v.anyIPAddress("Device", item.ID, fmt.Sprintf("DHCP.StaticLeases[%d].Address", i), lease.Address)
+	}
+}
+
+func (v *validator) validateSharedIP(item model.Device, role model.AccessRole, tapMode model.TapMode) {
+	if item.SharedIP == nil {
+		return
+	}
+	if tapMode != model.TapModeSharedIP {
+		v.add("Device", item.ID, "SharedIP", "requires shared-ip mode")
+	}
+	cfg := item.SharedIP
+	expected := model.SharedIPRoleAccess
+	if role == model.AccessRoleServer {
+		expected = model.SharedIPRoleService
+	}
+	if cfg.Role != "" && cfg.Role != expected {
+		v.add("Device", item.ID, "SharedIP.Role", fmt.Sprintf("must be %s for this access role", expected))
+	}
+	if expected == model.SharedIPRoleService && strings.TrimSpace(cfg.UplinkInterface) == "" {
+		v.add("Device", item.ID, "SharedIP.UplinkInterface", "is required for the service role")
+	}
+	if cfg.AddressSource != "" && cfg.AddressSource != "auto" && cfg.AddressSource != "manual" {
+		v.add("Device", item.ID, "SharedIP.AddressSource", "must be auto or manual")
+	}
+	if cfg.AddressSource == "manual" {
+		v.ipPrefix("Device", item.ID, "SharedIP.IPv4CIDR", cfg.IPv4CIDR, true)
+		v.anyIPAddress("Device", item.ID, "SharedIP.Gateway", cfg.Gateway)
+	}
+	switch cfg.FirewallBackend {
+	case "", model.FirewallAuto, model.FirewallNFTables, model.FirewallIPTables:
+	default:
+		v.add("Device", item.ID, "SharedIP.FirewallBackend", "must be auto, nftables, or iptables")
+	}
+	v.validatePortRanges(item.ID, "SharedIP.ReservedTCPPorts", cfg.ReservedTCPPorts)
+	v.validatePortRanges(item.ID, "SharedIP.ReservedUDPPorts", cfg.ReservedUDPPorts)
+	if cfg.ClientMAC != "" {
+		if _, err := net.ParseMAC(cfg.ClientMAC); err != nil {
+			v.add("Device", item.ID, "SharedIP.ClientMAC", "must be a valid MAC address")
+		}
+	}
+}
+
+func (v *validator) validateTUNDHCP(item model.Device, role model.AccessRole) {
+	if item.TUNDHCP == nil {
+		return
+	}
+	cfg := item.TUNDHCP
+	switch cfg.Mode {
+	case "", model.TUNDHCPModeOff, model.TUNDHCPModeClient, model.TUNDHCPModeServer, model.TUNDHCPModeManual:
+	default:
+		v.add("Device", item.ID, "TUNDHCP.Mode", "must be off, client, server, or manual")
+	}
+	if role == model.AccessRoleClient && cfg.Mode == model.TUNDHCPModeServer {
+		v.add("Device", item.ID, "TUNDHCP.Mode", "server mode requires a server device")
+	}
+	if role == model.AccessRoleServer && cfg.Mode == model.TUNDHCPModeClient {
+		v.add("Device", item.ID, "TUNDHCP.Mode", "client mode requires a client device")
+	}
+	if cfg.RelayEnabled && role != model.AccessRoleServer {
+		v.add("Device", item.ID, "TUNDHCP.RelayEnabled", "DHCP relay requires a server device")
+	}
+	protocol := cfg.Protocol
+	if protocol == "" {
+		protocol = "ipv4"
+	}
+	if protocol != "ipv4" && protocol != "ipv6" && protocol != "dual" {
+		v.add("Device", item.ID, "TUNDHCP.Protocol", "must be ipv4, ipv6, or dual")
+	}
+	if cfg.Mode == model.TUNDHCPModeManual || cfg.Mode == model.TUNDHCPModeServer {
+		if protocol != "ipv6" {
+			v.ipPrefix("Device", item.ID, "TUNDHCP.IPv4CIDR", cfg.IPv4CIDR, true)
+		}
+		if protocol != "ipv4" {
+			v.ipPrefix("Device", item.ID, "TUNDHCP.IPv6CIDR", cfg.IPv6CIDR, false)
+		}
+	}
+	if cfg.Mode == model.TUNDHCPModeServer {
+		if protocol != "ipv6" {
+			v.validateDHCPv4Pool(item.ID, "TUNDHCP", cfg.IPv4CIDR, cfg.PoolStart, cfg.PoolEnd)
+			v.validatePoolReservedAddresses(item.ID, "TUNDHCP", cfg.PoolStart, cfg.PoolEnd, cfg.IPv4CIDR, cfg.Gateway, cfg.OfferedGateway)
+		}
+		if protocol != "ipv4" {
+			v.validateAddressRange(item.ID, "TUNDHCP", cfg.IPv6PoolStart, cfg.IPv6PoolEnd, false)
+			v.validatePoolReservedAddresses(item.ID, "TUNDHCP", cfg.IPv6PoolStart, cfg.IPv6PoolEnd, cfg.IPv6CIDR, cfg.Gateway, cfg.OfferedGateway)
+		}
+	}
+	if cfg.RelayEnabled {
+		if len(cfg.RelayDownstreamInterfaces) == 0 || len(cfg.RelayServers) == 0 {
+			v.add("Device", item.ID, "TUNDHCP.Relay", "downstream interfaces and relay servers are required")
+		}
+		for i, server := range cfg.RelayServers {
+			v.anyIPAddress("Device", item.ID, fmt.Sprintf("TUNDHCP.RelayServers[%d]", i), server)
+		}
+		if cfg.MaxHops < 1 || cfg.MaxHops > 16 {
+			v.add("Device", item.ID, "TUNDHCP.MaxHops", "must be between 1 and 16")
+		}
+	}
+}
+
+func (v *validator) validateDHCPv4Pool(id, field, cidr, start, end string) {
+	v.ipPrefix("Device", id, field+".IPv4CIDR", cidr, true)
+	v.validateAddressRange(id, field, start, end, true)
+	if prefix, err := netip.ParsePrefix(cidr); err == nil {
+		for name, value := range map[string]string{"PoolStart": start, "PoolEnd": end} {
+			if addr, err := netip.ParseAddr(value); err == nil && !prefix.Contains(addr) {
+				v.add("Device", id, field+"."+name, "must be inside the interface subnet")
+			}
+		}
+	}
+}
+
+func (v *validator) validateAddressRange(id, field, start, end string, ipv4 bool) {
+	startAddr, startErr := netip.ParseAddr(strings.TrimSpace(start))
+	endAddr, endErr := netip.ParseAddr(strings.TrimSpace(end))
+	if startErr != nil || startAddr.Is4() != ipv4 {
+		v.add("Device", id, field+".PoolStart", "must be a valid address of the expected family")
+	}
+	if endErr != nil || endAddr.Is4() != ipv4 {
+		v.add("Device", id, field+".PoolEnd", "must be a valid address of the expected family")
+	}
+	if startErr == nil && endErr == nil && startAddr.Compare(endAddr) > 0 {
+		v.add("Device", id, field+".PoolEnd", "must not be lower than the pool start")
+	}
+}
+
+func (v *validator) validatePoolReservedAddresses(id, field, start, end, interfaceCIDR string, values ...string) {
+	startAddr, startErr := netip.ParseAddr(strings.TrimSpace(start))
+	endAddr, endErr := netip.ParseAddr(strings.TrimSpace(end))
+	if startErr != nil || endErr != nil || startAddr.BitLen() != endAddr.BitLen() {
+		return
+	}
+	reserved := make(map[netip.Addr]string)
+	if prefix, err := netip.ParsePrefix(strings.TrimSpace(interfaceCIDR)); err == nil {
+		reserved[prefix.Addr().Unmap()] = "interface address"
+	}
+	for _, value := range values {
+		if address, err := netip.ParseAddr(strings.TrimSpace(value)); err == nil {
+			reserved[address.Unmap()] = "gateway"
+		}
+	}
+	for address, label := range reserved {
+		if address.BitLen() == startAddr.BitLen() &&
+			startAddr.Compare(address) <= 0 && address.Compare(endAddr) <= 0 {
+			v.add("Device", id, field+".Pool", "must not include the "+label+" "+address.String())
+		}
+	}
+}
+
+func (v *validator) anyIPAddress(object, id, field, value string) {
+	if strings.TrimSpace(value) == "" {
+		v.add(object, id, field, "is required")
+		return
+	}
+	if _, err := netip.ParseAddr(strings.TrimSpace(value)); err != nil {
+		v.add(object, id, field, "must be a valid IP address")
+	}
+}
+
+func (v *validator) validatePortRanges(id, field string, values []string) {
+	for i, value := range values {
+		parts := strings.Split(strings.TrimSpace(value), "-")
+		if len(parts) < 1 || len(parts) > 2 {
+			v.add("Device", id, fmt.Sprintf("%s[%d]", field, i), "must be a port or port range")
+			continue
+		}
+		first, err1 := strconv.Atoi(parts[0])
+		last := first
+		var err2 error
+		if len(parts) == 2 {
+			last, err2 = strconv.Atoi(parts[1])
+		}
+		if err1 != nil || err2 != nil || first < 1 || last > 65535 || first > last {
+			v.add("Device", id, fmt.Sprintf("%s[%d]", field, i), "must be between 1 and 65535")
+		}
 	}
 }
 
@@ -326,7 +615,23 @@ func (v *validator) validateXrayProfiles() {
 		if v.xrayProfileUsesAutomaticLink(item.ID) && xrayDisablesQUICPathMTU(item) {
 			v.add("XrayProfile", item.ID, "StreamSettingsJSON", "cannot disable QUIC path MTU discovery while a bound device enables automatic link optimization")
 		}
+		if xrayUsesRealityWithFinalMask(item) {
+			v.add("XrayProfile", item.ID, "StreamSettingsJSON", "Final Mask cannot be combined with REALITY")
+		}
 	}
+}
+
+func xrayUsesRealityWithFinalMask(profile model.XrayProfile) bool {
+	var stream map[string]any
+	if strings.TrimSpace(profile.StreamSettingsJSON) == "" || json.Unmarshal([]byte(profile.StreamSettingsJSON), &stream) != nil {
+		return false
+	}
+	security, _ := stream["security"].(string)
+	if !strings.EqualFold(strings.TrimSpace(security), "reality") {
+		return false
+	}
+	finalMask, ok := stream["finalmask"].(map[string]any)
+	return ok && len(finalMask) > 0
 }
 
 func (v *validator) xrayProfileUsesAutomaticLink(profileID string) bool {
@@ -377,13 +682,22 @@ func xrayDisablesQUICPathMTU(profile model.XrayProfile) bool {
 
 func (v *validator) validateSettings() {
 	for _, item := range v.cfg.Settings {
+		panelName := strings.TrimSpace(item.PanelName)
+		if len([]rune(panelName)) > 64 {
+			v.add("Settings", item.ID, "PanelName", "must not exceed 64 characters")
+		}
+		if strings.ContainsAny(panelName, "\r\n\t") {
+			v.add("Settings", item.ID, "PanelName", "must not contain control characters")
+		}
 		switch item.LogLevel {
 		case "", "debug", "info", "warn", "error":
 		default:
 			v.add("Settings", item.ID, "LogLevel", "must be empty, debug, info, warn, or error")
 		}
-		if item.OpenWrtBuildTarget != "" && item.OpenWrtBuildTarget != "x86-64" {
-			v.add("Settings", item.ID, "OpenWrtBuildTarget", "currently must be x86-64")
+		if target := strings.TrimSpace(item.OpenWrtBuildTarget); target != "" {
+			if len(target) > 128 || strings.ContainsAny(target, "\x00\r\n\t ") {
+				v.add("Settings", item.ID, "OpenWrtBuildTarget", "must be a platform target without whitespace or control characters")
+			}
 		}
 		if listen := strings.TrimSpace(item.PanelListen); listen != "" {
 			host, portText, err := net.SplitHostPort(listen)
@@ -471,11 +785,15 @@ func (v *validator) validateRoutes() {
 		default:
 			v.add("Route", item.ID, "Action", "must be empty, bind-device, allow, or drop")
 		}
-		if item.VKeyID == "" && item.ListenerID == "" && item.DeviceID == "" && item.ConnectorID == "" && item.ClientID == "" && item.AddressID == "" {
-			v.add("Route", item.ID, "Match", "must define at least one binding or source-address condition")
+		hasTrafficSelector := item.VKeyID != "" || item.ListenerID != "" || item.ConnectorID != "" || item.ClientID != "" || v.routeHasBindingReference(item.ID)
+		if !hasTrafficSelector {
+			v.add("Route", item.ID, "Match", "must select a listener, connector, client, or vKey; device and address limit are outputs, not traffic selectors")
 		}
 		if (item.Action == "" || item.Action == model.RouteActionBindDevice) && item.DeviceID == "" {
 			v.add("Route", item.ID, "DeviceID", "is required for bind-device action")
+		}
+		if item.Action == model.RouteActionDrop && item.ListenerID == "" && item.ClientID == "" && item.VKeyID == "" && !v.routeHasIngressBindingReference(item.ID) {
+			v.add("Route", item.ID, "Match", "drop requires a listener, client, or vKey selector; a connector alone has no inbound traffic to reject")
 		}
 		v.bindingRefs("Route", item.ID, model.Binding{
 			VKeyID:    item.VKeyID,
@@ -490,6 +808,39 @@ func (v *validator) validateRoutes() {
 			ref(v, "Route", item.ID, "ConnectorID", item.ConnectorID, v.connectors)
 		}
 	}
+}
+
+func (v *validator) routeHasBindingReference(routeID string) bool {
+	for _, item := range v.cfg.Listeners {
+		if item.Binding.RouteID == routeID {
+			return true
+		}
+	}
+	for _, item := range v.cfg.Connectors {
+		if item.Binding.RouteID == routeID {
+			return true
+		}
+	}
+	for _, item := range v.cfg.Clients {
+		if item.Binding.RouteID == routeID {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *validator) routeHasIngressBindingReference(routeID string) bool {
+	for _, item := range v.cfg.Listeners {
+		if item.Binding.RouteID == routeID {
+			return true
+		}
+	}
+	for _, item := range v.cfg.Clients {
+		if item.Binding.RouteID == routeID {
+			return true
+		}
+	}
+	return false
 }
 
 func (v *validator) validateListeners() {
@@ -577,7 +928,7 @@ func (v *validator) validateClients() {
 			seenDevices[deviceID] = true
 			ref(v, "Client", item.ID, fmt.Sprintf("AllowedDeviceIDs[%d]", index), deviceID, v.devices)
 		}
-		v.clientCredential(item)
+		v.clientCredentials(item)
 		if item.AddressID != "" {
 			ref(v, "Client", item.ID, "AddressID", item.AddressID, v.addresses)
 		}
@@ -668,35 +1019,16 @@ func (v *validator) trafficReset(kind, id, value string) {
 	}
 }
 
-func (v *validator) clientCredential(item model.Client) {
-	credentialType := strings.TrimSpace(item.CredentialType)
-	credentialValue := strings.TrimSpace(item.CredentialValue)
-	switch credentialType {
-	case "", "uuid", "password", "vkey", "vless", "vmess", "trojan", "shadowsocks", "hysteria", "wireguard", "raw-tcp", "raw-udp":
-	default:
-		v.add("Client", item.ID, "CredentialType", "unsupported credential protocol")
-	}
-	if credentialType == "" {
-		return
-	}
-	if (credentialType == "raw-tcp" || credentialType == "raw-udp") && credentialValue == "" {
-		return
-	}
-	if credentialValue == "" {
-		v.add("Client", item.ID, "CredentialValue", "is required when CredentialType is set")
-		return
-	}
-	if strings.ContainsAny(credentialValue, "\r\n\t ") {
-		v.add("Client", item.ID, "CredentialValue", "must not contain whitespace")
-	}
-	if (credentialType == "uuid" || credentialType == "vless" || credentialType == "vmess") && !looksLikeUUID(credentialValue) {
-		v.add("Client", item.ID, "CredentialValue", "must be a UUID for uuid credentials")
-	}
-}
-
 type addressOwner struct {
 	id    string
 	field string
+}
+
+func (v *validator) clientCredentials(item model.Client) {
+	uuid := strings.TrimSpace(item.UUID)
+	if uuid != "" && !looksLikeUUID(uuid) {
+		v.add("Client", item.ID, "UUID", "must be a UUID")
+	}
 }
 
 func (v *validator) validateAddressLimits() {
@@ -945,28 +1277,11 @@ func (v *validator) rawUDP(object, id string, transport model.Transport, setting
 	if transport != model.TransportUDP {
 		return
 	}
-	switch settings.PeerMode {
-	case "", model.UDPPeerAny, model.UDPPeerFixed, model.UDPPeerLearn:
-	default:
-		v.add(object, id, "RawUDP.PeerMode", "must be empty, any, fixed, or learn")
-	}
-	if settings.PeerMode == model.UDPPeerFixed && settings.FixedPeer == "" {
-		v.add(object, id, "RawUDP.FixedPeer", "is required when peer mode is fixed")
-	}
-	if settings.FixedPeer != "" {
-		if _, err := netip.ParseAddrPort(settings.FixedPeer); err != nil {
-			v.add(object, id, "RawUDP.FixedPeer", "must be host:port with an IP address")
-		}
-	}
-	if settings.BindAddress != "" {
-		if _, err := netip.ParseAddr(settings.BindAddress); err != nil {
-			v.add(object, id, "RawUDP.BindAddress", "must be an IP address")
-		}
-	}
-	v.positive("RawUDP.ReceiveBuffer", object, id, settings.ReceiveBuffer)
-	v.positive("RawUDP.SendBuffer", object, id, settings.SendBuffer)
 	v.positive("RawUDP.KeepAliveSecond", object, id, settings.KeepAliveSecond)
 	v.positive("RawUDP.Workers", object, id, settings.Workers)
+	if settings.Workers > 1 {
+		v.add(object, id, "RawUDP.Workers", "must be 0 (automatic) or 1 because one UDP endpoint owns one device queue and socket")
+	}
 	v.positive("RawUDP.QueueSize", object, id, settings.QueueSize)
 	v.positive("RawUDP.ConnectTimeout", object, id, settings.ConnectTimeout)
 	v.positive("RawUDP.IdleTimeout", object, id, settings.IdleTimeout)
@@ -985,26 +1300,26 @@ func (v *validator) rawTCP(object, id string, transport model.Transport, setting
 	if transport != model.TransportTCP {
 		return
 	}
-	if settings.BindAddress != "" {
-		if _, err := netip.ParseAddr(settings.BindAddress); err != nil {
-			v.add(object, id, "RawTCP.BindAddress", "must be an IP address")
-		}
-	}
-	v.positive("RawTCP.ReceiveBuffer", object, id, settings.ReceiveBuffer)
-	v.positive("RawTCP.SendBuffer", object, id, settings.SendBuffer)
 	v.positive("RawTCP.KeepAliveSecond", object, id, settings.KeepAliveSecond)
 	v.positive("RawTCP.ConnectTimeout", object, id, settings.ConnectTimeout)
 	v.positive("RawTCP.ReconnectSecond", object, id, settings.ReconnectSecond)
 	v.positive("RawTCP.Workers", object, id, settings.Workers)
+	if settings.Workers > 1 {
+		v.add(object, id, "RawTCP.Workers", "must be 0 (automatic) or 1 because a framed TCP stream has one ordered reader")
+	}
 	v.positive("RawTCP.QueueSize", object, id, settings.QueueSize)
 	v.positive("RawTCP.IdleTimeout", object, id, settings.IdleTimeout)
-	v.positive("RawTCP.ReadBuffer", object, id, settings.ReadBuffer)
-	v.positive("RawTCP.WriteBuffer", object, id, settings.WriteBuffer)
 	v.rawTLS(object, id, settings.TLS)
 }
 
 func (v *validator) rawTLS(object, id string, settings model.RawTLSSettings) {
-	v.validateRawSecurity("RawTCP.TLS", object, id, settings.Enabled, settings.CertFile, settings.KeyFile, settings.CAFile, settings.ServerName, settings.ALPN, settings.MinVersion, settings.MaxVersion)
+	v.validateRawSecurity("RawTCP.TLS", object, id, settings.Enabled, settings.CertFile, settings.KeyFile, settings.ServerName, settings.MinVersion, settings.MaxVersion)
+	if object == "Connector" && (strings.TrimSpace(settings.CertFile) != "" || strings.TrimSpace(settings.KeyFile) != "") {
+		v.add(object, id, "RawTCP.TLS.CertFile", "client certificates are not part of the connector TLS contract")
+	}
+	if object == "Listener" && settings.AllowInsecure {
+		v.add(object, id, "RawTCP.TLS.AllowInsecure", "is only valid on a connector")
+	}
 	if !settings.Enabled {
 		return
 	}
@@ -1019,7 +1334,18 @@ func (v *validator) rawTLS(object, id string, settings model.RawTLSSettings) {
 }
 
 func (v *validator) rawDTLS(object, id string, settings model.RawDTLSSettings) {
-	v.validateRawSecurity("RawUDP.DTLS", object, id, settings.Enabled, settings.CertFile, settings.KeyFile, settings.CAFile, settings.ServerName, settings.ALPN, settings.MinVersion, settings.MaxVersion)
+	v.validateRawSecurity("RawUDP.DTLS", object, id, settings.Enabled, settings.CertFile, settings.KeyFile, settings.ServerName, settings.MinVersion, settings.MaxVersion)
+	minRank := v.rawTLSVersionRank(object, id, "RawUDP.DTLS.MinVersion", settings.MinVersion)
+	maxRank := v.rawTLSVersionRank(object, id, "RawUDP.DTLS.MaxVersion", settings.MaxVersion)
+	if minRank > 12 || (maxRank > 0 && maxRank < 12) {
+		v.add(object, id, "RawUDP.DTLS.MinVersion", "the current DTLS transport uses DTLS 1.2, which must be inside the selected range")
+	}
+	if object == "Connector" && (strings.TrimSpace(settings.CertFile) != "" || strings.TrimSpace(settings.KeyFile) != "") {
+		v.add(object, id, "RawUDP.DTLS.CertFile", "client certificates are not part of the connector DTLS contract")
+	}
+	if object == "Listener" && settings.AllowInsecure {
+		v.add(object, id, "RawUDP.DTLS.AllowInsecure", "is only valid on a connector")
+	}
 	v.positive("RawUDP.DTLS.MTU", object, id, settings.MTU)
 	v.positive("RawUDP.DTLS.ReplayWindow", object, id, settings.ReplayWindow)
 	if !settings.Enabled {
@@ -1035,14 +1361,13 @@ func (v *validator) rawDTLS(object, id string, settings model.RawDTLSSettings) {
 	}
 }
 
-func (v *validator) validateRawSecurity(prefix, object, id string, enabled bool, certFile, keyFile, caFile, serverName string, alpn []string, minVersion, maxVersion string) {
+func (v *validator) validateRawSecurity(prefix, object, id string, enabled bool, certFile, keyFile, serverName, minVersion, maxVersion string) {
 	for _, item := range []struct {
 		field string
 		value string
 	}{
 		{prefix + ".CertFile", certFile},
 		{prefix + ".KeyFile", keyFile},
-		{prefix + ".CAFile", caFile},
 		{prefix + ".ServerName", serverName},
 	} {
 		if strings.ContainsRune(item.value, 0) {
@@ -1054,16 +1379,6 @@ func (v *validator) validateRawSecurity(prefix, object, id string, enabled bool,
 	}
 	if strings.TrimSpace(keyFile) == "" && strings.TrimSpace(certFile) != "" && enabled {
 		v.add(object, id, prefix+".KeyFile", "is required when cert file is set")
-	}
-	for i, proto := range alpn {
-		field := fmt.Sprintf("%s.ALPN[%d]", prefix, i)
-		if proto == "" {
-			v.add(object, id, field, "must not be empty")
-			continue
-		}
-		if strings.ContainsAny(proto, "\x00 \t\r\n") {
-			v.add(object, id, field, "must not contain whitespace or NUL bytes")
-		}
 	}
 	minRank := v.rawTLSVersionRank(object, id, prefix+".MinVersion", minVersion)
 	maxRank := v.rawTLSVersionRank(object, id, prefix+".MaxVersion", maxVersion)
@@ -1150,36 +1465,6 @@ func (v *validator) optionalAddrFamily(object, id, field, value string) int {
 		return 4
 	}
 	return 6
-}
-
-func (v *validator) deviceDNS(deviceID string, dns *model.DNSConfig) {
-	if dns == nil || !dns.Enabled {
-		return
-	}
-	if len(dns.Nameservers) == 0 {
-		v.add("Device", deviceID, "DNS.Nameservers", "is required when DNS is enabled")
-	}
-	for _, nameserver := range dns.Nameservers {
-		if _, err := netip.ParseAddr(nameserver); err != nil {
-			v.add("Device", deviceID, "DNS.Nameservers", fmt.Sprintf("%q is invalid", nameserver))
-		}
-	}
-	for _, domain := range dns.SearchDomains {
-		if strings.TrimSpace(domain) == "" || strings.ContainsAny(domain, " \t\r\n") {
-			v.add("Device", deviceID, "DNS.SearchDomains", fmt.Sprintf("%q is invalid", domain))
-		}
-	}
-	for _, option := range dns.Options {
-		if strings.TrimSpace(option) == "" || strings.ContainsAny(option, " \t\r\n") {
-			v.add("Device", deviceID, "DNS.Options", fmt.Sprintf("%q is invalid", option))
-		}
-	}
-	if strings.ContainsRune(dns.OutputPath, 0) {
-		v.add("Device", deviceID, "DNS.OutputPath", "must not contain NUL")
-	}
-	if dns.OutputPath != "" && !strings.HasPrefix(dns.OutputPath, "/") {
-		v.add("Device", deviceID, "DNS.OutputPath", "must be an absolute Linux path")
-	}
 }
 
 func ref[T any](v *validator, object, id, field, target string, index map[string]T) {

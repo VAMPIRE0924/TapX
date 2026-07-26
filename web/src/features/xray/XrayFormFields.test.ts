@@ -16,7 +16,6 @@ import {
   newInboundHysteriaStreamSlice,
   shouldShowInboundProtocolTab,
 } from './XrayFormFields';
-import { mtprotoOutboundTagOptions } from './protocols/MtprotoInboundFields';
 import { newInboundRealitySettings, newInboundTlsSettings, newOutboundTlsSettings } from './security/defaults';
 
 describe('Xray form capability matrix', () => {
@@ -32,7 +31,6 @@ describe('Xray form capability matrix', () => {
       'mixed',
       'tunnel',
       'tun',
-      'mtproto',
     ]);
   });
 
@@ -146,7 +144,7 @@ describe('Xray form capability matrix', () => {
 
   it('exposes stream settings only for protocols that use them', () => {
     const enabled = ['vmess', 'vless', 'trojan', 'shadowsocks', 'hysteria', 'wireguard', 'tunnel'];
-    const disabled = ['http', 'mixed', 'tun', 'mtproto', 'freedom', 'blackhole', 'dns', 'loopback'];
+    const disabled = ['http', 'mixed', 'tun', 'freedom', 'blackhole', 'dns', 'loopback'];
     for (const protocol of enabled) expect(canEnableStream(protocol), protocol).toBe(true);
     for (const protocol of disabled) expect(canEnableStream(protocol), protocol).toBe(false);
   });
@@ -187,7 +185,7 @@ describe('Xray form capability matrix', () => {
   });
 
   it('shows the listener protocol tab only when it has usable fields', () => {
-    const alwaysVisible = new Set(['vless', 'shadowsocks', 'http', 'mixed', 'wireguard', 'tunnel', 'tun', 'mtproto']);
+    const alwaysVisible = new Set(['vless', 'shadowsocks', 'http', 'mixed', 'wireguard', 'tunnel', 'tun']);
     for (const runtime of ['embedded-xray', 'external-xray']) {
       for (const protocol of inboundXrayProtocolOptions.map((item) => item.value)) {
         const expected = alwaysVisible.has(protocol);
@@ -211,13 +209,4 @@ describe('Xray form capability matrix', () => {
     }
   });
 
-});
-
-describe('MTProto outbound tags', () => {
-  it('normalizes connector tags without blank or duplicate entries', () => {
-    expect(mtprotoOutboundTagOptions(['edge-a', ' edge-b ', '', 'edge-a'])).toEqual([
-      { value: 'edge-a', label: 'edge-a' },
-      { value: 'edge-b', label: 'edge-b' },
-    ]);
-  });
 });

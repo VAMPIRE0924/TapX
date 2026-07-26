@@ -78,8 +78,10 @@ import { labelDevice, labelEndpoint, nextId, splitList } from '../shared/tapx-mo
 import { BulkAdjustModal, BulkCreateModal, ListenerBindingModal, type BulkCreateInput } from '../features/users/UserBulkModals';
 import { applyBulkUserAdjustment, changeListenerIDs, type BulkUserAdjustment } from '../features/users/userBulk';
 import { exportUserBundle, importUserBundle } from '../features/users/userTransfer';
+import { AdvancedConfigEditor } from '../components/AdvancedConfigEditor';
 import { useMediaQuery } from '../shared/useMediaQuery';
 import { isManagedUserAddressRemark, managedUserAddressRemark } from '../shared/managed-objects';
+import { clearBindingReferences, relationKey } from '../shared/config-relations';
 import { randomLowerAndNumber, randomUUID } from '../shared/random';
 import { unixSeconds as nowSecond } from '../shared/time';
 import { userProtocols } from '../features/users/userProtocols';
@@ -93,37 +95,18 @@ import {
 import { useI18n } from '../i18n/I18nProvider';
 import './UserPage.css';
 
-type CredentialType =
-  | 'vless'
-  | 'vmess'
-  | 'trojan'
-  | 'shadowsocks'
-  | 'hysteria'
-  | 'wireguard'
-  | 'raw-tcp'
-  | 'raw-udp';
-
 type TrafficShape = {
   up?: number;
   down?: number;
-  Up?: number;
-  Down?: number;
   lastOnline?: number;
-  LastOnline?: number;
 };
 
 type UserRecord = TapxClient & NodeOwned & {
-  CredentialType?: CredentialType | string;
   ListenerIDs?: string[];
   Traffic?: TrafficShape;
-  traffic?: TrafficShape;
-  TrafficUp?: number;
-  TrafficDown?: number;
   CreatedAt?: number;
   UpdatedAt?: number;
   Online?: boolean;
-  online?: boolean;
-  IsOnline?: boolean;
 };
 
 type UserDraft = UserRecord & {
@@ -162,8 +145,6 @@ const defaultUser: UserDraft = {
   Email: '',
   ListenerID: '',
   ListenerIDs: [],
-  CredentialType: 'vless',
-  CredentialValue: '',
   UUID: '',
   Password: '',
   Auth: '',
@@ -195,7 +176,6 @@ const credentialOptions = [
   { value: 'trojan', label: 'Trojan' },
   { value: 'shadowsocks', label: 'Shadowsocks' },
   { value: 'hysteria', label: 'Hysteria' },
-  { value: 'wireguard', label: 'WireGuard' },
   { value: 'raw-tcp', label: 'Raw TCP' },
   { value: 'raw-udp', label: 'Raw UDP' },
 ];
@@ -400,7 +380,6 @@ export function UserPage() {
       Password: randomLowerAndNumber(16),
       Auth: randomLowerAndNumber(16),
       VKey: randomLowerAndNumber(24),
-      CredentialValue: uuid,
       ListenerIDs: [],
     });
     setEditing(null);
@@ -418,9 +397,9 @@ export function UserPage() {
       ...defaultUser,
       ...record,
       ListenerIDs: listenerIdsFor(record),
-      UUID: record.UUID || (usesUuid(record.CredentialType) ? record.CredentialValue : '') || '',
-      Password: record.Password || (record.CredentialType === 'trojan' || record.CredentialType === 'shadowsocks' ? record.CredentialValue : '') || '',
-      Auth: record.Auth || (record.CredentialType === 'hysteria' ? record.CredentialValue : '') || '',
+      UUID: record.UUID || '',
+      Password: record.Password || '',
+      Auth: record.Auth || '',
       VKey: record.VKey || '',
       TrafficCap: bytesToGB(record.TrafficCap),
       UploadRateMbps: bpsToMbps(record.UploadRateLimit),
@@ -428,10 +407,10 @@ export function UserPage() {
       DelayedStart: Number(record.ExpiresAt || 0) < 0,
       ExpireDays: Number(record.ExpiresAt || 0) < 0 ? Math.round(Number(record.ExpiresAt) / -86400) : 0,
       ExpireAtValue: Number(record.ExpiresAt || 0) > 0 ? dayjs(Number(record.ExpiresAt) * 1000) : null,
-      AllowedDevicesText: record.AllowedDeviceIDs || record.AllowedDevices || (record.Binding?.DeviceID ? [record.Binding.DeviceID] : []),
-      AllowedIPsText: (record.AllowedIPs || address?.IPv4CIDRs || []).join('\n'),
+      AllowedDevicesText: record.AllowedDeviceIDs || (record.Binding?.DeviceID ? [record.Binding.DeviceID] : []),
+      AllowedIPsText: (address?.IPv4CIDRs || []).join('\n'),
       AllowedIPv6Text: (address?.IPv6CIDRs || []).join('\n'),
-      AllowedMACsText: (record.AllowedMACs || address?.MACs || []).join('\n'),
+      AllowedMACsText: (address?.MACs || []).join('\n'),
     });
     setEditing(record);
     setOpen(true);
@@ -441,7 +420,6 @@ export function UserPage() {
     await form.validateFields();
     const values = form.getFieldsValue(true) as UserDraft;
     const id = values.ID || editing?.ID || nextId('user', new Set(users.map((item) => item.ID)));
-    const credential = primaryCredential(values);
     const allowedIPs = splitList(values.AllowedIPsText || '');
     const allowedIPv6 = splitList(values.AllowedIPv6Text || '');
     const allowedMACs = splitList(values.AllowedMACsText || '');
@@ -476,7 +454,6 @@ export function UserPage() {
       Email: values.Email || `${id}@tapx.local`,
       ListenerID: listenerIds[0] || '',
       ListenerIDs: listenerIds,
-      CredentialValue: credential,
       UUID: values.UUID || '',
       Password: values.Password || '',
       Auth: values.Auth || '',
@@ -494,19 +471,9 @@ export function UserPage() {
         DeviceID: allowedDevices.length === 1 ? allowedDevices[0] : undefined,
       },
       AddressID: addressResult.addressId || '',
-      AllowedDevices: allowedDevices,
-      AllowedIPs: allowedIPs,
-      AllowedMACs: allowedMACs,
       CreatedAt: editing?.CreatedAt || now,
       UpdatedAt: now,
     };
-    delete next.Security;
-    delete next.ReverseTag;
-    delete next.Flow;
-    delete next.WireguardPrivateKey;
-    delete next.WireguardPublicKey;
-    delete next.WireguardPreSharedKey;
-    delete next.WireguardAllowedIPs;
     const materializedVKey = materializeClientVKey(next, config.VKeys || [], {
       listeners: config.Listeners || [],
       connectors: config.Connectors || [],
@@ -618,15 +585,18 @@ export function UserPage() {
     const nextUsers = users.filter((item) => !target.has(nodeObjectKey(item)));
     const nextAddresses = (config.Addresses || []).filter((item) => !isTargetReference(item, item.ClientID));
     const keptAddressIDs = new Set(nextAddresses.map((item) => `${nodeIDOf(item)}:${item.ID}`));
+    const removedRoutes = (config.Routes || []).filter((item) => isTargetReference(item, item.ClientID));
+    const removedRouteKeys = new Set(removedRoutes.map((route) => relationKey(route, route.ID)));
     const nextRoutes = (config.Routes || []).filter((item) => !isTargetReference(item, item.ClientID)).map((item) => (
       item.AddressID && !keptAddressIDs.has(`${nodeIDOf(item)}:${item.AddressID}`) ? { ...item, AddressID: '' } : item
     ));
-    const nextListeners = (config.Listeners || []).map((item) => isTargetReference(item, item.Binding?.ClientID)
+    const nextListeners = clearBindingReferences((config.Listeners || []).map((item) => isTargetReference(item, item.Binding?.ClientID)
       ? { ...item, Binding: { ...item.Binding, ClientID: '' } }
-      : item);
-    const nextConnectors = (config.Connectors || []).map((item) => isTargetReference(item, item.Binding?.ClientID)
+      : item), 'RouteID', removedRouteKeys);
+    const nextConnectors = clearBindingReferences((config.Connectors || []).map((item) => isTargetReference(item, item.Binding?.ClientID)
       ? { ...item, Binding: { ...item.Binding, ClientID: '' } }
-      : item);
+      : item), 'RouteID', removedRouteKeys);
+    const cleanedUsers = clearBindingReferences(nextUsers, 'RouteID', removedRouteKeys);
     const candidateVKeys = new Set(records
       .filter((item) => item.Binding?.VKeyID?.startsWith(`vkey-${item.ID}`))
       .map((item) => `${nodeIDOf(item)}:${item.Binding?.VKeyID}`)
@@ -648,7 +618,7 @@ export function UserPage() {
     });
     void commitConfig({
       ...config,
-      Clients: nextUsers,
+      Clients: cleanedUsers,
       Addresses: nextAddresses,
       VKeys: nextVKeys,
       Routes: nextRoutes,
@@ -726,15 +696,11 @@ export function UserPage() {
         Email: normalizedEmail,
         ListenerID: input.listenerIds[0] || '',
         ListenerIDs: input.listenerIds,
-        CredentialType: 'vless',
-        CredentialValue: uuid,
         UUID: uuid,
         Password: randomLowerAndNumber(16),
         Auth: randomLowerAndNumber(16),
         VKey: input.vKey,
         AllowedDeviceIDs: input.allowedDevices,
-        AllowedDevices: input.allowedDevices,
-        AllowedIPs: input.allowedIPs,
         AddressID: addressResult.addressId,
         Binding: { AddressID: addressResult.addressId || undefined },
         ExpiresAt: input.expiresAt,
@@ -931,11 +897,13 @@ export function UserPage() {
   }
 
   const columns = useMemo<TableColumnsType<UserRecord>>(() => [
-    { title: t('node.sourceNode'), key: 'ManagedNodeID', width: 150, render: (_, record) => <NodeSourceTag value={record} /> },
+    { title: 'ID', key: 'Index', width: 64, align: 'center', fixed: 'left', render: (_, _record, index) => index + 1 },
+    { title: t('node.sourceNode'), key: 'ManagedNodeID', width: 150, fixed: 'left', render: (_, record) => <NodeSourceTag value={record} /> },
     {
       title: t('user.actions'),
       key: 'actions',
       width: 170,
+      fixed: 'left',
       render: (_, record) => (
         <Space size={2}>
           <Tooltip title={t('user.info')}>
@@ -954,6 +922,9 @@ export function UserPage() {
           </Tooltip>
           <Tooltip title={t('user.edit')}>
             <Button size="small" type="text" icon={<EditOutlined />} aria-label={t('user.edit')} onClick={() => openEdit(record)} />
+          </Tooltip>
+          <Tooltip title={t('user.export')}>
+            <Button size="small" type="text" icon={<ExportOutlined />} aria-label={t('user.export')} onClick={() => exportUsers([record])} />
           </Tooltip>
           <Tooltip title={t('common.delete')}>
             <Popconfirm
@@ -1183,6 +1154,7 @@ export function UserPage() {
                           menu={{ items: [
                             { key: 'reset', label: <><RetweetOutlined /> {t('user.resetTraffic')}</>, onClick: () => void resetTraffic([record]) },
                             { key: 'edit', label: <><EditOutlined /> {t('user.edit')}</>, onClick: () => openEdit(record) },
+                            { key: 'export', label: <><ExportOutlined /> {t('user.export')}</>, onClick: () => exportUsers([record]) },
                             { key: 'delete', danger: true, label: <><DeleteOutlined /> {t('common.delete')}</>, onClick: () => confirmDeleteUser(record) },
                           ] }}
                         >
@@ -1372,6 +1344,12 @@ export function UserPage() {
                   </>
                 ),
               },
+              {
+                key: 'advanced',
+                label: t('common.advancedConfig'),
+                forceRender: true,
+                children: <AdvancedConfigEditor form={form} />,
+              },
             ].sort((left, right) => userTabOrder[String(left.key)] - userTabOrder[String(right.key)])}
           />
         </Form>
@@ -1400,9 +1378,9 @@ export function UserPage() {
                 <tr><td>{t('user.bandwidthLimit')}</td><td><Tag>↑ {formatRateLimit(info.UploadRateLimit, t)}</Tag> <Tag>↓ {formatRateLimit(info.DownloadRateLimit, t)}</Tag></td></tr>
                 <tr><td>{t('user.remaining')}</td><td>{remainingBytes(info) == null ? <Tag color="purple">{t('user.unlimited')}</Tag> : <Tag>{formatBytes(remainingBytes(info) || 0)}</Tag>}</td></tr>
                 <tr><td>{t('user.expiry')}</td><td><Tag color={expiryColor(info)}>{expiryLabel(info, t)}</Tag></td></tr>
-                <tr><td>{t('user.allowedTunTap')}</td><td>{tagList(info.AllowedDevices || [], 'blue', t)}</td></tr>
-                <tr><td>{t('user.sourceIpv4Limit')}</td><td>{tagList(info.AllowedIPs || [], undefined, t)}</td></tr>
-                <tr><td>{t('user.sourceMacLimit')}</td><td>{tagList(info.AllowedMACs || [], undefined, t)}</td></tr>
+                <tr><td>{t('user.allowedTunTap')}</td><td>{tagList(info.AllowedDeviceIDs || [], 'blue', t)}</td></tr>
+                <tr><td>{t('user.sourceIpv4Limit')}</td><td>{tagList(userAddressLimit(info, addresses)?.IPv4CIDRs || [], undefined, t)}</td></tr>
+                <tr><td>{t('user.sourceMacLimit')}</td><td>{tagList(userAddressLimit(info, addresses)?.MACs || [], undefined, t)}</td></tr>
                 <tr><td>{t('user.createdAt')}</td><td><Tag>{dateTimeLabel(info.CreatedAt)}</Tag></td></tr>
                 <tr><td>{t('user.updatedAt')}</td><td><Tag>{dateTimeLabel(info.UpdatedAt)}</Tag></td></tr>
                 {info.Name || info.Remark ? <tr><td>{t('user.remark')}</td><td><Tag className="info-large-tag">{info.Name || info.Remark}</Tag></td></tr> : null}
@@ -1636,16 +1614,15 @@ function statusFilterLabel(value: string, t: ReturnType<typeof useI18n>['t']): s
 }
 
 function trafficShape(user: UserRecord): { up: number; down: number } {
-  const traffic = user.Traffic || user.traffic || {};
+  const traffic = user.Traffic || {};
   return {
-    up: Number(traffic.up ?? traffic.Up ?? user.TrafficUp ?? 0),
-    down: Number(traffic.down ?? traffic.Down ?? user.TrafficDown ?? 0),
+    up: Number(traffic.up ?? 0),
+    down: Number(traffic.down ?? 0),
   };
 }
 
 function lastOnlineLabel(user: UserRecord): string {
-  const traffic = user.Traffic || user.traffic || {};
-  return dateTimeLabel(Number(traffic.lastOnline ?? traffic.LastOnline ?? 0));
+  return dateTimeLabel(Number(user.Traffic?.lastOnline ?? 0));
 }
 
 function dateTimeLabel(value?: number): string {
@@ -1690,7 +1667,7 @@ function listenerIdsFor(record: UserRecord): string[] {
 }
 
 function isOnline(user: UserRecord): boolean {
-  return Boolean(user.Online || user.online || user.IsOnline);
+  return Boolean(user.Online);
 }
 
 function statusMatches(user: UserRecord, status: string): boolean {
@@ -1723,9 +1700,9 @@ function isExpiring(user: UserRecord, now = Date.now() / 1000): boolean {
 }
 
 function trafficUsedBytes(user: UserRecord): number {
-  const traffic = user.Traffic || user.traffic || {};
-  const up = user.TrafficUp ?? traffic.up ?? traffic.Up ?? 0;
-  const down = user.TrafficDown ?? traffic.down ?? traffic.Down ?? 0;
+  const traffic = user.Traffic || {};
+  const up = traffic.up ?? 0;
+  const down = traffic.down ?? 0;
   return Math.max(0, Number(up) || 0) + Math.max(0, Number(down) || 0);
 }
 
@@ -1802,9 +1779,7 @@ function sortUsers(users: UserRecord[], sort: string): UserRecord[] {
       case 'created:desc':
         return (right.CreatedAt || 0) - (left.CreatedAt || 0);
       case 'online:desc': {
-        const leftTraffic = left.Traffic || left.traffic || {};
-        const rightTraffic = right.Traffic || right.traffic || {};
-        return Number(rightTraffic.lastOnline ?? rightTraffic.LastOnline ?? 0) - Number(leftTraffic.lastOnline ?? leftTraffic.LastOnline ?? 0);
+        return Number(right.Traffic?.lastOnline ?? 0) - Number(left.Traffic?.lastOnline ?? 0);
       }
       case 'email:asc':
         return (left.Email || left.ID).localeCompare(right.Email || right.ID);
@@ -1827,20 +1802,8 @@ function sortUsers(users: UserRecord[], sort: string): UserRecord[] {
   return next;
 }
 
-function usesUuid(type?: string): boolean {
-  return type === 'vless' || type === 'vmess';
-}
-
 function credentialLabel(type?: string): string {
   return credentialOptions.find((item) => item.value === type)?.label || type || 'VLESS';
-}
-
-function primaryCredential(user: UserDraft): string {
-  if (usesUuid(user.CredentialType)) return user.UUID || user.CredentialValue || '';
-  if (user.CredentialType === 'trojan' || user.CredentialType === 'shadowsocks') return user.Password || user.CredentialValue || '';
-  if (user.CredentialType === 'hysteria') return user.Auth || user.CredentialValue || '';
-  if (user.CredentialType === 'raw-tcp' || user.CredentialType === 'raw-udp') return user.VKey || '';
-  return user.CredentialValue || '';
 }
 
 function hydrateUserConfig(config: RuntimeConfig): RuntimeConfig {
@@ -1854,13 +1817,19 @@ function hydrateUserConfig(config: RuntimeConfig): RuntimeConfig {
         ...record,
         ListenerIDs: record.ListenerIDs?.length ? record.ListenerIDs : (record.ListenerID ? [record.ListenerID] : []),
         VKey: vkey?.Value || '',
-        AllowedDevices: record.AllowedDeviceIDs || [],
-        UUID: record.UUID || (usesUuid(record.CredentialType) ? record.CredentialValue || '' : ''),
-        Password: record.Password || (record.CredentialType === 'trojan' || record.CredentialType === 'shadowsocks' ? record.CredentialValue || '' : ''),
-        Auth: record.Auth || (record.CredentialType === 'hysteria' ? record.CredentialValue || '' : ''),
+        UUID: record.UUID || '',
+        Password: record.Password || '',
+        Auth: record.Auth || '',
       };
     }),
   };
+}
+
+function userAddressLimit(user: UserRecord, addresses: TapxAddressLimit[]): TapxAddressLimit | undefined {
+  const addressID = user.AddressID || user.Binding?.AddressID;
+  return addressID
+    ? addresses.find((item) => item.ID === addressID && nodeIDOf(item) === nodeIDOf(user))
+    : undefined;
 }
 
 function hydrateUserStats(config: RuntimeConfig, quotaStates: Array<ClientQuotaState & NodeOwned>): RuntimeConfig {
@@ -1937,10 +1906,10 @@ async function copyShareLinks(links: string[], messageApi: ReturnType<typeof mes
 
 function credentialToken(user: UserRecord, kind: 'uuid' | 'password' | 'hysteria', t: ReturnType<typeof useI18n>['t']) {
   const value = kind === 'uuid'
-    ? user.UUID || (usesUuid(user.CredentialType) ? user.CredentialValue : '')
+    ? user.UUID || ''
     : kind === 'password'
-      ? user.Password || (user.CredentialType === 'trojan' || user.CredentialType === 'shadowsocks' ? user.CredentialValue : '')
-      : user.Auth || (user.CredentialType === 'hysteria' ? user.CredentialValue : '');
+      ? user.Password || ''
+      : user.Auth || '';
   return value ? <Tag className="info-large-tag">{value}</Tag> : <Tag>{t('user.none')}</Tag>;
 }
 

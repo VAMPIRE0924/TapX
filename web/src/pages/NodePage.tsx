@@ -312,6 +312,7 @@ export function NodePage() {
   }
 
   const columns = useMemo<TableColumnsType<ManagedNode>>(() => [
+    { title: 'ID', key: 'Index', width: 64, align: 'center', fixed: 'left', render: (_, _record, index) => index + 1 },
     {
       title: t('node.actions'),
       key: 'actions',
@@ -357,7 +358,7 @@ export function NodePage() {
     {
       title: (
         <Space size={5}>
-          <span>{t('node.address')}</span>
+          <span>{t('node.panelAddress')}</span>
           <Button
             type="text"
             size="small"
@@ -389,7 +390,7 @@ export function NodePage() {
     { title: t('node.externalXrayVersion'), dataIndex: 'ExternalXrayVersion', width: 126, align: 'center', render: versionText },
     { title: t('node.uptime'), dataIndex: 'Uptime', width: 96, align: 'center', render: (value?: string) => value || '-' },
     {
-      title: t('node.objects'),
+      title: t('node.objectCount'),
       key: 'Objects',
       width: 92,
       align: 'center',

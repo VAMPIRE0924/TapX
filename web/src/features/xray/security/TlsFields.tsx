@@ -416,7 +416,7 @@ export function XrayOutboundTlsFields() {
         <Input placeholder="cloudflare-dns.com" />
       </Form.Item>
       <Form.Item label="Pinned SHA256" name={['streamSettings', 'tlsSettings', 'pinnedPeerCertSha256']}>
-        <Input placeholder="base64 SHA256" />
+        <Input placeholder="SHA-256 hex" />
       </Form.Item>
     </>
   );

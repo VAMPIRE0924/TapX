@@ -13,21 +13,24 @@ import (
 )
 
 type Supervisor struct {
-	udpPipes       []*UDPPipeHandle
-	udpDispatches  []*udpReuseportGroup
-	dtlsDispatches []*DTLSDispatchHandle
-	tcpPipes       []*TCPPipeHandle
-	tcpDispatches  []*TCPDispatchHandle
-	xrayPipes      []*XrayPipeHandle
-	xray           *xrayruntime.Manager
-	externalXray   *xrayruntime.Manager
-	pathMTU        *pathmtu.Cache
+	fabric            *deviceFabric
+	standaloneDevices []standaloneDeviceHandle
+	udpPipes          []*UDPPipeHandle
+	udpDispatches     []*udpReuseportGroup
+	dtlsDispatches    []*DTLSDispatchHandle
+	tcpPipes          []*TCPPipeHandle
+	tcpDispatches     []*TCPDispatchHandle
+	xrayPipes         []*XrayPipeHandle
+	xray              *xrayruntime.Manager
+	externalXray      *xrayruntime.Manager
+	pathMTU           *pathmtu.Cache
 }
 
 type ConnectorDiagnostic struct {
 	Kind          string
 	Transport     string
 	Target        string
+	AddressFamily string
 	Delay         time.Duration
 	TCPMSS        int
 	PathMTU       int
@@ -49,6 +52,11 @@ func (s *Supervisor) Start(runtime *config.GeneratedRuntime) error {
 	if len(s.udpPipes) != 0 || len(s.udpDispatches) != 0 || len(s.dtlsDispatches) != 0 || len(s.tcpPipes) != 0 || len(s.tcpDispatches) != 0 || len(s.xrayPipes) != 0 || s.xray != nil || s.externalXray != nil {
 		return fmt.Errorf("core: supervisor already started")
 	}
+	fabric, err := newDeviceFabric(runtime)
+	if err != nil {
+		return err
+	}
+	s.fabric = fabric
 	if err := s.startTapX(runtime); err != nil {
 		_ = s.Stop()
 		return err
@@ -121,6 +129,9 @@ func (s *Supervisor) StopComponent(component string) error {
 }
 
 func (s *Supervisor) startTapX(runtime *config.GeneratedRuntime) error {
+	if err := s.startStandaloneDevices(runtime); err != nil {
+		return err
+	}
 	dtlsGroups := make(map[string]bool)
 	for _, dispatch := range runtime.UDPDispatches {
 		prototype, ok := findUDPDispatchPrototype(runtime.UDPPipes, dispatch.ID)
@@ -128,7 +139,7 @@ func (s *Supervisor) startTapX(runtime *config.GeneratedRuntime) error {
 			return fmt.Errorf("core: UDP dispatch %s has no worker pipe", dispatch.ID)
 		}
 		if prototype.DTLS.Enabled {
-			handle, children, err := startDTLSDispatch(dispatch, runtime.UDPPipes, runtime.Devices, s.pathMTU)
+			handle, children, err := startDTLSDispatch(dispatch, runtime.UDPPipes, runtime.Devices, s.pathMTU, s.fabric)
 			if err != nil {
 				return err
 			}
@@ -151,14 +162,14 @@ func (s *Supervisor) startTapX(runtime *config.GeneratedRuntime) error {
 		if !ok {
 			return fmt.Errorf("core: udp pipe %s references missing device %s", pipe.EndpointID, pipe.DeviceID)
 		}
-		handle, err := startUDPPipeWithCache(pipe, device, s.pathMTU)
+		handle, err := startUDPPipeWithFabric(pipe, device, s.pathMTU, s.fabric)
 		if err != nil {
 			return err
 		}
 		s.udpPipes = append(s.udpPipes, handle)
 	}
 	for _, dispatch := range runtime.TCPDispatches {
-		handle, children, err := startTCPDispatch(dispatch, runtime.TCPPipes, runtime.Devices)
+		handle, children, err := startTCPDispatch(dispatch, runtime.TCPPipes, runtime.Devices, s.fabric)
 		if err != nil {
 			return err
 		}
@@ -173,7 +184,11 @@ func (s *Supervisor) startTapX(runtime *config.GeneratedRuntime) error {
 		if !ok {
 			return fmt.Errorf("core: tcp pipe %s references missing device %s", pipe.EndpointID, pipe.DeviceID)
 		}
-		handle, err := startTCPPipe(pipe, device)
+		var shared *tcpSharedDevice
+		if s.fabric != nil {
+			shared = s.fabric.Port(tcpFabricKey(pipe))
+		}
+		handle, err := startTCPPipeShared(pipe, device, shared)
 		if err != nil {
 			return err
 		}
@@ -193,11 +208,17 @@ func (s *Supervisor) startEmbeddedXray(runtime *config.GeneratedRuntime) error {
 		if !ok {
 			return fmt.Errorf("core: xray pipe %s references missing device %s", pipe.EndpointID, pipe.DeviceID)
 		}
-		handle, err := startXrayPipeShared(pipe, device, manager, devices[pipe.DeviceID])
+		shared := devices[pipe.DeviceID]
+		if s.fabric != nil {
+			if port := s.fabric.Port(xrayFabricKey(pipe)); port != nil {
+				shared = port
+			}
+		}
+		handle, err := startXrayPipeShared(pipe, device, manager, shared)
 		if err != nil {
 			return err
 		}
-		if handle.owner {
+		if handle.owner && shared == nil {
 			devices[pipe.DeviceID] = handle.shared
 		}
 		s.xrayPipes = append(s.xrayPipes, handle)
@@ -218,11 +239,17 @@ func (s *Supervisor) startEmbeddedXray(runtime *config.GeneratedRuntime) error {
 		if !ok {
 			return fmt.Errorf("core: xray pipe %s references missing device %s", pipe.EndpointID, pipe.DeviceID)
 		}
-		handle, err := startXrayPipeShared(pipe, device, manager, devices[pipe.DeviceID])
+		shared := devices[pipe.DeviceID]
+		if s.fabric != nil {
+			if port := s.fabric.Port(xrayFabricKey(pipe)); port != nil {
+				shared = port
+			}
+		}
+		handle, err := startXrayPipeShared(pipe, device, manager, shared)
 		if err != nil {
 			return err
 		}
-		if handle.owner {
+		if handle.owner && shared == nil {
 			devices[pipe.DeviceID] = handle.shared
 		}
 		s.xrayPipes = append(s.xrayPipes, handle)
@@ -255,11 +282,17 @@ func (s *Supervisor) startExternalXray(runtime *config.GeneratedRuntime) error {
 		if !ok {
 			return fmt.Errorf("core: external xray bridge %s references missing device %s", pipe.EndpointID, pipe.DeviceID)
 		}
-		handle, err := startTCPPipeShared(*pipe, device, devices[pipe.DeviceID])
+		shared := devices[pipe.DeviceID]
+		if s.fabric != nil {
+			if port := s.fabric.Port(tcpFabricKey(*pipe)); port != nil {
+				shared = port
+			}
+		}
+		handle, err := startTCPPipeShared(*pipe, device, shared)
 		if err != nil {
 			return err
 		}
-		if handle.owner {
+		if handle.owner && shared == nil {
 			devices[pipe.DeviceID] = handle.shared
 		}
 		s.tcpPipes = append(s.tcpPipes, handle)
@@ -282,11 +315,17 @@ func (s *Supervisor) startExternalXray(runtime *config.GeneratedRuntime) error {
 		if !ok {
 			return fmt.Errorf("core: external xray bridge %s references missing device %s", pipe.EndpointID, pipe.DeviceID)
 		}
-		handle, err := startTCPPipeShared(pipe, device, devices[pipe.DeviceID])
+		shared := devices[pipe.DeviceID]
+		if s.fabric != nil {
+			if port := s.fabric.Port(tcpFabricKey(pipe)); port != nil {
+				shared = port
+			}
+		}
+		handle, err := startTCPPipeShared(pipe, device, shared)
 		if err != nil {
 			return err
 		}
-		if handle.owner {
+		if handle.owner && shared == nil {
 			devices[pipe.DeviceID] = handle.shared
 		}
 		s.tcpPipes = append(s.tcpPipes, handle)
@@ -329,34 +368,38 @@ func (s *Supervisor) stopTapX() error {
 		}
 	}
 	s.udpDispatches = nil
+	for i := len(s.standaloneDevices) - 1; i >= 0; i-- {
+		if err := s.standaloneDevices[i].Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	s.standaloneDevices = nil
 	return firstErr
 }
 
 func (s *Supervisor) stopEmbeddedXray() error {
 	var firstErr error
-	if s.xray != nil {
-		if err := s.xray.Stop(); err != nil {
-			firstErr = err
-		}
-		s.xray = nil
-	}
+	// Stop TapX-owned streams first. The official Xray core waits for active
+	// outbound dispatches while closing, and those dispatches only return after
+	// their frame bridge is cancelled and its connection is closed.
 	for i := len(s.xrayPipes) - 1; i >= 0; i-- {
 		if err := s.xrayPipes[i].Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	s.xrayPipes = nil
+	if s.xray != nil {
+		if err := s.xray.Stop(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.xray = nil
+	}
 	return firstErr
 }
 
 func (s *Supervisor) stopExternalXray() error {
 	var firstErr error
-	if s.externalXray != nil {
-		if err := s.externalXray.Stop(); err != nil {
-			firstErr = err
-		}
-		s.externalXray = nil
-	}
+	// Tear down local frame bridges before waiting for the external process.
 	for i := len(s.tcpPipes) - 1; i >= 0; i-- {
 		if !s.tcpPipes[i].Pipe.ExternalXrayBridge {
 			continue
@@ -365,6 +408,12 @@ func (s *Supervisor) stopExternalXray() error {
 			firstErr = err
 		}
 		s.tcpPipes = append(s.tcpPipes[:i], s.tcpPipes[i+1:]...)
+	}
+	if s.externalXray != nil {
+		if err := s.externalXray.Stop(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.externalXray = nil
 	}
 	return firstErr
 }
@@ -376,6 +425,12 @@ func (s *Supervisor) Stop() error {
 	}
 	if err := s.stopTapX(); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if s.fabric != nil {
+		if err := s.fabric.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.fabric = nil
 	}
 	return firstErr
 }
