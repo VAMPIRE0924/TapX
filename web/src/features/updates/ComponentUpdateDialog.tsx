@@ -14,6 +14,7 @@ import './ComponentUpdateDialog.css';
 interface ComponentUpdateDialogProps {
   open: boolean;
   component: UpdateComponent;
+  currentVersion?: string;
   externalXrayPath?: string;
   onClose: () => void;
   onUpdated?: () => void;
@@ -22,6 +23,7 @@ interface ComponentUpdateDialogProps {
 export function ComponentUpdateDialog({
   open,
   component,
+  currentVersion,
   externalXrayPath,
   onClose,
   onUpdated,
@@ -127,7 +129,7 @@ export function ComponentUpdateDialog({
               </div>
               {development ? <Alert type="info" showIcon title={t('update.developmentWarning')} /> : null}
               <div className="update-version-list">
-                <VersionSummary label={t('update.currentPanelVersion')} version={current?.version || catalog?.currentVersion} color="green" />
+                <VersionSummary label={t('update.currentPanelVersion')} version={currentVersion || current?.version || catalog?.currentVersion} color="green" />
                 {latest && !latest.current ? (
                   <VersionSummary label={t('update.latestPanelVersion')} version={latest.version} color="purple" />
                 ) : (
@@ -142,7 +144,7 @@ export function ComponentUpdateDialog({
             <>
               {component === 'tapx' ? (
                 <div className="update-version-list">
-                  <VersionSummary label="TapX" version={catalog?.currentVersion} color="green" />
+                  <VersionSummary label="TapX" version={currentVersion || catalog?.currentVersion} color="green" />
                   <VersionSummary label={t('dashboard.embeddedXray')} version={catalog?.relatedVersions?.embeddedXray} color="green" />
                 </div>
               ) : null}
