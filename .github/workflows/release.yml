@@ -32,6 +32,11 @@ jobs:
         shell: bash
         run: |
           version="${TAPX_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+)*(_(alpha|beta|pre|rc|cvs|svn|git|hg|p)[0-9]*)?(-r[0-9]+)?$ && ! "$version" =~ ^[0-9]+(\.[0-9]+)*-dev[0-9]*$ ]]; then
+            echo "Unsupported APK version: $version" >&2
+            echo "Use a release version such as 0.2.1 or a numeric development version such as 0.2.1-dev20260726." >&2
+            exit 2
+          fi
           echo "TAPX_VERSION=$version" >> "$GITHUB_ENV"
           if [[ -n "${{ github.event.inputs.openwrt_version }}" ]]; then
             echo "OPENWRT_VERSION=${{ github.event.inputs.openwrt_version }}" >> "$GITHUB_ENV"

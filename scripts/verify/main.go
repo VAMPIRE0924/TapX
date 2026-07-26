@@ -62,7 +62,7 @@ func (v *verifier) checkOpenWrtPackageVersion() {
 	}
 	text := string(payload)
 	for _, want := range []string{
-		"TAPX_PACKAGE_VERSION:=$(subst -dev.,_git,$(TAPX_SOURCE_VERSION))",
+		"TAPX_PACKAGE_VERSION:=$(subst -dev,_git,$(TAPX_SOURCE_VERSION))",
 		"PKG_VERSION:=$(subst -,_,$(TAPX_PACKAGE_VERSION))",
 	} {
 		if !strings.Contains(text, want) {
@@ -70,10 +70,10 @@ func (v *verifier) checkOpenWrtPackageVersion() {
 		}
 	}
 
-	source := "0.2.1-dev.da033f2"
-	normalized := strings.Replace(source, "-dev.", "_git", 1)
+	source := "0.2.1-dev20260726"
+	normalized := strings.Replace(source, "-dev", "_git", 1)
 	normalized = strings.ReplaceAll(normalized, "-", "_")
-	if normalized != "0.2.1_gitda033f2" {
+	if normalized != "0.2.1_git20260726" {
 		v.fail("OpenWrt development package version normalized to %q", normalized)
 	}
 }

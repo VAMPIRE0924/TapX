@@ -2,9 +2,9 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=tapx
 TAPX_SOURCE_VERSION:=$(if $(TAPX_VERSION),$(TAPX_VERSION),0.0.0-dev)
-# apk rejects a dotted development suffix such as "_git.da033f2".
-# Keep the commit identifier while joining it to the conventional "_git" suffix.
-TAPX_PACKAGE_VERSION:=$(subst -dev.,_git,$(TAPX_SOURCE_VERSION))
+# apk accepts its conventional "_git" suffix with an optional numeric revision.
+# Release workflows reject arbitrary textual development suffixes before building.
+TAPX_PACKAGE_VERSION:=$(subst -dev,_git,$(TAPX_SOURCE_VERSION))
 PKG_VERSION:=$(subst -,_,$(TAPX_PACKAGE_VERSION))
 PKG_RELEASE:=3
 PKG_LICENSE:=MIT
