@@ -114,6 +114,8 @@ export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => vo
   const xrayRuntimes = runtime.xrayRuntimes || [];
   const embeddedXray = xrayRuntimes.find((item) => item.runtime === 'embedded');
   const externalXray = xrayRuntimes.find((item) => item.runtime === 'external');
+  const embeddedXrayRunning = runtime.componentStates?.['embedded-xray'] ?? embeddedXray?.running;
+  const externalXrayRunning = runtime.componentStates?.['external-xray'] ?? externalXray?.running;
 
   function confirmRuntimeAction(component: RuntimeComponent, label: string, action: 'stop' | 'restart') {
     Modal.confirm({
@@ -208,8 +210,8 @@ export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => vo
 
         <DashboardCard
           title={t('dashboard.embeddedXray')}
-          status={runtimeStatus(embeddedXray, diagnostics?.components?.embeddedXray, t)}
-          statusTone={embeddedXray?.running ? 'green' : 'orange'}
+          status={runtimeStatus(embeddedXray, runtime.componentStates?.['embedded-xray'], diagnostics?.components?.embeddedXray, t)}
+          statusTone={embeddedXrayRunning ? 'green' : 'orange'}
         >
           <ActionGrid>
             <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'embedded-xray' })} />
@@ -221,8 +223,8 @@ export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => vo
 
         <DashboardCard
           title={t('dashboard.externalXray')}
-          status={runtimeStatus(externalXray, diagnostics?.components?.externalXray, t)}
-          statusTone={externalXray?.running ? 'green' : 'orange'}
+          status={runtimeStatus(externalXray, runtime.componentStates?.['external-xray'], diagnostics?.components?.externalXray, t)}
+          statusTone={externalXrayRunning ? 'green' : 'orange'}
         >
           <ActionGrid>
             <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'external-xray' })} />
@@ -452,9 +454,10 @@ function componentStatus(running: boolean | undefined, version: string | undefin
 
 function runtimeStatus(
   runtime: { running?: boolean } | undefined,
+  componentRunning: boolean | undefined,
   version: string | undefined,
   t: ReturnType<typeof useI18n>['t'],
 ) {
-  if (!runtime) return t('dashboard.notConfigured');
-  return componentStatus(runtime.running, version, t);
+  if (!runtime && typeof componentRunning !== 'boolean') return t('dashboard.notConfigured');
+  return componentStatus(componentRunning ?? runtime?.running, version, t);
 }

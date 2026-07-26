@@ -191,7 +191,7 @@ func (m *RuntimeManager) Apply(runtime *config.GeneratedRuntime, cfg ...config.R
 	now := time.Now()
 	m.controller = next
 	m.activeRuntime = cloneGeneratedRuntime(runtime)
-	m.setComponentRunningLocked(core.RuntimeComponentTapX, true)
+	m.resetComponentStatesLocked(next)
 	m.generation++
 	m.startedAt = now
 	m.lastAppliedAt = now
@@ -241,7 +241,7 @@ func (m *RuntimeManager) RestartComponent(component string) (RuntimeState, error
 		return m.stateLocked(), err
 	}
 	m.lastReloadMode = "component-restart:" + component
-	m.setComponentRunningLocked(component, true)
+	m.refreshRestartedComponentStateLocked(component)
 	m.lastAppliedAt = time.Now()
 	m.lastError = ""
 	return m.stateLocked(), nil
@@ -262,7 +262,11 @@ func (m *RuntimeManager) StopComponent(component string) (RuntimeState, error) {
 		return m.stateLocked(), err
 	}
 	m.lastReloadMode = "component-stop:" + component
-	m.setComponentRunningLocked(component, false)
+	if component == core.RuntimeComponentTapX {
+		m.setComponentRunningLocked(component, false)
+	} else if _, configured := m.componentStates[component]; configured {
+		m.setComponentRunningLocked(component, false)
+	}
 	m.lastError = ""
 	return m.stateLocked(), nil
 }
@@ -438,6 +442,35 @@ func (m *RuntimeManager) setComponentRunningLocked(component string, running boo
 	m.componentStates[component] = running
 }
 
+func (m *RuntimeManager) resetComponentStatesLocked(controller RuntimeController) {
+	m.componentStates = map[string]bool{
+		core.RuntimeComponentTapX: true,
+	}
+	for _, state := range controller.XrayStates() {
+		switch state.Runtime {
+		case "embedded":
+			m.componentStates[core.RuntimeComponentEmbeddedXray] = state.Running
+		case "external":
+			m.componentStates[core.RuntimeComponentExternalXray] = state.Running
+		}
+	}
+}
+
+func (m *RuntimeManager) refreshRestartedComponentStateLocked(component string) {
+	if component == core.RuntimeComponentTapX {
+		m.setComponentRunningLocked(component, true)
+		return
+	}
+	delete(m.componentStates, component)
+	for _, state := range m.controller.XrayStates() {
+		if (component == core.RuntimeComponentEmbeddedXray && state.Runtime == "embedded") ||
+			(component == core.RuntimeComponentExternalXray && state.Runtime == "external") {
+			m.setComponentRunningLocked(component, state.Running)
+			return
+		}
+	}
+}
+
 func cloneComponentStates(in map[string]bool) map[string]bool {
 	if len(in) == 0 {
 		return nil
@@ -472,7 +505,7 @@ func (m *RuntimeManager) applyPreparedRuntimeLocked(runtime *config.GeneratedRun
 	now := time.Now()
 	m.controller = next
 	m.activeRuntime = cloneGeneratedRuntime(runtime)
-	m.setComponentRunningLocked(core.RuntimeComponentTapX, true)
+	m.resetComponentStatesLocked(next)
 	m.generation++
 	m.startedAt = now
 	m.lastAppliedAt = now
@@ -572,7 +605,7 @@ func (m *RuntimeManager) rollbackUnconfirmedOneArm(generation uint64) {
 	m.controller = rollback
 	m.activeRuntime = cloneGeneratedRuntime(pending.oldRuntime)
 	m.activeConfig = cloneOptionalRuntimeConfig(pending.oldConfig)
-	m.setComponentRunningLocked(core.RuntimeComponentTapX, true)
+	m.resetComponentStatesLocked(rollback)
 	m.generation++
 	m.startedAt = now
 	m.stoppedAt = time.Time{}
@@ -633,7 +666,7 @@ func (m *RuntimeManager) rollbackAfterFailedApplyLocked(applyErr error) (Runtime
 	now := time.Now()
 	m.controller = rollback
 	m.activeRuntime = oldRuntime
-	m.setComponentRunningLocked(core.RuntimeComponentTapX, true)
+	m.resetComponentStatesLocked(rollback)
 	m.startedAt = now
 	m.stoppedAt = time.Time{}
 	m.lastRollbackAt = now
