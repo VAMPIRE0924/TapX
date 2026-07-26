@@ -823,6 +823,8 @@ func (v *verifier) checkOpenWrtLuCI() {
 		for _, want := range []string{
 			"pidof tapx-core",
 			"/etc/init.d/tapx stop",
+			"while pidof tapx-core",
+			"standalone core did not stop before ownership handoff",
 			"procd_set_param term_timeout 15",
 		} {
 			if !strings.Contains(panelInitText, want) {
