@@ -55,6 +55,10 @@
   justify-content: flex-end;
 }
 
+.connector-search {
+  width: min(320px, 100%);
+}
+
 .throughput-controls {
   display: flex;
   align-items: center;

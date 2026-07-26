@@ -54,14 +54,14 @@ type DashboardMetricSample struct {
 	TapXObjects         uint64  `json:"tapxObjects,omitempty"`
 	TapXGC              uint32  `json:"tapxGC,omitempty"`
 	TapXGCPause         uint64  `json:"tapxGCPause,omitempty"`
-	TapXObservatory     int     `json:"tapxObservatory,omitempty"`
+	TapXObservatory     int     `json:"tapxObservatory"`
 	EmbeddedHeap        uint64  `json:"embeddedHeap,omitempty"`
 	EmbeddedSys         uint64  `json:"embeddedSys,omitempty"`
 	EmbeddedObjects     uint64  `json:"embeddedObjects,omitempty"`
 	EmbeddedGC          uint32  `json:"embeddedGC,omitempty"`
 	EmbeddedGCPause     uint64  `json:"embeddedGCPause,omitempty"`
-	EmbeddedObservatory int     `json:"embeddedObservatory,omitempty"`
-	ExternalObservatory int     `json:"externalObservatory,omitempty"`
+	EmbeddedObservatory int     `json:"embeddedObservatory"`
+	ExternalObservatory int     `json:"externalObservatory"`
 }
 
 type DashboardRates struct {

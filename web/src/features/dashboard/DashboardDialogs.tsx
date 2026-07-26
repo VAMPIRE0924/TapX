@@ -3,9 +3,10 @@ import {
   ClearOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
+  DownloadOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import { Alert, Button, Empty, Modal, Select, Space, Spin, Table, Tabs, Tag, Upload, message } from 'antd';
+import { Alert, Button, Checkbox, Empty, Modal, Select, Space, Spin, Tabs, Upload, message } from 'antd';
 import type { UploadProps } from 'antd';
 import {
   clearPanelLogs,
@@ -23,6 +24,11 @@ export function logMatchesScope(event: PanelLogEvent, scope: LogScope): boolean 
   if (scope === 'all') return true;
   const action = event.action.toLowerCase();
   const detail = `${action} ${event.message}`.toLowerCase();
+  if (action === 'syslog') {
+    if (scope === 'external-xray') return detail.includes('external') && detail.includes('xray');
+    if (scope === 'embedded-xray') return detail.includes('xray') && !detail.includes('external');
+    return detail.includes('tapx') && !detail.includes('xray');
+  }
   if (scope === 'embedded-xray') {
     return action.startsWith('runtime.component.') && detail.includes('embedded-xray');
   }
@@ -42,24 +48,38 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
   const { t } = useI18n();
   const [events, setEvents] = useState<PanelLogEvent[]>([]);
   const [loading, setLoading] = useState(false);
+  const [limit, setLimit] = useState(20);
+  const [level, setLevel] = useState('all');
+  const [includeSystem, setIncludeSystem] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [messageApi, contextHolder] = message.useMessage();
 
-  const filtered = useMemo(() => events.filter((event) => logMatchesScope(event, scope)), [events, scope]);
+  const filtered = useMemo(() => events
+    .filter((event) => logMatchesScope(event, scope))
+    .filter((event) => level === 'all' || normalizeLogLevel(event.level) === level)
+    .slice(-limit)
+    .reverse(), [events, level, limit, scope]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setEvents(await getPanelLogs());
+      setEvents(await getPanelLogs(includeSystem));
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : t('dashboard.logLoadFailed'));
     } finally {
       setLoading(false);
     }
-  }, [messageApi, t]);
+  }, [includeSystem, messageApi, t]);
 
   useEffect(() => {
     if (open) void load();
   }, [load, open, scope]);
+
+  useEffect(() => {
+    if (!open || !autoRefresh) return undefined;
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => window.clearInterval(timer);
+  }, [autoRefresh, load, open]);
 
   function confirmClear() {
     Modal.confirm({
@@ -87,42 +107,103 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
       : scope === 'embedded-xray'
         ? t('dashboard.embeddedXrayLogs')
         : t('dashboard.externalXrayLogs');
+
+  function downloadLogs() {
+    const body = filtered.map(formatLogLine).join('\n');
+    downloadBlob(new Blob([`${body}${body ? '\n' : ''}`], { type: 'text/plain;charset=utf-8' }), `tapx-${scope}-logs-${timestampForFile()}.log`);
+  }
+
   return (
     <>
       {contextHolder}
       <Modal
+        className="dashboard-log-dialog"
         open={open}
-        title={title}
+        title={(
+          <span className="log-dialog-title">
+            {title}
+            <Button
+              type="text"
+              size="small"
+              aria-label={t('common.refresh')}
+              icon={<ReloadOutlined spin={loading} />}
+              onClick={() => void load()}
+            />
+          </span>
+        )}
         width={900}
         onCancel={onClose}
-        footer={(
-          <Space>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>{t('common.refresh')}</Button>
-            {scope === 'all' ? (
-              <Button danger icon={<ClearOutlined />} disabled={events.length === 0} onClick={confirmClear}>{t('dashboard.clear')}</Button>
-            ) : null}
-            <Button type="primary" onClick={onClose}>{t('common.close')}</Button>
-          </Space>
-        )}
+        footer={null}
       >
-        <Table<PanelLogEvent>
-          rowKey="seq"
-          size="small"
-          loading={loading}
-          dataSource={[...filtered].reverse()}
-          pagination={{ pageSize: 20, hideOnSinglePage: true }}
-          scroll={{ x: 760, y: 460 }}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('dashboard.noLogs')} /> }}
-          columns={[
-            { title: t('dashboard.time'), dataIndex: 'time', width: 190, render: (value: string) => formatLogTime(value) },
-            { title: t('dashboard.level'), dataIndex: 'level', width: 80, render: (value: string) => <LogLevel level={value} /> },
-            { title: t('dashboard.action'), dataIndex: 'action', width: 180 },
-            { title: t('dashboard.content'), dataIndex: 'message' },
-          ]}
-        />
+        <div className="log-dialog-toolbar">
+          <Space wrap size={8}>
+            <Select
+              className="log-limit-select"
+              size="small"
+              value={limit}
+              aria-label={t('dashboard.logLineCount')}
+              onChange={setLimit}
+              options={[20, 50, 100, 200, 500].map((value) => ({ value, label: String(value) }))}
+            />
+            <Select
+              className="log-level-select"
+              size="small"
+              value={level}
+              aria-label={t('dashboard.logLevelFilter')}
+              onChange={setLevel}
+              options={[
+                { value: 'all', label: t('dashboard.allLevels') },
+                { value: 'debug', label: 'Debug' },
+                { value: 'info', label: 'Info' },
+                { value: 'warn', label: 'Warning' },
+                { value: 'error', label: 'Error' },
+              ]}
+            />
+            <Checkbox checked={includeSystem} onChange={(event) => setIncludeSystem(event.target.checked)}>SysLog</Checkbox>
+            <Checkbox checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)}>{t('dashboard.autoRefresh')}</Checkbox>
+          </Space>
+          <Space size={6}>
+            {scope === 'all' ? (
+              <Button danger type="text" size="small" icon={<ClearOutlined />} disabled={events.length === 0} onClick={confirmClear}>
+                {t('dashboard.clear')}
+              </Button>
+            ) : null}
+            <Button type="primary" size="small" icon={<DownloadOutlined />} disabled={filtered.length === 0} aria-label={t('dashboard.downloadLogs')} onClick={downloadLogs} />
+          </Space>
+        </div>
+        <div className="log-console" role="log" aria-live={autoRefresh ? 'polite' : 'off'}>
+          {loading && events.length === 0 ? (
+            <div className="log-console-state"><Spin /></div>
+          ) : filtered.length === 0 ? (
+            <div className="log-console-state"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('dashboard.noLogs')} /></div>
+          ) : filtered.map((event, index) => (
+            <div className="log-console-line" key={`${event.action}-${event.seq}-${index}`}>
+              <span className="log-time">{formatLogTime(event.time)}</span>
+              <span className={`log-level log-level-${normalizeLogLevel(event.level)}`}>{displayLogLevel(event.level)}</span>
+              <span className="log-message">- {event.action ? `${event.action}: ` : ''}{event.message}</span>
+            </div>
+          ))}
+        </div>
       </Modal>
     </>
   );
+}
+
+function normalizeLogLevel(level: string): 'debug' | 'info' | 'warn' | 'error' {
+  const normalized = String(level || '').toLowerCase();
+  if (normalized === 'warning') return 'warn';
+  if (normalized === 'error' || normalized === 'fatal' || normalized === 'panic') return 'error';
+  if (normalized === 'debug' || normalized === 'trace') return 'debug';
+  return normalized === 'warn' ? 'warn' : 'info';
+}
+
+function displayLogLevel(level: string): string {
+  const normalized = normalizeLogLevel(level);
+  return normalized === 'warn' ? 'WARNING' : normalized.toUpperCase();
+}
+
+function formatLogLine(event: PanelLogEvent): string {
+  return `${formatLogTime(event.time)} ${displayLogLevel(event.level)} - ${event.action ? `${event.action}: ` : ''}${event.message}`;
 }
 
 export function BackupDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -432,13 +513,20 @@ function metricTabs(kind: ChartKind, t: ReturnType<typeof useI18n>['t']): Metric
 
   const prefix = kind === 'tapx' ? 'tapx' : kind === 'embedded-xray' ? 'embedded' : 'external';
   const observatoryLabel = kind === 'tapx' ? t('dashboard.runningPipes') : t('dashboard.endpointCount');
+  const observatory = metricTab('observatory', t('dashboard.observatory'), t('dashboard.observatoryHistory'), 'count', [[`${prefix}Observatory` as keyof DashboardSample, observatoryLabel, '#52c41a']]);
+  if (kind === 'external-xray') {
+    // An external Xray process does not share Go runtime memory/GC counters
+    // with TapX. Endpoint observatory is the runtime metric we can report
+    // truthfully, so make it the visible chart instead of empty memory tabs.
+    return [observatory];
+  }
   return [
+    observatory,
     metricTab('heap', t('dashboard.heap'), t('dashboard.heapAllocated'), 'bytes', [[`${prefix}Heap` as keyof DashboardSample, t('dashboard.heap'), '#7c4dff']]),
     metricTab('system', t('dashboard.runtimeSystem'), t('dashboard.systemMemory'), 'bytes', [[`${prefix}Sys` as keyof DashboardSample, t('dashboard.runtimeSystem'), '#1890ff']]),
     metricTab('objects', t('dashboard.objects'), t('dashboard.heapObjects'), 'count', [[`${prefix}Objects` as keyof DashboardSample, t('dashboard.objects'), '#13c2c2']]),
     metricTab('gc-count', t('dashboard.gcCount'), t('dashboard.gcCountHistory'), 'count', [[`${prefix}GC` as keyof DashboardSample, t('dashboard.gcCount'), '#fa8c16']]),
     metricTab('gc-pause', t('dashboard.gcPause'), t('dashboard.gcPauseHistory'), 'nanoseconds', [[`${prefix}GCPause` as keyof DashboardSample, t('dashboard.gcPause'), '#f5222d']]),
-    metricTab('observatory', t('dashboard.observatory'), t('dashboard.observatoryHistory'), 'count', [[`${prefix}Observatory` as keyof DashboardSample, observatoryLabel, '#52c41a']]),
   ];
 }
 
@@ -469,12 +557,6 @@ function formatMetricBytes(value: number): string {
     index += 1;
   }
   return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(2)} ${units[index]}`;
-}
-
-function LogLevel({ level }: { level: string }) {
-  const normalized = level.toLowerCase();
-  const color = normalized === 'error' ? 'red' : normalized === 'warn' || normalized === 'warning' ? 'orange' : normalized === 'debug' ? 'default' : 'blue';
-  return <Tag color={color}>{level || 'info'}</Tag>;
 }
 
 function formatLogTime(value: string) {

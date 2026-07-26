@@ -65,6 +65,10 @@
   padding: 12px 16px;
 }
 
+.device-search {
+  width: min(320px, 100%);
+}
+
 .device-hint {
   margin-bottom: 12px;
 }

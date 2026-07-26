@@ -112,6 +112,7 @@ import { formatBytes } from '../shared/format';
 import { labelDevice, nextId } from '../shared/tapx-model';
 import { settingsToObject } from '../shared/settings';
 import { useI18n } from '../i18n/I18nProvider';
+import { objectMatchesSearch } from '../shared/object-search';
 import './ConnectorPage.css';
 
 type RuntimeMode = EndpointRuntimeMode;
@@ -196,6 +197,7 @@ export function ConnectorPage() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ConnectorRecord | null>(null);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [search, setSearch] = useState('');
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
   const [diagnosticTarget, setDiagnosticTarget] = useState<ConnectorRecord | null>(null);
   const [diagnosticResults, setDiagnosticResults] = useState<Partial<Record<TestKind, ConnectorTestResult>>>({});
@@ -237,14 +239,21 @@ export function ConnectorPage() {
 
   const connectors = useMemo(() => ((config.Connectors || []) as ConnectorRecord[]), [config.Connectors]);
   const visibleConnectors = useMemo(() => filterNodeOwned(connectors, scope), [connectors, scope]);
+  const filteredConnectors = useMemo(
+    () => visibleConnectors.filter((item) => objectMatchesSearch(item, search, [
+      runtimeOptions.find((option) => option.value === (item.RuntimeMode || 'embedded-xray'))?.label,
+      connectorProtocolLabel(item.Protocol || 'vless'),
+    ])),
+    [runtimeOptions, search, visibleConnectors],
+  );
   const selectedConnectors = useMemo(
     () => connectors.filter((item) => selectedRowKeys.includes(nodeObjectKey(item))),
     [connectors, selectedRowKeys],
   );
   useEffect(() => {
-    const visibleKeys = new Set(visibleConnectors.map(nodeObjectKey));
+    const visibleKeys = new Set(filteredConnectors.map(nodeObjectKey));
     setSelectedRowKeys((current) => current.filter((key) => visibleKeys.has(key)));
-  }, [visibleConnectors]);
+  }, [filteredConnectors]);
   const devices = useMemo(() => ((config.Devices || []) as TapxDevice[]), [config.Devices]);
   const warpConnector = useMemo(() => connectors.find((item) => (
     item.Name === 'warp' && nodeIDOf(item) === integrationTargetNodeID
@@ -903,13 +912,13 @@ export function ConnectorPage() {
   };
 
   function moveConnector(from: number, to: number) {
-    if (to < 0 || to >= visibleConnectors.length || from === to) return;
-    const reordered = [...visibleConnectors];
+    if (to < 0 || to >= filteredConnectors.length || from === to) return;
+    const reordered = [...filteredConnectors];
     const [record] = reordered.splice(from, 1);
     reordered.splice(to, 0, record);
     let visibleIndex = 0;
     const next = connectors.map((item) => (
-      visibleConnectors.some((visible) => sameNodeObject(visible, item)) ? reordered[visibleIndex++] : item
+      filteredConnectors.some((visible) => sameNodeObject(visible, item)) ? reordered[visibleIndex++] : item
     ));
     void commitConfig({ ...config, Connectors: next }, t('connector.orderUpdated'));
   }
@@ -992,7 +1001,7 @@ export function ConnectorPage() {
               items: [
                 ...(index > 0 ? [{ key: 'top', icon: <VerticalAlignTopOutlined />, label: t('listener.moveTop'), onClick: () => moveConnector(index, 0) }] : []),
                 { key: 'up', icon: <ArrowUpOutlined />, label: t('common.moveUp'), disabled: index === 0, onClick: () => moveConnector(index, index - 1) },
-                { key: 'down', icon: <ArrowDownOutlined />, label: t('common.moveDown'), disabled: index === visibleConnectors.length - 1, onClick: () => moveConnector(index, index + 1) },
+                { key: 'down', icon: <ArrowDownOutlined />, label: t('common.moveDown'), disabled: index === filteredConnectors.length - 1, onClick: () => moveConnector(index, index + 1) },
                 { key: 'export', icon: <ExportOutlined />, label: t('connector.export'), onClick: () => exportConnectors([record]) },
                 { key: 'reset', icon: <RetweetOutlined />, label: t('connector.resetTraffic'), onClick: () => void resetTraffic([record]) },
                 { key: 'delete', icon: <DeleteOutlined />, label: t('common.delete'), danger: true, onClick: () => confirmDelete(record) },
@@ -1113,7 +1122,7 @@ export function ConnectorPage() {
           : <Tag color="warning">{t('common.stopped')}</Tag>;
       },
     },
-  ], [activeConnectorKeys, connectors, connectorStats, devices, runtimeOptions, t, visibleConnectors]);
+  ], [activeConnectorKeys, connectors, connectorStats, devices, filteredConnectors, runtimeOptions, t]);
 
   const protocolOptions = runtimeMode === 'tapx' ? tapxProtocolOptions : outboundXrayProtocolOptions;
 
@@ -1275,6 +1284,13 @@ export function ConnectorPage() {
             </Col>
             <Col xs={24} sm={12} className="toolbar-right">
               <Space wrap>
+                <Input.Search
+                  className="connector-search"
+                  placeholder={t('connector.searchPlaceholder')}
+                  allowClear
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
                 <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => void runTest('channel', connectors)}>{t('connector.testAllChannels')}</Button>
                 <Popconfirm
                   placement="topRight"
@@ -1292,7 +1308,7 @@ export function ConnectorPage() {
             rowKey={nodeObjectKey}
             rowSelection={{ selectedRowKeys, onChange: (keys) => setSelectedRowKeys(keys.map(String)) }}
             columns={columns}
-            dataSource={visibleConnectors}
+            dataSource={filteredConnectors}
             loading={loading || saving}
             pagination={false}
             scroll={{ x: 1450 }}
