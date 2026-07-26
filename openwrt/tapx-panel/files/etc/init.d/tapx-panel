@@ -42,6 +42,12 @@ start_service() {
 		echo "tapx-panel: initialized database is missing: $db_path" >&2
 		return 1
 	}
+	# A standalone core may be carrying the runtime while TapX-UI is down.
+	# Stop it cleanly before the panel takes ownership, otherwise its external
+	# Xray child can overlap with the panel-managed instance.
+	if pidof tapx-core >/dev/null 2>&1; then
+		/etc/init.d/tapx stop
+	fi
 	mkdir -p "${db_path%/*}"
 	mkdir -p "${CONTROL_SOCKET%/*}"
 
@@ -54,6 +60,8 @@ start_service() {
 		TAPX_RUNTIME_AUTOSTART="$core_autostart" \
 		TAPX_RUNTIME_CONTROL_SOCKET="$CONTROL_SOCKET"
 	procd_set_param respawn "$respawn_threshold" "$respawn_timeout" "$respawn_retry"
+	# Runtime shutdown waits for external Xray before falling back to SIGKILL.
+	procd_set_param term_timeout 15
 	procd_set_param file /etc/config/tapx "$db_path"
 	procd_set_param stdout 1
 	procd_set_param stderr 1

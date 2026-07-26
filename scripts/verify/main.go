@@ -808,9 +808,25 @@ func (v *verifier) checkOpenWrtLuCI() {
 			"runtime_stop",
 			"-runtime-control-socket",
 			"-runtime-action",
+			"procd_set_param term_timeout 15",
 		} {
 			if !strings.Contains(initText, want) {
 				v.fail("OpenWrt core init missing independent runtime control %q", want)
+			}
+		}
+	}
+	panelInit, err := os.ReadFile(v.path("openwrt/tapx-panel/files/etc/init.d/tapx-panel"))
+	if err != nil {
+		v.fail("read OpenWrt panel init: %v", err)
+	} else {
+		panelInitText := string(panelInit)
+		for _, want := range []string{
+			"pidof tapx-core",
+			"/etc/init.d/tapx stop",
+			"procd_set_param term_timeout 15",
+		} {
+			if !strings.Contains(panelInitText, want) {
+				v.fail("OpenWrt panel init missing clean runtime handoff %q", want)
 			}
 		}
 	}
