@@ -215,6 +215,19 @@
 }
 
 @media (max-width: 700px) {
+  .dashboard-log-dialog {
+    top: 0;
+    width: 100vw !important;
+    max-width: 100vw;
+    margin: 0;
+    padding-bottom: 0;
+  }
+
+  .dashboard-log-dialog .ant-modal-content {
+    min-height: 100vh;
+    border-radius: 0;
+  }
+
   .log-dialog-toolbar {
     align-items: flex-start;
     flex-direction: column;

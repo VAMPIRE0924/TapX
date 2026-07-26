@@ -116,28 +116,30 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
       >
         <div className="log-dialog-toolbar">
           <Space wrap size={8}>
-            <Select
-              className="log-limit-select"
-              size="small"
-              value={limit}
-              aria-label={t('dashboard.logLineCount')}
-              onChange={setLimit}
-              options={[20, 50, 100, 500, 1000].map((value) => ({ value, label: String(value) }))}
-            />
-            <Select
-              className="log-level-select"
-              size="small"
-              value={level}
-              aria-label={t('dashboard.logLevelFilter')}
-              onChange={setLevel}
-              options={[
-                { value: 'debug', label: 'Debug' },
-                { value: 'info', label: 'Info' },
-                { value: 'notice', label: 'Notice' },
-                { value: 'warn', label: 'Warning' },
-                { value: 'error', label: 'Error' },
-              ]}
-            />
+            <Space.Compact>
+              <Select
+                className="log-limit-select"
+                size="small"
+                value={limit}
+                aria-label={t('dashboard.logLineCount')}
+                onChange={setLimit}
+                options={[20, 50, 100, 500, 1000].map((value) => ({ value, label: String(value) }))}
+              />
+              <Select
+                className="log-level-select"
+                size="small"
+                value={level}
+                aria-label={t('dashboard.logLevelFilter')}
+                onChange={setLevel}
+                options={[
+                  { value: 'debug', label: 'Debug' },
+                  { value: 'info', label: 'Info' },
+                  { value: 'notice', label: 'Notice' },
+                  { value: 'warn', label: 'Warning' },
+                  { value: 'error', label: 'Error' },
+                ]}
+              />
+            </Space.Compact>
             <Checkbox checked={includeSystem} onChange={(event) => setIncludeSystem(event.target.checked)}>SysLog</Checkbox>
             <Checkbox checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)}>{t('dashboard.autoRefresh')}</Checkbox>
           </Space>
