@@ -182,7 +182,10 @@ jobs:
             \( -name 'tapx-core-*.apk' -o -name 'tapx-panel-*.apk' -o -name 'luci-app-tapx-*.apk' \) \
             -exec cp {} dist-filogic/ \;
           test "$(find dist-filogic -type f -name '*.apk' | wc -l)" -eq 3
-          sha256sum dist-filogic/*.apk > dist-filogic/SHA256SUMS
+          (
+            cd dist-filogic
+            sha256sum *.apk > SHA256SUMS
+          )
 
       - name: Upload filogic lab artifacts
         uses: actions/upload-artifact@v4
