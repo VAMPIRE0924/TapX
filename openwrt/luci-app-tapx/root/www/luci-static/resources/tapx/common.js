@@ -53,9 +53,7 @@ function notify(message, level) { ui.addNotification(null, E('p', {}, message), 
 function button(label, style, handler) { return E('button', { 'type': 'button', 'class': 'btn cbi-button cbi-button-' + style, 'click': handler }, label); }
 function status(running) { return E('span', { 'class': 'tapx-status ' + (running ? 'is-running' : 'is-stopped') }, [ E('i'), running ? tr('running') : tr('stopped') ]); }
 function applyChanges() {
-	return uci.save().then(function() { return uci.apply(3); }).then(function() {
-		return new Promise(function(resolve) { window.setTimeout(resolve, 1250); });
-	});
+	return uci.save().then(function() { return uci.commit('tapx'); });
 }
 
 function languageControl() {
