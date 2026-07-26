@@ -139,6 +139,19 @@ func TestServerSavesHostConflictButRejectsRuntimeApply(t *testing.T) {
 	}
 }
 
+func TestParseBoolQuery(t *testing.T) {
+	for _, value := range []string{"1", "true", "TRUE", " yes ", "on"} {
+		if !parseBoolQuery(value) {
+			t.Fatalf("parseBoolQuery(%q) = false, want true", value)
+		}
+	}
+	for _, value := range []string{"", "0", "false", "off", "anything"} {
+		if parseBoolQuery(value) {
+			t.Fatalf("parseBoolQuery(%q) = true, want false", value)
+		}
+	}
+}
+
 func TestServerRuntimeComponentActions(t *testing.T) {
 	store := newTestStore(t)
 	controller := &fakeRuntimeController{}

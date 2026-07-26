@@ -1,0 +1,1 @@
+function e(e,t,n=[]){let r=t.trim().toLocaleLowerCase();return r?[e,...n].map(e=>typeof e==`string`?e:JSON.stringify(e??``)).join(` `).toLocaleLowerCase().includes(r):!0}export{e as t};

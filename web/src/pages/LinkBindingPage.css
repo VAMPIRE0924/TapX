@@ -2,6 +2,10 @@
   width: 100%;
 }
 
+.link-rule-search {
+  width: min(320px, 100%);
+}
+
 .link-save-card {
   margin-bottom: 12px;
 }

@@ -56,6 +56,7 @@ import { useI18n } from '../i18n/I18nProvider';
 import { UnitInputNumber } from '../components/UnitInputNumber';
 import { AdvancedConfigEditor } from '../components/AdvancedConfigEditor';
 import { copyText } from '../shared/clipboard';
+import { objectMatchesSearch } from '../shared/object-search';
 import './DevicePage.css';
 
 type DeviceRecord = TapxDevice & NodeOwned & {
@@ -124,6 +125,7 @@ export function DevicePage() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<DeviceRecord | null>(null);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [search, setSearch] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
   const [importTargetNodeID, setImportTargetNodeID] = useState('local');
@@ -137,14 +139,21 @@ export function DevicePage() {
 
   const devices = useMemo(() => ((config.Devices || []) as DeviceRecord[]), [config.Devices]);
   const visibleDevices = useMemo(() => filterNodeOwned(devices, scope), [devices, scope]);
+  const filteredDevices = useMemo(
+    () => visibleDevices.filter((item) => objectMatchesSearch(item, search, [
+      deviceNetworkText(item),
+      linkedEndpointLabels(item, config.Listeners || [], config.Connectors || []).join(' '),
+    ])),
+    [config.Connectors, config.Listeners, search, visibleDevices],
+  );
   const selectedDevices = useMemo(
     () => devices.filter((item) => selectedRowKeys.includes(nodeObjectKey(item))),
     [devices, selectedRowKeys],
   );
   useEffect(() => {
-    const visibleKeys = new Set(visibleDevices.map(nodeObjectKey));
+    const visibleKeys = new Set(filteredDevices.map(nodeObjectKey));
     setSelectedRowKeys((current) => current.filter((key) => visibleKeys.has(key)));
-  }, [visibleDevices]);
+  }, [filteredDevices]);
   const deviceType = Form.useWatch('Type', form) ?? 'tun';
   const tapMode = (Form.useWatch('TapMode', form) ?? 'standalone') as TapxTapMode;
   const accessRole = Form.useWatch('AccessRole', form) ?? 'client';
@@ -1216,6 +1225,13 @@ export function DevicePage() {
               <Dropdown trigger={['click']} menu={{ items: batchItems, onClick: onBatchClick }}>
                 <Button icon={<MenuOutlined />}>{selectedDevices.length > 0 ? t('device.batchActions') : t('device.more')}</Button>
               </Dropdown>
+              <Input.Search
+                className="device-search"
+                placeholder={t('device.searchPlaceholder')}
+                allowClear
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
             </Space>
           </Card>
         </Col>
@@ -1225,7 +1241,7 @@ export function DevicePage() {
               rowKey={nodeObjectKey}
               rowSelection={{ selectedRowKeys, onChange: (keys) => setSelectedRowKeys(keys.map(String)) }}
               columns={columns}
-              dataSource={visibleDevices}
+              dataSource={filteredDevices}
               loading={loading || saving}
               pagination={false}
               scroll={{ x: 1620 }}

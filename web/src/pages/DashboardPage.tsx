@@ -99,7 +99,7 @@ export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => vo
   const system = data.system || {};
   const rates = data.rates || {};
   const activeRawTcpPipes = activeRawTCPPipes(runtime);
-  const tapxPipes = activeTapXPipeCount(runtime);
+  const tapxRunning = runtime.running === true;
   const xrayPipes = runtime.xrayPipes?.length || 0;
   const externalXrayTunnels = activeExternalXrayPipes(runtime).length;
   const rawTcpTunnels = activeRawTcpPipes.length;
@@ -194,8 +194,8 @@ export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => vo
 
         <DashboardCard
           title={t('dashboard.tapx')}
-          status={componentStatus(tapxPipes > 0, diagnostics?.components?.tapx, t)}
-          statusTone={tapxPipes > 0 ? 'green' : 'orange'}
+          status={componentStatus(tapxRunning, diagnostics?.components?.tapx, t)}
+          statusTone={tapxRunning ? 'green' : 'orange'}
         >
           <ActionGrid>
             <ActionItem icon={<OrderedListOutlined />} text={t('common.logs')} onClick={() => setLogs({ open: true, scope: 'tapx' })} />
@@ -438,8 +438,8 @@ function appendSample(current: DashboardSample[], report: DashboardReport): Dash
     embeddedObjects: embedded?.running ? process.heapObjects : undefined,
     embeddedGC: embedded?.running ? process.numGC : undefined,
     embeddedGCPause: embedded?.running ? process.lastGCPauseNs : undefined,
-    embeddedObservatory: embedded?.endpointCount,
-    externalObservatory: external?.endpointCount,
+    embeddedObservatory: embedded?.endpointCount ?? 0,
+    externalObservatory: external?.endpointCount ?? 0,
   };
   return [...current, next].slice(-120);
 }

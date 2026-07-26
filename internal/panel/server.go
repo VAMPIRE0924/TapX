@@ -718,13 +718,22 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"events": s.logs.List()})
+		events := s.logs.List()
+		if parseBoolQuery(r.URL.Query().Get("system")) {
+			events = append(events, readSystemLogs(r.Context(), defaultLogLimit)...)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": events})
 	case http.MethodDelete:
 		s.logs.Clear()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		methodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
+}
+
+func parseBoolQuery(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 func (s *Server) log(level, action, message string) {

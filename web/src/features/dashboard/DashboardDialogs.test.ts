@@ -25,4 +25,11 @@ describe('dashboard component log scopes', () => {
     expect(logMatchesScope(external, 'embedded-xray')).toBe(false);
     expect(logMatchesScope(binary, 'external-xray')).toBe(true);
   });
+
+  it('classifies system log lines into the matching runtime dialog', () => {
+    expect(logMatchesScope(event('syslog', 'tapx-panel: runtime started'), 'tapx')).toBe(true);
+    expect(logMatchesScope(event('syslog', 'embedded Xray core started'), 'embedded-xray')).toBe(true);
+    expect(logMatchesScope(event('syslog', 'external Xray process started'), 'external-xray')).toBe(true);
+    expect(logMatchesScope(event('syslog', 'external Xray process started'), 'embedded-xray')).toBe(false);
+  });
 });

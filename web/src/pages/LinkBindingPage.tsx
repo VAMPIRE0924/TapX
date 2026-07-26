@@ -86,6 +86,7 @@ import { useI18n } from '../i18n/I18nProvider';
 import { isManagedLinkAddressRemark, managedLinkAddressRemark } from '../shared/managed-objects';
 import { clearBindingReferences, relationKey } from '../shared/config-relations';
 import './LinkBindingPage.css';
+import { objectMatchesSearch } from '../shared/object-search';
 
 type RouteAction = 'bind-device' | 'allow' | 'drop';
 
@@ -159,6 +160,7 @@ export function LinkBindingPage() {
   const [importTargetNodeID, setImportTargetNodeID] = useState('local');
   const [exportValue, setExportValue] = useState('');
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [search, setSearch] = useState('');
   const [queryMode, setQueryMode] = useState<LinkQueryMode>('device');
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
@@ -178,17 +180,21 @@ export function LinkBindingPage() {
   const normalized = useMemo(() => emptyConfig(config), [config]);
   const routes = useMemo(() => normalized.Routes as RouteRecord[], [normalized.Routes]);
   const visibleRoutes = useMemo(() => filterNodeOwned(routes, scope), [routes, scope]);
+  const filteredRoutes = useMemo(() => visibleRoutes.filter((route) => {
+    const expanded = buildRuleRows([route], buildIndex(filterConfigByNode(config, nodeIDOf(route))));
+    return objectMatchesSearch(route, search, expanded);
+  }), [config, search, visibleRoutes]);
   const selectedRoutes = useMemo(
     () => routes.filter((route) => selectedRowKeys.includes(nodeObjectKey(route))),
     [routes, selectedRowKeys],
   );
   useEffect(() => {
-    const visibleKeys = new Set(visibleRoutes.map(nodeObjectKey));
+    const visibleKeys = new Set(filteredRoutes.map(nodeObjectKey));
     setSelectedRowKeys((current) => current.filter((key) => visibleKeys.has(key)));
-  }, [visibleRoutes]);
-  const rows = useMemo(() => visibleRoutes.flatMap((route) => (
+  }, [filteredRoutes]);
+  const rows = useMemo(() => filteredRoutes.flatMap((route) => (
     buildRuleRows([route], buildIndex(filterConfigByNode(config, nodeIDOf(route))))
-  )), [config, visibleRoutes]);
+  )), [config, filteredRoutes]);
   const linkRows = useMemo(() => {
     if (scope !== 'all') return buildLinkTestRows(filterConfigByNode(config, scope));
     const nodeIDs = new Set((config.Routes || []).map(nodeIDOf));
@@ -502,7 +508,7 @@ export function LinkBindingPage() {
               className="drag-handle"
               title={t('link.dragSort')}
               aria-hidden="true"
-              onPointerDown={(event) => onHandlePointerDown(index, event)}
+              onPointerDown={search.trim() ? undefined : (event) => onHandlePointerDown(index, event)}
             />
             <span className="row-index">{index + 1}</span>
           </div>
@@ -521,32 +527,40 @@ export function LinkBindingPage() {
         width: 80,
         key: 'actions',
         fixed: 'left',
-        render: (_value, record, index) => (
-          <div className="action-buttons" style={{ justifyContent: 'center', margin: 0 }}>
-            <Button shape="circle" size="small" icon={<EditOutlined />} aria-label={t('link.edit')} onClick={() => openEdit(record.route)} />
-            <Dropdown
-              trigger={['click']}
-              menu={{
-                items: [
-                  { key: 'up', label: <><ArrowUpOutlined /> {t('common.moveUp')}</>, disabled: index === 0, onClick: () => moveRoute(index, index - 1) },
-                  { key: 'down', label: <><ArrowDownOutlined /> {t('common.moveDown')}</>, disabled: index === routes.length - 1, onClick: () => moveRoute(index, index + 1) },
-                  { key: 'export', label: <><ExportOutlined /> {t('link.export')}</>, onClick: () => exportRules([record.route]) },
-                  { key: 'delete', danger: true, label: <><DeleteOutlined /> {t('common.delete')}</>, onClick: () => confirmDelete(record.route) },
-                ],
-              }}
-            >
-              <Button shape="circle" size="small" icon={<MoreOutlined />} aria-label={t('link.more')} />
-            </Dropdown>
-          </div>
-        ),
+        render: (_value, record) => {
+          const index = visibleRoutes.findIndex((route) => sameNodeObject(route, record.route));
+          return (
+            <div className="action-buttons" style={{ justifyContent: 'center', margin: 0 }}>
+              <Button shape="circle" size="small" icon={<EditOutlined />} aria-label={t('link.edit')} onClick={() => openEdit(record.route)} />
+              <Dropdown
+                trigger={['click']}
+                menu={{
+                  items: [
+                    { key: 'up', label: <><ArrowUpOutlined /> {t('common.moveUp')}</>, disabled: index === 0, onClick: () => moveRoute(index, index - 1) },
+                    { key: 'down', label: <><ArrowDownOutlined /> {t('common.moveDown')}</>, disabled: index < 0 || index === visibleRoutes.length - 1, onClick: () => moveRoute(index, index + 1) },
+                    { key: 'export', label: <><ExportOutlined /> {t('link.export')}</>, onClick: () => exportRules([record.route]) },
+                    { key: 'delete', danger: true, label: <><DeleteOutlined /> {t('common.delete')}</>, onClick: () => confirmDelete(record.route) },
+                  ],
+                }}
+              >
+                <Button shape="circle" size="small" icon={<MoreOutlined />} aria-label={t('link.more')} />
+              </Dropdown>
+            </div>
+          );
+        },
       },
       {
         title: t('common.enabled'),
         align: 'center',
         width: 80,
         key: 'enabled',
-        render: (_value, record, index) => (
-          <Switch size="small" checked={record.enabled} loading={saving} onChange={(checked) => toggleRoute(index, checked)} />
+        render: (_value, record) => (
+          <Switch
+            size="small"
+            checked={record.enabled}
+            loading={saving}
+            onChange={(checked) => toggleRoute(visibleRoutes.findIndex((route) => sameNodeObject(route, record.route)), checked)}
+          />
         ),
       },
       {
@@ -610,7 +624,7 @@ export function LinkBindingPage() {
         render: (value: string) => value ? <Tooltip title={value}><span className="criterion-chip-value">{value}</span></Tooltip> : emptyDash(),
       },
     ],
-    [actionLabels, routes.length, saving, t],
+    [actionLabels, saving, search, t, visibleRoutes],
   );
 
   const testerColumns = useMemo<TableColumnsType<LinkTestRow>>(
@@ -663,6 +677,13 @@ export function LinkBindingPage() {
                       {t('link.add')}
                     </Button>
                     <NodeScopeSelect scope={scope} onChange={setScope} />
+                    <Input.Search
+                      className="link-rule-search"
+                      placeholder={t('link.searchPlaceholder')}
+                      allowClear
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                    />
                     {selectedRoutes.length > 0 ? (
                       <Tag color="blue" closable onClose={() => setSelectedRowKeys([])}>
                         {t('link.selectedCount', { count: selectedRoutes.length })}

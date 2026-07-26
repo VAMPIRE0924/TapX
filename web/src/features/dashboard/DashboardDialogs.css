@@ -4,6 +4,87 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.log-dialog-title,
+.log-dialog-toolbar,
+.log-dialog-toolbar > div {
+  display: flex;
+  align-items: center;
+}
+
+.log-dialog-title {
+  gap: 4px;
+}
+
+.log-dialog-toolbar {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.log-limit-select {
+  width: 70px;
+}
+
+.log-level-select {
+  width: 120px;
+}
+
+.log-console {
+  min-height: 360px;
+  max-height: min(56vh, 520px);
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 38%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text-primary) 8%, var(--panel-bg));
+  color: var(--text-primary);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.log-console-line {
+  display: grid;
+  grid-template-columns: max-content 72px minmax(0, 1fr);
+  gap: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.log-time {
+  color: #4096ff;
+}
+
+.log-level {
+  font-weight: 700;
+}
+
+.log-level-debug {
+  color: var(--text-muted);
+}
+
+.log-level-info {
+  color: #22c98b;
+}
+
+.log-level-warn {
+  color: #f5a623;
+}
+
+.log-level-error {
+  color: #ff4d4f;
+}
+
+.log-message {
+  min-width: 0;
+}
+
+.log-console-state {
+  min-height: 330px;
+  display: grid;
+  place-items: center;
+}
+
 .backup-dialog-grid section {
   display: flex;
   min-height: 210px;
@@ -130,6 +211,17 @@
 }
 
 @media (max-width: 700px) {
+  .log-dialog-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .log-console-line {
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding-bottom: 8px;
+  }
+
   .backup-dialog-grid {
     grid-template-columns: 1fr;
   }

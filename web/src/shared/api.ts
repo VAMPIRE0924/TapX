@@ -757,8 +757,8 @@ async function runtimeComponentAction(component: RuntimeComponent, action: 'rest
   if (!response.ok) throw await responseError(response, `runtime component ${action}`);
 }
 
-export async function getPanelLogs(): Promise<PanelLogEvent[]> {
-  const response = await fetch('/api/logs', {
+export async function getPanelLogs(includeSystem = false): Promise<PanelLogEvent[]> {
+  const response = await fetch(`/api/logs${includeSystem ? '?system=1' : ''}`, {
     headers: { Accept: 'application/json' },
     credentials: 'same-origin',
   });
