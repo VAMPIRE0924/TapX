@@ -296,6 +296,7 @@ export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => vo
         <ComponentUpdateDialog
           open
           component={updateTarget}
+          currentVersion={updateComponentVersion(updateTarget, diagnostics)}
           onClose={() => setUpdateTarget(undefined)}
           onUpdated={() => {
             void getDashboard().then(setData);
@@ -305,6 +306,21 @@ export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => vo
       ) : null}
     </div>
   );
+}
+
+function updateComponentVersion(component: UpdateComponent, diagnostics?: DiagnosticReport): string | undefined {
+  switch (component) {
+  case 'panel':
+    return diagnostics?.components?.panel || diagnostics?.version;
+  case 'tapx':
+    return diagnostics?.components?.tapx;
+  case 'embedded-xray':
+    return diagnostics?.components?.embeddedXray;
+  case 'external-xray':
+    return diagnostics?.components?.externalXray;
+  default:
+    return undefined;
+  }
 }
 
 function Gauge({ label, percent, sub }: { label: string; percent: number; sub?: string }) {
