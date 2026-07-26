@@ -75,6 +75,47 @@ func TestRestoreStoredRuntimeAppliesDatabaseConfig(t *testing.T) {
 	}
 }
 
+func TestRuntimeControlSeparatesRuntimeFromPanelLifecycle(t *testing.T) {
+	store, err := panel.OpenStore(filepath.Join(t.TempDir(), "tapx.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	manager := panel.NewRuntimeManager()
+	t.Cleanup(func() { _, _ = manager.Stop() })
+	socketPath := filepath.Join(t.TempDir(), "runtime.sock")
+	closeControl, err := startRuntimeControl(socketPath, store, manager)
+	if err != nil {
+		t.Fatalf("start runtime control: %v", err)
+	}
+	t.Cleanup(closeControl)
+
+	status, err := requestRuntimeControl(socketPath, "status")
+	if err != nil {
+		t.Fatalf("query stopped runtime: %v", err)
+	}
+	if status.State.Running {
+		t.Fatalf("initial runtime state = %+v, want stopped", status.State)
+	}
+	started, err := requestRuntimeControl(socketPath, "start")
+	if err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if !started.State.Running {
+		t.Fatalf("started runtime state = %+v, want running", started.State)
+	}
+	stopped, err := requestRuntimeControl(socketPath, "stop")
+	if err != nil {
+		t.Fatalf("stop runtime: %v", err)
+	}
+	if stopped.State.Running {
+		t.Fatalf("stopped runtime state = %+v, want stopped", stopped.State)
+	}
+	if _, err := requestRuntimeControl(socketPath, "invalid"); err == nil {
+		t.Fatal("unsupported runtime action succeeded")
+	}
+}
+
 func TestRunInitAdminConfiguresPanelCertificate(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "tapx.db")

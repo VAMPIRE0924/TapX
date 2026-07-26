@@ -5,9 +5,10 @@ STOP=9
 USE_PROCD=1
 
 PROG=/usr/bin/tapx-panel
+CONTROL_SOCKET=/var/run/tapx/runtime-control.sock
 
 start_service() {
-	local enabled initialized listen_interface db_path
+	local enabled initialized listen_interface db_path core_autostart
 	local respawn_threshold respawn_timeout respawn_retry
 
 	config_load tapx
@@ -23,6 +24,7 @@ start_service() {
 	config_get respawn_threshold panel respawn_threshold 3600
 	config_get respawn_timeout panel respawn_timeout 5
 	config_get respawn_retry panel respawn_retry 5
+	config_get_bool core_autostart core autostart 0
 
 	[ -x "$PROG" ] || {
 		echo "tapx-panel: missing executable $PROG" >&2
@@ -41,11 +43,16 @@ start_service() {
 		return 1
 	}
 	mkdir -p "${db_path%/*}"
+	mkdir -p "${CONTROL_SOCKET%/*}"
 
 	procd_open_instance panel
 	procd_set_param command "$PROG" \
 		-db "$db_path" \
-		-listen-interface "$listen_interface"
+		-listen-interface "$listen_interface" \
+		-runtime-control-socket "$CONTROL_SOCKET"
+	procd_set_param env \
+		TAPX_RUNTIME_AUTOSTART="$core_autostart" \
+		TAPX_RUNTIME_CONTROL_SOCKET="$CONTROL_SOCKET"
 	procd_set_param respawn "$respawn_threshold" "$respawn_timeout" "$respawn_retry"
 	procd_set_param file /etc/config/tapx "$db_path"
 	procd_set_param stdout 1

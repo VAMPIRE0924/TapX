@@ -22,6 +22,9 @@ function endpointPort(value) {
 	var input = String(value || ''), index = input.lastIndexOf(':');
 	return index >= 0 ? input.slice(index + 1) : '';
 }
+function runtimeRunning(result) {
+	try { return result && result.code === 0 && JSON.parse(tapx.output(result)).running === true; } catch (error) { return false; }
+}
 
 return view.extend({
 	load: function() {
@@ -31,7 +34,7 @@ return view.extend({
 				? L.resolveDefault(fs.exec('/usr/bin/tapx-panel', [ '-db', dbPath, '-show-panel-endpoint' ]), { code: 1 })
 				: Promise.resolve({ code: 1 });
 			return Promise.all([
-				L.resolveDefault(fs.exec(tapx.PIDOF, [ 'tapx-core' ]), { code: 1 }),
+				L.resolveDefault(fs.exec(tapx.CORE_INIT, [ 'runtime_status' ]), { code: 1 }),
 				L.resolveDefault(fs.exec(tapx.PIDOF, [ 'tapx-panel' ]), { code: 1 }),
 				L.resolveDefault(fs.exec('/usr/bin/tapx-core', [ '-version' ]), { code: 1 }),
 				L.resolveDefault(fs.exec('/usr/bin/tapx-panel', [ '-version' ]), { code: 1 }),
@@ -42,7 +45,7 @@ return view.extend({
 	render: function(data) {
 		var initialized = uci.get('tapx', 'panel', 'initialized') === '1';
 		var panelRunning = data[1].code === 0;
-		var coreRunning = data[0].code === 0 || (initialized && panelRunning);
+		var coreRunning = runtimeRunning(data[0]);
 		var endpoint = storedEndpoint(data[4]);
 		var port = endpointPort(endpoint && endpoint.listen) || uci.get('tapx', 'panel', 'listen_port') || '';
 		var basePath = endpoint && endpoint.basePath || uci.get('tapx', 'panel', 'base_path') || '';

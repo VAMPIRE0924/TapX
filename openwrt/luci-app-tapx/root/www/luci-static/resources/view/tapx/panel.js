@@ -29,6 +29,9 @@ function interfaceSelect(devices, selected) { var options = [ E('option', { 'val
 function storedEndpoint(result) {
 	try { return result && result.code === 0 ? JSON.parse(tapx.output(result)) : null; } catch (error) { return null; }
 }
+function runtimeRunning(result) {
+	try { return result && result.code === 0 && JSON.parse(tapx.output(result)).running === true; } catch (error) { return false; }
+}
 function splitListen(value) {
 	var input = String(value || ''), index = input.lastIndexOf(':');
 	return { port: index >= 0 ? input.slice(index + 1) : '' };
@@ -90,7 +93,7 @@ return view.extend({
 			return Promise.all([
 				network.getDevices(),
 				L.resolveDefault(fs.exec(tapx.PIDOF, [ 'tapx-panel' ]), { code: 1 }),
-				L.resolveDefault(fs.exec(tapx.PIDOF, [ 'tapx-core' ]), { code: 1 }),
+				L.resolveDefault(fs.exec(tapx.CORE_INIT, [ 'runtime_status' ]), { code: 1 }),
 				endpoint
 			]);
 		});
@@ -98,8 +101,7 @@ return view.extend({
 	render: function(data) {
 		var initialized = uci.get('tapx', 'panel', 'initialized') === '1';
 		var panelRunning = data[1].code === 0;
-		var coreManaged = initialized && panelRunning;
-		var coreRunning = data[2].code === 0 || coreManaged;
+		var coreRunning = runtimeRunning(data[2]);
 		var endpoint = storedEndpoint(data[3]), endpointListen = splitListen(endpoint && endpoint.listen);
 		var state = { initialized: initialized, interfaceName: uci.get('tapx', 'panel', 'listen_interface') || '', port: endpointListen.port || uci.get('tapx', 'panel', 'listen_port') || '', basePath: endpoint && endpoint.basePath || uci.get('tapx', 'panel', 'base_path') || '', https: endpoint ? endpoint.https === true : uci.get('tapx', 'panel', 'https') === '1', certFile: endpoint ? endpoint.certFile || '' : uci.get('tapx', 'panel', 'cert_file') || '', keyFile: endpoint ? endpoint.keyFile || '' : uci.get('tapx', 'panel', 'key_file') || '', coreAutostart: uci.get('tapx', 'core', 'autostart') === '1', panelAutostart: uci.get('tapx', 'panel', 'autostart') === '1', dbPath: uci.get('tapx', 'panel', 'db_path') || '/etc/tapx/tapx.db', panelRunning: panelRunning };
 		var httpsToggle = E('input', { 'id': 'tapx-panel-https', 'type': 'checkbox', 'checked': state.https ? '' : null });
@@ -111,7 +113,7 @@ return view.extend({
 		if (state.initialized) actions.unshift(E('a', { 'class': 'btn cbi-button cbi-button-action', 'href': tapx.panelUrl(state.port, normalizePath(state.basePath), state.https), 'target': '_blank', 'rel': 'noopener' }, tr('open')));
 		return E('div', { 'class': 'tapx-page' }, [ tapx.styles(), E('section', {}, [
 			E('div', { 'class': 'tapx-form-group' }, [ E('h3', {}, tr('luci')), E('div', {}, [ field(tr('language'), tapx.languageControl()) ]) ]),
-			E('div', { 'class': 'tapx-form-group tapx-runtime-group' }, [ E('h3', {}, tr('runtime')), E('div', { 'class': 'tapx-service-list' }, [ tapx.serviceCard(tapx.tr('core'), 'core', tapx.CORE_INIT, coreRunning, state.coreAutostart, 'tapx-core-autostart', state.initialized, coreManaged), tapx.serviceCard(tapx.tr('panel'), 'panel', tapx.PANEL_INIT, panelRunning, state.panelAutostart, 'tapx-panel-autostart', state.initialized) ]) ]),
+			E('div', { 'class': 'tapx-form-group tapx-runtime-group' }, [ E('h3', {}, tr('runtime')), E('div', { 'class': 'tapx-service-list' }, [ tapx.serviceCard(tapx.tr('core'), 'core', tapx.CORE_INIT, coreRunning, state.coreAutostart, 'tapx-core-autostart', state.initialized), tapx.serviceCard(tapx.tr('panel'), 'panel', tapx.PANEL_INIT, panelRunning, state.panelAutostart, 'tapx-panel-autostart', state.initialized) ]) ]),
 			E('div', { 'class': 'tapx-form-group' }, [ E('h3', {}, tr('access')), E('div', {}, [ field(tr('iface'), interfaceSelect(data[0], state.interfaceName), tr('ifaceHint')), field(tr('port'), input('tapx-listen-port', 'number', state.port, '2053'), tr('portHint')), field(tr('path'), input('tapx-base-path', 'text', state.basePath, '/tapx/'), tr('pathHint')), field('HTTPS', E('label', { 'class': 'tapx-switch-line' }, [ httpsToggle ]), null, 'tapx-switch-field'), E('div', { 'id': 'tapx-cert-fields', 'class': state.https ? '' : 'hidden' }, [ field(tr('cert'), input('tapx-panel-cert', 'text', state.certFile, '/etc/ssl/tapx/fullchain.pem'), tr('certHint')), field(tr('key'), input('tapx-panel-key', 'text', state.keyFile, '/etc/ssl/tapx/privkey.pem'), tr('keyHint')) ]) ]) ]),
 			E('div', { 'class': 'tapx-form-group' }, [ E('h3', {}, tr('credentials')), E('div', {}, credentialContent) ]),
 			E('div', { 'class': 'tapx-page-actions' }, actions)

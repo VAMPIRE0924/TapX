@@ -52,6 +52,8 @@ func run(args []string) error {
 	panelCertFile := fs.String("panel-cert-file", "", "panel TLS certificate file for -init-admin")
 	panelKeyFile := fs.String("panel-key-file", "", "panel TLS private key file for -init-admin")
 	disablePanelHTTPS := fs.Bool("disable-panel-https", false, "disable panel HTTPS for -set-panel-endpoint")
+	runtimeControlSocket := fs.String("runtime-control-socket", envDefault("TAPX_RUNTIME_CONTROL_SOCKET", ""), "optional local Unix socket used for runtime lifecycle control")
+	runtimeAction := fs.String("runtime-action", "", "control a running panel runtime: status, start, restart, or stop")
 	version := fs.Bool("version", false, "print version")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -61,6 +63,13 @@ func run(args []string) error {
 	if *version {
 		fmt.Printf("tapx-panel %s\n", buildinfo.Version)
 		return nil
+	}
+	if strings.TrimSpace(*runtimeAction) != "" {
+		response, err := requestRuntimeControl(*runtimeControlSocket, *runtimeAction)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(response.State)
 	}
 	if *hashPasswordStdin {
 		raw, err := io.ReadAll(os.Stdin)
@@ -154,9 +163,16 @@ func run(args []string) error {
 
 	runtimeManager := panel.NewRuntimeManager()
 	defer runtimeManager.Stop()
-	if err := restoreStoredRuntime(context.Background(), store, runtimeManager); err != nil {
-		fmt.Fprintf(os.Stderr, "tapx-panel: stored runtime restore failed: %v\n", err)
+	if envDefault("TAPX_RUNTIME_AUTOSTART", "1") != "0" {
+		if err := restoreStoredRuntime(context.Background(), store, runtimeManager); err != nil {
+			fmt.Fprintf(os.Stderr, "tapx-panel: stored runtime restore failed: %v\n", err)
+		}
 	}
+	closeRuntimeControl, err := startRuntimeControl(*runtimeControlSocket, store, runtimeManager)
+	if err != nil {
+		return err
+	}
+	defer closeRuntimeControl()
 	restartCh := make(chan struct{}, 1)
 
 	panelServer, err := loadPanelServerSettings(context.Background(), store, *listen, listenFlagSet)

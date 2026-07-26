@@ -336,8 +336,12 @@ Public servers are validation targets only. They are not development machines an
 ## OpenWrt runtime ownership
 
 - When `tapx-panel` is enabled and initialized, it is the sole owner of the
-  local runtime lifecycle. The legacy `tapx-core` init service delegates to the
-  panel instead of starting a second process that competes for TUN/TAP devices.
-- LuCI service restart remains a real init-script restart even when no UCI
-  value changed. Stored listener and connector objects survive that restart
-  and the panel restores their runtime state.
+  local runtime lifecycle so a second process cannot compete for TUN/TAP
+  devices. A root-only local Unix control socket lets the `tapx-core` init
+  service query, start, restart, and stop that logical runtime independently;
+  stopping the logical core does not stop the Web panel.
+- LuCI exposes independent controls for the logical TapX core and the Web
+  panel. A core restart reapplies the stored runtime without restarting the
+  panel, while a panel service restart remains a real init-script restart.
+  Stored listener and connector objects survive both operations; a panel
+  service start restores the runtime when core autostart is enabled.

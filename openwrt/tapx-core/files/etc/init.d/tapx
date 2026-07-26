@@ -8,6 +8,52 @@ PROG=/usr/bin/tapx-core
 PANEL=/usr/bin/tapx-panel
 DEFAULT_CONFIG=/etc/tapx/runtime.json
 DEFAULT_DB=/etc/tapx/tapx.db
+CONTROL_SOCKET=/var/run/tapx/runtime-control.sock
+
+extra_command "runtime_status" "Show the TapX runtime state managed by TapX-UI"
+extra_command "runtime_start" "Start the TapX runtime without restarting TapX-UI"
+extra_command "runtime_restart" "Restart the TapX runtime without restarting TapX-UI"
+extra_command "runtime_stop" "Stop the TapX runtime without stopping TapX-UI"
+
+panel_control() {
+	[ -S "$CONTROL_SOCKET" ] || return 1
+	"$PANEL" -runtime-control-socket "$CONTROL_SOCKET" -runtime-action "$1"
+}
+
+runtime_status() {
+	if panel_control status; then
+		return 0
+	fi
+	if pidof tapx-core >/dev/null 2>&1; then
+		printf '%s\n' '{"running":true,"mode":"standalone"}'
+	else
+		printf '%s\n' '{"running":false,"mode":"standalone"}'
+	fi
+}
+
+runtime_start() {
+	if [ -S "$CONTROL_SOCKET" ]; then
+		panel_control start
+		return
+	fi
+	/etc/init.d/tapx start
+}
+
+runtime_restart() {
+	if [ -S "$CONTROL_SOCKET" ]; then
+		panel_control restart
+		return
+	fi
+	/etc/init.d/tapx restart
+}
+
+runtime_stop() {
+	if [ -S "$CONTROL_SOCKET" ]; then
+		panel_control stop
+		return
+	fi
+	/etc/init.d/tapx stop
+}
 
 start_service() {
 	local enabled panel_enabled panel_initialized config_path db_path
@@ -16,14 +62,14 @@ start_service() {
 	config_load tapx
 	config_get_bool panel_enabled panel enabled 0
 	config_get_bool panel_initialized panel initialized 0
-	[ "$panel_enabled" = "1" ] && [ "$panel_initialized" = "1" ] && {
-		echo "tapx: runtime lifecycle is delegated to tapx-panel"
-		return 0
-	}
 	config_get_bool enabled core enabled 0
 	[ "$enabled" = "1" ] || {
 		echo "tapx: disabled in /etc/config/tapx"
 		return 0
+	}
+	[ "$panel_enabled" = "1" ] && [ "$panel_initialized" = "1" ] && [ -S "$CONTROL_SOCKET" ] && {
+		panel_control start
+		return
 	}
 
 	config_get config_path core config_path "$DEFAULT_CONFIG"

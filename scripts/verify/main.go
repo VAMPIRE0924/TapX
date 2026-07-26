@@ -708,13 +708,13 @@ func (v *verifier) checkOpenWrtLuCI() {
 
 	viewChecks := map[string][]string{
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/tapx/common.js": {
-			"tapx.luci.language", "languageControl", "serviceCard", "panelUrl",
+			"tapx.luci.language", "languageControl", "serviceCard", "panelUrl", "'runtime_' + command",
 		},
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/overview.js": {
-			"tapx.status", "runtimeConfig", "database", "uciConfig",
+			"tapx.status", "runtimeConfig", "database", "uciConfig", "runtime_status", "runtimeRunning",
 		},
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/panel.js": {
-			"Listening interface", "Save and apply", "coreAutostart", "panelAutostart", "tapx.languageControl",
+			"Listening interface", "Save and apply", "coreAutostart", "panelAutostart", "tapx.languageControl", "runtime_status", "runtimeRunning",
 		},
 		"openwrt/luci-app-tapx/root/www/luci-static/resources/view/tapx/backup.js": {
 			"tapx-openwrt-config", "Download backup", "Choose backup", "Reset TapX",
@@ -734,6 +734,9 @@ func (v *verifier) checkOpenWrtLuCI() {
 			if !strings.Contains(text, marker) {
 				v.fail("LuCI view %s missing %q", rel, marker)
 			}
+		}
+		if strings.Contains(text, "managedByPanel") {
+			v.fail("LuCI view %s still hides independent core controls behind managed mode", rel)
 		}
 	}
 	helper, err := os.ReadFile(v.path("openwrt/luci-app-tapx/root/usr/libexec/tapx-openwrt-config"))
@@ -774,10 +777,15 @@ func (v *verifier) checkOpenWrtLuCI() {
 		for _, want := range []string{
 			"config_get_bool panel_enabled panel enabled 0",
 			"config_get_bool panel_initialized panel initialized 0",
-			"runtime lifecycle is delegated to tapx-panel",
+			"runtime_status",
+			"runtime_start",
+			"runtime_restart",
+			"runtime_stop",
+			"-runtime-control-socket",
+			"-runtime-action",
 		} {
 			if !strings.Contains(initText, want) {
-				v.fail("OpenWrt core init missing panel lifecycle guard %q", want)
+				v.fail("OpenWrt core init missing independent runtime control %q", want)
 			}
 		}
 	}
