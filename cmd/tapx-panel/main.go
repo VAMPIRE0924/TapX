@@ -41,6 +41,8 @@ func run(args []string) error {
 	exportBackup := fs.String("export-backup", "", "write a consistent portable TapX database backup and exit")
 	restoreBackup := fs.String("restore-backup", "", "restore a portable TapX database backup and exit")
 	exportRuntimeConfig := fs.String("export-runtime-config", "", "write the validated runtime object JSON stored in the database and exit")
+	showPanelEndpoint := fs.Bool("show-panel-endpoint", false, "print the stored panel endpoint as JSON and exit")
+	panelEndpointField := fs.String("panel-endpoint-field", "", "print one stored panel endpoint field and exit: listen, base-path, https, cert-file, or key-file")
 	hashPasswordStdin := fs.Bool("hash-password-stdin", false, "read password from stdin and print a panel password hash")
 	initAdmin := fs.Bool("init-admin", false, "initialize panel admin auth settings in the database and exit")
 	setPanelEndpoint := fs.Bool("set-panel-endpoint", false, "update the panel listen address and base path in the database and exit")
@@ -110,6 +112,16 @@ func run(args []string) error {
 		}
 		fmt.Printf("tapx-panel runtime config exported: %s\n", *exportRuntimeConfig)
 		return nil
+	}
+	if *showPanelEndpoint || strings.TrimSpace(*panelEndpointField) != "" {
+		settings, err := loadPanelServerSettings(context.Background(), store, *listen, false)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(*panelEndpointField) != "" {
+			return printPanelEndpointField(os.Stdout, settings, *panelEndpointField)
+		}
+		return json.NewEncoder(os.Stdout).Encode(settings)
 	}
 
 	if *initAdmin {
@@ -234,12 +246,12 @@ func envDefault(name, fallback string) string {
 }
 
 type panelServerSettings struct {
-	Listen   string
-	Domain   string
-	BasePath string
-	HTTPS    bool
-	CertFile string
-	KeyFile  string
+	Listen   string `json:"listen"`
+	Domain   string `json:"domain"`
+	BasePath string `json:"basePath"`
+	HTTPS    bool   `json:"https"`
+	CertFile string `json:"certFile"`
+	KeyFile  string `json:"keyFile"`
 }
 
 func (s panelServerSettings) Scheme() string {
@@ -247,6 +259,30 @@ func (s panelServerSettings) Scheme() string {
 		return "https"
 	}
 	return "http"
+}
+
+func printPanelEndpointField(w io.Writer, settings panelServerSettings, field string) error {
+	var value string
+	switch strings.TrimSpace(field) {
+	case "listen":
+		value = settings.Listen
+	case "base-path":
+		value = settings.BasePath
+	case "https":
+		if settings.HTTPS {
+			value = "1"
+		} else {
+			value = "0"
+		}
+	case "cert-file":
+		value = settings.CertFile
+	case "key-file":
+		value = settings.KeyFile
+	default:
+		return fmt.Errorf("unsupported panel endpoint field %q", field)
+	}
+	_, err := fmt.Fprintln(w, value)
+	return err
 }
 
 func loadPanelServerSettings(ctx context.Context, store *panel.Store, fallbackListen string, listenOverride bool) (panelServerSettings, error) {

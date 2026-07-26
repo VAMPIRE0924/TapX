@@ -15,24 +15,39 @@ var EN = {
 var tr = tapx.translator(ZH, EN);
 function value(text) { return text || tr('notConfigured'); }
 function row(label, content) { return E('div', { 'class': 'tapx-detail-row' }, [ E('dt', {}, label), E('dd', {}, content) ]); }
+function storedEndpoint(result) {
+	try { return result && result.code === 0 ? JSON.parse(tapx.output(result)) : null; } catch (error) { return null; }
+}
+function endpointPort(value) {
+	var input = String(value || ''), index = input.lastIndexOf(':');
+	return index >= 0 ? input.slice(index + 1) : '';
+}
 
 return view.extend({
 	load: function() {
-		return Promise.all([
-			uci.load('tapx'),
-			L.resolveDefault(fs.exec(tapx.PIDOF, [ 'tapx-core' ]), { code: 1 }),
-			L.resolveDefault(fs.exec(tapx.PIDOF, [ 'tapx-panel' ]), { code: 1 }),
-			L.resolveDefault(fs.exec('/usr/bin/tapx-core', [ '-version' ]), { code: 1 }),
-			L.resolveDefault(fs.exec('/usr/bin/tapx-panel', [ '-version' ]), { code: 1 })
-		]);
+		return uci.load('tapx').then(function() {
+			var dbPath = uci.get('tapx', 'panel', 'db_path') || '/etc/tapx/tapx.db';
+			var endpoint = uci.get('tapx', 'panel', 'initialized') === '1'
+				? L.resolveDefault(fs.exec('/usr/bin/tapx-panel', [ '-db', dbPath, '-show-panel-endpoint' ]), { code: 1 })
+				: Promise.resolve({ code: 1 });
+			return Promise.all([
+				L.resolveDefault(fs.exec(tapx.PIDOF, [ 'tapx-core' ]), { code: 1 }),
+				L.resolveDefault(fs.exec(tapx.PIDOF, [ 'tapx-panel' ]), { code: 1 }),
+				L.resolveDefault(fs.exec('/usr/bin/tapx-core', [ '-version' ]), { code: 1 }),
+				L.resolveDefault(fs.exec('/usr/bin/tapx-panel', [ '-version' ]), { code: 1 }),
+				endpoint
+			]);
+		});
 	},
 	render: function(data) {
 		var initialized = uci.get('tapx', 'panel', 'initialized') === '1';
-		var panelRunning = data[2].code === 0;
-		var coreRunning = data[1].code === 0 || (initialized && panelRunning);
-		var port = uci.get('tapx', 'panel', 'listen_port') || '';
-		var basePath = uci.get('tapx', 'panel', 'base_path') || '';
-		var panelUrl = initialized && port && basePath ? tapx.panelUrl(port, basePath, uci.get('tapx', 'panel', 'https') === '1') : '';
+		var panelRunning = data[1].code === 0;
+		var coreRunning = data[0].code === 0 || (initialized && panelRunning);
+		var endpoint = storedEndpoint(data[4]);
+		var port = endpointPort(endpoint && endpoint.listen) || uci.get('tapx', 'panel', 'listen_port') || '';
+		var basePath = endpoint && endpoint.basePath || uci.get('tapx', 'panel', 'base_path') || '';
+		var https = endpoint ? endpoint.https === true : uci.get('tapx', 'panel', 'https') === '1';
+		var panelUrl = initialized && port && basePath ? tapx.panelUrl(port, basePath, https) : '';
 		var panelLink = panelUrl ? E('a', { 'href': panelUrl, 'target': '_blank', 'rel': 'noopener noreferrer' }, panelUrl) : tr('notConfigured');
 
 		return E('div', { 'class': 'tapx-page' }, [
@@ -42,11 +57,11 @@ return view.extend({
 				E('dl', { 'class': 'tapx-details' }, [
 					row(tr('coreStatus'), tapx.status(coreRunning)),
 					row(tr('panelStatus'), tapx.status(panelRunning)),
-					row(tr('coreVersion'), value(tapx.output(data[3]))),
-					row(tr('panelVersion'), value(tapx.output(data[4]))),
+					row(tr('coreVersion'), value(tapx.output(data[2]))),
+					row(tr('panelVersion'), value(tapx.output(data[3]))),
 					row(tr('panelUrl'), panelLink),
-					row(tr('certificate'), value(uci.get('tapx', 'panel', 'cert_file'))),
-					row(tr('privateKey'), value(uci.get('tapx', 'panel', 'key_file'))),
+					row(tr('certificate'), value(endpoint ? endpoint.certFile : uci.get('tapx', 'panel', 'cert_file'))),
+					row(tr('privateKey'), value(endpoint ? endpoint.keyFile : uci.get('tapx', 'panel', 'key_file'))),
 					row(tr('runtimeConfig'), value(uci.get('tapx', 'core', 'config_path') || '/etc/tapx/runtime.json')),
 					row(tr('database'), value(uci.get('tapx', 'panel', 'db_path') || '/etc/tapx/tapx.db')),
 					row(tr('uciConfig'), '/etc/config/tapx')

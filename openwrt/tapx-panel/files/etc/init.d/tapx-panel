@@ -7,7 +7,7 @@ USE_PROCD=1
 PROG=/usr/bin/tapx-panel
 
 start_service() {
-	local enabled initialized listen_interface listen_port base_path db_path
+	local enabled initialized listen_interface db_path
 	local respawn_threshold respawn_timeout respawn_retry
 
 	config_load tapx
@@ -19,8 +19,6 @@ start_service() {
 
 	config_get_bool initialized panel initialized 0
 	config_get listen_interface panel listen_interface ''
-	config_get listen_port panel listen_port ''
-	config_get base_path panel base_path ''
 	config_get db_path panel db_path '/etc/tapx/tapx.db'
 	config_get respawn_threshold panel respawn_threshold 3600
 	config_get respawn_timeout panel respawn_timeout 5
@@ -38,23 +36,6 @@ start_service() {
 		echo "tapx-panel: listen interface does not exist: $listen_interface" >&2
 		return 1
 	fi
-	case "$listen_port" in
-		''|*[!0-9]*)
-			echo "tapx-panel: listen port must be an integer" >&2
-			return 1
-			;;
-	esac
-	[ "$listen_port" -ge 1 ] 2>/dev/null && [ "$listen_port" -le 65535 ] 2>/dev/null || {
-		echo "tapx-panel: listen port must be between 1 and 65535" >&2
-		return 1
-	}
-	case "$base_path" in
-		/*/) ;;
-		*)
-			echo "tapx-panel: login path must start and end with /" >&2
-			return 1
-			;;
-	esac
 	[ -s "$db_path" ] || {
 		echo "tapx-panel: initialized database is missing: $db_path" >&2
 		return 1
@@ -64,9 +45,7 @@ start_service() {
 	procd_open_instance panel
 	procd_set_param command "$PROG" \
 		-db "$db_path" \
-		-listen ":$listen_port" \
-		-listen-interface "$listen_interface" \
-		-base-path "$base_path"
+		-listen-interface "$listen_interface"
 	procd_set_param respawn "$respawn_threshold" "$respawn_timeout" "$respawn_retry"
 	procd_set_param file /etc/config/tapx "$db_path"
 	procd_set_param stdout 1

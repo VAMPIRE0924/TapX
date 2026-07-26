@@ -15,6 +15,7 @@ import { SecuritySettings } from '../features/security/SecuritySettings';
 import './SettingsPage.css';
 import { hashFromPath } from '../app/hash-route';
 import { applyPanelTitle } from '../app/panel-name';
+import { panelRestartURL } from '../shared/panel-endpoint';
 
 interface PanelSettings extends Record<string, unknown> {
   panelName?: string;
@@ -118,6 +119,7 @@ export function SettingsPage({ currentPath }: { currentPath: string }) {
   }
 
   function restartPanel() {
+    const restartURL = panelRestartURL(settings, window.location);
     modal.confirm({
       title: t('settings.restart'),
       content: t('settings.restartConfirm'),
@@ -128,7 +130,7 @@ export function SettingsPage({ currentPath }: { currentPath: string }) {
         try {
           await restartPanelService();
           messageApi.success(t('settings.restarting'));
-          window.setTimeout(() => window.location.reload(), 1500);
+          window.setTimeout(() => window.location.assign(restartURL), 1500);
         } catch (err) {
           messageApi.error(err instanceof Error ? err.message : t('settings.restartFailed'));
           throw err;

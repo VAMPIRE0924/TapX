@@ -379,7 +379,7 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-$sysconfdir/tapx.env
-ExecStart=$prefix/bin/tapx-panel -listen=\${TAPX_PANEL_LISTEN} -base-path=\${TAPX_PANEL_BASE_PATH}
+ExecStart=$prefix/bin/tapx-panel
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576
@@ -602,6 +602,13 @@ show_status() {
 
 show_settings() {
   load_env
+  local stored_listen stored_path stored_https
+  stored_listen="$(TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" "$prefix/bin/tapx-panel" -panel-endpoint-field listen)"
+  stored_path="$(TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" "$prefix/bin/tapx-panel" -panel-endpoint-field base-path)"
+  stored_https="$(TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" "$prefix/bin/tapx-panel" -panel-endpoint-field https)"
+  TAPX_PANEL_LISTEN="$stored_listen"
+  TAPX_PANEL_BASE_PATH="$stored_path"
+  TAPX_PANEL_HTTPS="$stored_https"
   printf '%b%s%b\n' "$blue" "$(text 'Panel settings' '面板设置')" "$plain"
   printf '%s %s\n' "$(text 'Listen:' '监听：')" "${TAPX_PANEL_LISTEN:-}"
   printf '%s %s\n' "$(text 'Path:' '入口：')" "${TAPX_PANEL_BASE_PATH:-/}"
@@ -655,6 +662,9 @@ check_installation() {
 modify_endpoint() {
   need_root
   load_env
+  TAPX_PANEL_LISTEN="$(TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" "$prefix/bin/tapx-panel" -panel-endpoint-field listen)"
+  TAPX_PANEL_BASE_PATH="$(TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" "$prefix/bin/tapx-panel" -panel-endpoint-field base-path)"
+  TAPX_PANEL_HTTPS="$(TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" "$prefix/bin/tapx-panel" -panel-endpoint-field https)"
   local current_port="${TAPX_PANEL_LISTEN##*:}" port_input="" path_input="" cert_mode="" cert="" key=""
   "$systemctl_cmd" stop "$service_name" || true
 

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"tapx/internal/config"
@@ -369,6 +371,35 @@ func TestLoadPanelServerSettingsListenFlagOverridesSettings(t *testing.T) {
 	}
 	if settings.Listen != "127.0.0.1:18080" || settings.Scheme() != "http" {
 		t.Fatalf("settings = %+v, want flag listen", settings)
+	}
+}
+
+func TestPrintPanelEndpointField(t *testing.T) {
+	settings := panelServerSettings{
+		Listen:   "[::]:24443",
+		BasePath: "/tapx/",
+		HTTPS:    true,
+		CertFile: "/etc/tapx/cert.pem",
+		KeyFile:  "/etc/tapx/key.pem",
+	}
+	tests := map[string]string{
+		"listen":    "[::]:24443\n",
+		"base-path": "/tapx/\n",
+		"https":     "1\n",
+		"cert-file": "/etc/tapx/cert.pem\n",
+		"key-file":  "/etc/tapx/key.pem\n",
+	}
+	for field, want := range tests {
+		var output strings.Builder
+		if err := printPanelEndpointField(&output, settings, field); err != nil {
+			t.Fatalf("print %s: %v", field, err)
+		}
+		if output.String() != want {
+			t.Fatalf("print %s = %q, want %q", field, output.String(), want)
+		}
+	}
+	if err := printPanelEndpointField(io.Discard, settings, "unknown"); err == nil {
+		t.Fatal("expected unsupported field to fail")
 	}
 }
 

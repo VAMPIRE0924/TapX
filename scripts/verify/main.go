@@ -495,7 +495,7 @@ func (v *verifier) checkLinuxInstall() {
 			"TAPX_DB_SOURCE",
 		},
 		"packaging/systemd/tapx-panel.service": {
-			"-base-path=${TAPX_PANEL_BASE_PATH}",
+			"ExecStart=/usr/local/bin/tapx-panel",
 			"EnvironmentFile=-/etc/tapx/tapx.env",
 		},
 		"internal/panel/static/index.html": {
