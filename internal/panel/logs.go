@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const defaultLogLimit = 500
+const defaultLogLimit = 1000
 
 type LogEvent struct {
 	Seq     uint64 `json:"seq"`

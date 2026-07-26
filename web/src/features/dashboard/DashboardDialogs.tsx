@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ClearOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
   DownloadOutlined,
@@ -9,7 +8,6 @@ import {
 import { Alert, Button, Checkbox, Empty, Modal, Select, Space, Spin, Tabs, Upload, message } from 'antd';
 import type { UploadProps } from 'antd';
 import {
-  clearPanelLogs,
   downloadBackupDatabase,
   getPanelLogs,
   restoreBackupDatabase,
@@ -49,14 +47,14 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
   const [events, setEvents] = useState<PanelLogEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [limit, setLimit] = useState(20);
-  const [level, setLevel] = useState('all');
+  const [level, setLevel] = useState('info');
   const [includeSystem, setIncludeSystem] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [messageApi, contextHolder] = message.useMessage();
 
   const filtered = useMemo(() => events
     .filter((event) => logMatchesScope(event, scope))
-    .filter((event) => level === 'all' || normalizeLogLevel(event.level) === level)
+    .filter((event) => logMatchesLevel(event.level, level))
     .slice(-limit)
     .reverse(), [events, level, limit, scope]);
 
@@ -77,28 +75,9 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
 
   useEffect(() => {
     if (!open || !autoRefresh) return undefined;
-    const timer = window.setInterval(() => void load(), 3000);
+    const timer = window.setInterval(() => void load(), 5000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, load, open]);
-
-  function confirmClear() {
-    Modal.confirm({
-      title: t('dashboard.clearLogsConfirm'),
-      content: t('dashboard.clearLogsConfirmHelp'),
-      okText: t('dashboard.clear'),
-      cancelText: t('dashboard.cancel'),
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        try {
-          await clearPanelLogs();
-          setEvents([]);
-          messageApi.success(t('dashboard.logsCleared'));
-        } catch (error) {
-          messageApi.error(error instanceof Error ? error.message : t('dashboard.logClearFailed'));
-        }
-      },
-    });
-  }
 
   const title = scope === 'all'
     ? t('dashboard.panelLogs')
@@ -131,7 +110,7 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
             />
           </span>
         )}
-        width={900}
+        width={800}
         onCancel={onClose}
         footer={null}
       >
@@ -143,7 +122,7 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
               value={limit}
               aria-label={t('dashboard.logLineCount')}
               onChange={setLimit}
-              options={[20, 50, 100, 200, 500].map((value) => ({ value, label: String(value) }))}
+              options={[20, 50, 100, 500, 1000].map((value) => ({ value, label: String(value) }))}
             />
             <Select
               className="log-level-select"
@@ -152,9 +131,9 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
               aria-label={t('dashboard.logLevelFilter')}
               onChange={setLevel}
               options={[
-                { value: 'all', label: t('dashboard.allLevels') },
                 { value: 'debug', label: 'Debug' },
                 { value: 'info', label: 'Info' },
+                { value: 'notice', label: 'Notice' },
                 { value: 'warn', label: 'Warning' },
                 { value: 'error', label: 'Error' },
               ]}
@@ -163,11 +142,6 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
             <Checkbox checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)}>{t('dashboard.autoRefresh')}</Checkbox>
           </Space>
           <Space size={6}>
-            {scope === 'all' ? (
-              <Button danger type="text" size="small" icon={<ClearOutlined />} disabled={events.length === 0} onClick={confirmClear}>
-                {t('dashboard.clear')}
-              </Button>
-            ) : null}
             <Button type="primary" size="small" icon={<DownloadOutlined />} disabled={filtered.length === 0} aria-label={t('dashboard.downloadLogs')} onClick={downloadLogs} />
           </Space>
         </div>
@@ -189,12 +163,28 @@ export function LogDialog({ open, scope, onClose }: { open: boolean; scope: LogS
   );
 }
 
-function normalizeLogLevel(level: string): 'debug' | 'info' | 'warn' | 'error' {
+type NormalizedLogLevel = 'debug' | 'info' | 'notice' | 'warn' | 'error';
+
+function normalizeLogLevel(level: string): NormalizedLogLevel {
   const normalized = String(level || '').toLowerCase();
   if (normalized === 'warning') return 'warn';
-  if (normalized === 'error' || normalized === 'fatal' || normalized === 'panic') return 'error';
+  if (normalized === 'error' || normalized === 'err' || normalized === 'critical'
+    || normalized === 'crit' || normalized === 'alert' || normalized === 'emerg'
+    || normalized === 'fatal' || normalized === 'panic') return 'error';
   if (normalized === 'debug' || normalized === 'trace') return 'debug';
+  if (normalized === 'notice') return 'notice';
   return normalized === 'warn' ? 'warn' : 'info';
+}
+
+export function logMatchesLevel(eventLevel: string, selectedLevel: string): boolean {
+  const priorities: Record<NormalizedLogLevel, number> = {
+    debug: 0,
+    info: 1,
+    notice: 2,
+    warn: 3,
+    error: 4,
+  };
+  return priorities[normalizeLogLevel(eventLevel)] >= priorities[normalizeLogLevel(selectedLevel)];
 }
 
 function displayLogLevel(level: string): string {

@@ -718,9 +718,11 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		events := s.logs.List()
+		var events []LogEvent
 		if parseBoolQuery(r.URL.Query().Get("system")) {
-			events = append(events, readSystemLogs(r.Context(), defaultLogLimit)...)
+			events = readSystemLogs(r.Context(), defaultLogLimit)
+		} else {
+			events = s.logs.List()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"events": events})
 	case http.MethodDelete:
