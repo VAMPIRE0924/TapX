@@ -77,10 +77,16 @@ func TestRuntimeManagerRejectsNetworkConflictBeforeControllerMutation(t *testing
 }
 
 func TestRuntimeManagerControlsComponentsWithoutReplacingController(t *testing.T) {
-	controller := &fakeRuntimeController{}
+	controller := &fakeRuntimeController{
+		xrayStates: []xrayruntime.State{{Runtime: "external", Running: true, EndpointCount: 1}},
+	}
 	manager := newFakeRuntimeManager(controller)
-	if _, err := manager.Apply(&config.GeneratedRuntime{}); err != nil {
+	initial, err := manager.Apply(&config.GeneratedRuntime{})
+	if err != nil {
 		t.Fatalf("apply runtime: %v", err)
+	}
+	if !initial.ComponentStates[core.RuntimeComponentTapX] || !initial.ComponentStates[core.RuntimeComponentExternalXray] {
+		t.Fatalf("initial component states = %+v", initial.ComponentStates)
 	}
 
 	state, err := manager.RestartComponent(core.RuntimeComponentEmbeddedXray)
@@ -92,6 +98,9 @@ func TestRuntimeManagerControlsComponentsWithoutReplacingController(t *testing.T
 	}
 	if controller.stopCalls != 0 || state.Generation != 1 || state.LastReloadMode != "component-restart:embedded-xray" {
 		t.Fatalf("state after component restart = %+v stopCalls=%d", state, controller.stopCalls)
+	}
+	if _, configured := state.ComponentStates[core.RuntimeComponentEmbeddedXray]; configured {
+		t.Fatalf("unconfigured embedded xray gained a component state: %+v", state.ComponentStates)
 	}
 
 	state, err = manager.StopComponent(core.RuntimeComponentTapX)
@@ -113,6 +122,20 @@ func TestRuntimeManagerControlsComponentsWithoutReplacingController(t *testing.T
 	}
 	if !state.ComponentStates[core.RuntimeComponentTapX] {
 		t.Fatalf("tapx component state after restart = %+v", state.ComponentStates)
+	}
+	state, err = manager.StopComponent(core.RuntimeComponentExternalXray)
+	if err != nil {
+		t.Fatalf("stop external xray: %v", err)
+	}
+	if state.ComponentStates[core.RuntimeComponentExternalXray] {
+		t.Fatalf("external xray component state after stop = %+v", state.ComponentStates)
+	}
+	state, err = manager.RestartComponent(core.RuntimeComponentExternalXray)
+	if err != nil {
+		t.Fatalf("restart external xray: %v", err)
+	}
+	if !state.ComponentStates[core.RuntimeComponentExternalXray] {
+		t.Fatalf("external xray component state after restart = %+v", state.ComponentStates)
 	}
 }
 
@@ -485,6 +508,7 @@ type fakeRuntimeController struct {
 	udpPipes           []*core.UDPPipeHandle
 	tcpPipes           []*core.TCPPipeHandle
 	xrayPipes          []*core.XrayPipeHandle
+	xrayStates         []xrayruntime.State
 	componentRestarts  []string
 	componentStops     []string
 }
@@ -538,7 +562,7 @@ func (c *fakeRuntimeController) XrayPipes() []*core.XrayPipeHandle {
 }
 
 func (c *fakeRuntimeController) XrayStates() []xrayruntime.State {
-	return nil
+	return append([]xrayruntime.State(nil), c.xrayStates...)
 }
 
 func (c *fakeRuntimeController) RestartComponent(component string, runtime *config.GeneratedRuntime) error {
