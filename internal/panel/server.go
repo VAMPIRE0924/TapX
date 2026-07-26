@@ -667,7 +667,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanup()
-	if err := s.store.RestoreDatabaseFile(r.Context(), path); err != nil {
+	if err := s.store.RestorePortableDatabaseFile(r.Context(), path); err != nil {
 		s.log("error", "backup.restore", err.Error())
 		writeError(w, err)
 		return

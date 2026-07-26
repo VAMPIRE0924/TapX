@@ -737,25 +737,61 @@ modify_endpoint() {
 reset_credentials() {
   need_root
   load_env
-  local confirm="" username password hash
+  local confirm="" username password hash rollback reset_ok=0 rollback_ok=0 service_ok=0
   read_value confirm "$(text 'Generate a new random administrator username and password? [y/N]: ' '随机重置面板用户名和密码？[y/N]：')"
   is_yes "$confirm" || return
   username="tapx_$(random_token 6)"
   password="$(random_token 21)"
   hash="$(hash_password "$prefix/bin/tapx-panel" "$password")"
-  TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" \
-  TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" \
-  "$prefix/bin/tapx-panel" \
-    -listen="${TAPX_PANEL_LISTEN}" \
-    -base-path="${TAPX_PANEL_BASE_PATH}" \
-    -init-admin \
-    -admin-username="$username" \
-    -admin-password-hash="$hash"
-  "$systemctl_cmd" restart "$service_name"
-  wait_for_service
-  printf '\n%b%s%b\n' "$green" "$(text 'Administrator credentials were reset.' '面板用户名和密码已重置。')" "$plain"
-  printf '%s %s\n%s %s\n' "$(text 'Username:' '用户名：')" "$username" "$(text 'Password:' '密码：')" "$password"
-  printf '%b%s%b\n' "$yellow" "$(text 'The generated credentials are shown only once.' '随机生成的用户名和密码只显示这一次。')" "$plain"
+  rollback="$(mktemp /tmp/tapx-credentials-rollback.XXXXXX.db)"
+  if ! TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" \
+    TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" \
+    "$prefix/bin/tapx-panel" -export-backup "$rollback" >/dev/null; then
+    rm -f "$rollback"
+    printf '%s\n' "$(text 'Credential reset failed before making changes; the current credentials are unchanged.' '凭据重置在修改前失败，当前凭据未改变。')" >&2
+    return 1
+  fi
+  if TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" \
+    TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" \
+    "$prefix/bin/tapx-panel" \
+      -listen="${TAPX_PANEL_LISTEN}" \
+      -base-path="${TAPX_PANEL_BASE_PATH}" \
+      -init-admin \
+      -admin-username="$username" \
+      -admin-password-hash="$hash"; then
+    reset_ok=1
+  fi
+  if [[ "$reset_ok" == "1" ]] &&
+    "$systemctl_cmd" restart "$service_name" &&
+    wait_for_service; then
+    rm -f "$rollback"
+    printf '\n%b%s%b\n' "$green" "$(text 'Administrator credentials were reset.' '面板用户名和密码已重置。')" "$plain"
+    printf '%s %s\n%s %s\n' "$(text 'Username:' '用户名：')" "$username" "$(text 'Password:' '密码：')" "$password"
+    printf '%b%s%b\n' "$yellow" "$(text 'The generated credentials are shown only once.' '随机生成的用户名和密码只显示这一次。')" "$plain"
+    return
+  fi
+
+  "$systemctl_cmd" stop "$service_name" || true
+  if TAPX_DB_DRIVER="${TAPX_DB_DRIVER:-sqlite}" \
+    TAPX_DB_SOURCE="${TAPX_DB_SOURCE:-$db_path_default}" \
+    "$prefix/bin/tapx-panel" -restore-backup "$rollback" >/dev/null; then
+    rollback_ok=1
+  fi
+  if [[ "$rollback_ok" == "1" ]] &&
+    "$systemctl_cmd" start "$service_name" &&
+    wait_for_service; then
+    service_ok=1
+  fi
+  if [[ "$rollback_ok" != "1" ]]; then
+    printf '%s %s\n' "$(text 'Credential reset failed and the database rollback also failed. The service was left stopped; restore this backup before continuing:' '凭据重置失败，数据库回滚也失败。服务已保持停止；继续操作前请先恢复此备份：')" "$rollback" >&2
+  elif [[ "$service_ok" != "1" ]]; then
+    rm -f "$rollback"
+    printf '%s\n' "$(text 'Credential reset failed. The previous database and credentials were restored, but the panel service did not recover.' '凭据重置失败。原数据库和凭据已恢复，但面板服务未恢复。')" >&2
+  else
+    rm -f "$rollback"
+    printf '%s\n' "$(text 'Credential reset failed; the previous credentials were restored and verified.' '凭据重置失败；原凭据已恢复并完成验证。')" >&2
+  fi
+  return 1
 }
 
 change_database() {

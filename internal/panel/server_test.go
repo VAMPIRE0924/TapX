@@ -468,9 +468,24 @@ func TestServerBackupRestoreAndLogs(t *testing.T) {
 	server := httptest.NewServer(panelServer.Handler())
 	t.Cleanup(server.Close)
 
-	putJSON(t, server.URL+"/api/config", mustJSON(t, sampleConfig()), http.StatusOK)
+	backupConfig := sampleConfig()
+	backupConfig.Settings[0].PanelName = "Backup panel"
+	backupConfig.Settings[0].PanelListen = "0.0.0.0:9443"
+	backupConfig.Settings[0].PanelDomain = "backup.example"
+	backupConfig.Settings[0].PanelBasePath = "/backup/"
+	backupConfig.Settings[0].PanelHTTPS = true
+	backupConfig.Settings[0].PanelCertFile = "/backup/fullchain.pem"
+	backupConfig.Settings[0].PanelKeyFile = "/backup/privkey.pem"
+	backupConfig.Settings[0].AdminUsername = "backup-admin"
+	backupConfig.Settings[0].AdminPasswordHash = "backup-hash"
+	backupConfig.Settings[0].SessionTTLSecond = 900
+	backupConfig.Settings[0].ExternalXrayPath = "/backup/xray"
+	putJSON(t, server.URL+"/api/config", mustJSON(t, backupConfig), http.StatusOK)
 	if err := store.SetIntegration(context.Background(), nordIntegrationName, nordIntegrationState{PrivateKey: "backup-key"}); err != nil {
 		t.Fatalf("seed integration: %v", err)
+	}
+	if err := store.SetIntegration(context.Background(), panelSecurityIntegration, panelSecurityState{TOTPSecret: "backup-secret"}); err != nil {
+		t.Fatalf("seed panel security: %v", err)
 	}
 	backupMetric := DashboardMetricSample{
 		At: 1000, CPU: 12.5, Memory: 25, Swap: 5, DiskUsage: 40,
@@ -503,9 +518,9 @@ func TestServerBackupRestoreAndLogs(t *testing.T) {
 	}
 	defer cleanupBackup()
 	backupStore := &Store{db: backupDB}
-	backupConfig, err := backupStore.LoadConfig(context.Background())
-	if err != nil || len(backupConfig.Devices) != 1 {
-		t.Fatalf("backup config devices = %+v, err=%v", backupConfig.Devices, err)
+	loadedBackupConfig, err := backupStore.LoadConfig(context.Background())
+	if err != nil || len(loadedBackupConfig.Devices) != 1 {
+		t.Fatalf("backup config devices = %+v, err=%v", loadedBackupConfig.Devices, err)
 	}
 	if _, err := backupStore.GetIntegration(context.Background(), nordIntegrationName); err != nil {
 		t.Fatalf("backup integration: %v", err)
@@ -519,9 +534,24 @@ func TestServerBackupRestoreAndLogs(t *testing.T) {
 		t.Fatalf("backup metrics = %+v, err=%v", backupMetrics, err)
 	}
 
-	putJSON(t, server.URL+"/api/config", []byte(`{}`), http.StatusOK)
+	currentConfig := config.RuntimeConfig{Settings: sampleConfig().Settings}
+	currentConfig.Settings[0].PanelName = "Current panel name is intentionally replaceable"
+	currentConfig.Settings[0].PanelListen = "0.0.0.0:24443"
+	currentConfig.Settings[0].PanelDomain = "118.25.47.217"
+	currentConfig.Settings[0].PanelBasePath = "/tapx-lab/"
+	currentConfig.Settings[0].PanelHTTPS = true
+	currentConfig.Settings[0].PanelCertFile = "/etc/letsencrypt/live/118.25.47.217/fullchain.pem"
+	currentConfig.Settings[0].PanelKeyFile = "/etc/letsencrypt/live/118.25.47.217/privkey.pem"
+	currentConfig.Settings[0].AdminUsername = "current-admin"
+	currentConfig.Settings[0].AdminPasswordHash = "current-hash"
+	currentConfig.Settings[0].SessionTTLSecond = 7200
+	currentConfig.Settings[0].ExternalXrayPath = "/current/xray"
+	putJSON(t, server.URL+"/api/config", mustJSON(t, currentConfig), http.StatusOK)
 	if err := store.DeleteIntegration(context.Background(), nordIntegrationName); err != nil {
 		t.Fatalf("delete integration before restore: %v", err)
+	}
+	if err := store.SetIntegration(context.Background(), panelSecurityIntegration, panelSecurityState{TOTPSecret: "current-secret"}); err != nil {
+		t.Fatalf("replace panel security before restore: %v", err)
 	}
 	if err := store.AppendMetric(context.Background(), DashboardMetricSample{At: 2000, CPU: 99}, 0, defaultMetricLimit); err != nil {
 		t.Fatalf("append post-backup metric: %v", err)
@@ -554,6 +584,41 @@ func TestServerBackupRestoreAndLogs(t *testing.T) {
 	}
 	if _, err := store.GetIntegration(context.Background(), nordIntegrationName); err != nil {
 		t.Fatalf("restored integration: %v", err)
+	}
+	restoredConfig, err := store.LoadConfig(context.Background())
+	if err != nil {
+		t.Fatalf("load restored config: %v", err)
+	}
+	if len(restoredConfig.Settings) != 1 {
+		t.Fatalf("restored settings = %+v, want one row", restoredConfig.Settings)
+	}
+	settings := restoredConfig.Settings[0]
+	if settings.PanelListen != currentConfig.Settings[0].PanelListen ||
+		settings.PanelDomain != currentConfig.Settings[0].PanelDomain ||
+		settings.PanelBasePath != currentConfig.Settings[0].PanelBasePath ||
+		settings.PanelHTTPS != currentConfig.Settings[0].PanelHTTPS ||
+		settings.PanelCertFile != currentConfig.Settings[0].PanelCertFile ||
+		settings.PanelKeyFile != currentConfig.Settings[0].PanelKeyFile ||
+		settings.PanelAuthEnabled != currentConfig.Settings[0].PanelAuthEnabled ||
+		settings.AdminUsername != currentConfig.Settings[0].AdminUsername ||
+		settings.AdminPasswordHash != currentConfig.Settings[0].AdminPasswordHash ||
+		settings.SessionTTLSecond != currentConfig.Settings[0].SessionTTLSecond {
+		t.Fatalf("portable restore replaced machine-local panel access settings: %+v", settings)
+	}
+	if settings.PanelName != backupConfig.Settings[0].PanelName ||
+		settings.ExternalXrayPath != backupConfig.Settings[0].ExternalXrayPath {
+		t.Fatalf("portable restore did not restore non-access settings: %+v", settings)
+	}
+	securityRaw, err := store.GetIntegration(context.Background(), panelSecurityIntegration)
+	if err != nil {
+		t.Fatalf("load restored panel security: %v", err)
+	}
+	var security panelSecurityState
+	if err := json.Unmarshal(securityRaw, &security); err != nil {
+		t.Fatalf("decode restored panel security: %v", err)
+	}
+	if security.TOTPSecret != "current-secret" {
+		t.Fatalf("portable restore replaced panel security = %+v", security)
 	}
 	metrics, err := store.LoadMetrics(context.Background(), 10)
 	if err != nil || len(metrics) != 1 || !reflect.DeepEqual(metrics[0], backupMetric) {

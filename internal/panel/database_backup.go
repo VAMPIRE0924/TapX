@@ -14,6 +14,7 @@ import (
 	sqlite3 "github.com/mattn/go-sqlite3"
 
 	"tapx/internal/config"
+	"tapx/internal/model"
 )
 
 const sqliteHeader = "SQLite format 3\x00"
@@ -100,6 +101,59 @@ func (s *Store) RestoreDatabaseFile(ctx context.Context, path string) error {
 		return err
 	}
 	return s.restoreDatabaseFrom(ctx, source)
+}
+
+// RestorePortableDatabaseFile imports TapX workload data while preserving the
+// panel access settings and security state of the machine receiving the
+// upload. This keeps a portable Web restore from changing the live URL,
+// referencing certificate files that do not exist on the new host, or
+// replacing the administrator credentials used to authorize the restore.
+func (s *Store) RestorePortableDatabaseFile(ctx context.Context, path string) error {
+	source, cleanup, err := openBackupDatabasePath(ctx, path)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		return err
+	}
+	current, err := readPortableSnapshot(ctx, s)
+	if err != nil {
+		return fmt.Errorf("snapshot current panel state: %w", err)
+	}
+	restored, err := readPortableSnapshot(ctx, &Store{db: source, dialect: DatabaseSQLite})
+	if err != nil {
+		return fmt.Errorf("read portable backup: %w", err)
+	}
+	restored.config.Settings = preservePanelAccessSettings(restored.config.Settings, current.config.Settings)
+	if security, ok := current.integrations[panelSecurityIntegration]; ok {
+		restored.integrations[panelSecurityIntegration] = append(json.RawMessage(nil), security...)
+	} else {
+		delete(restored.integrations, panelSecurityIntegration)
+	}
+	return s.ReplaceConfigAndIntegrations(ctx, restored.config, restored.integrations, restored.logs, restored.metrics)
+}
+
+func preservePanelAccessSettings(restored, current []model.Settings) []model.Settings {
+	out := append([]model.Settings(nil), restored...)
+	if len(current) == 0 {
+		return out
+	}
+	if len(out) == 0 {
+		return append(out, current[0])
+	}
+	local := current[0]
+	out[0].Enabled = local.Enabled
+	out[0].PanelListen = local.PanelListen
+	out[0].PanelDomain = local.PanelDomain
+	out[0].PanelBasePath = local.PanelBasePath
+	out[0].PanelHTTPS = local.PanelHTTPS
+	out[0].PanelCertFile = local.PanelCertFile
+	out[0].PanelKeyFile = local.PanelKeyFile
+	out[0].PanelAuthEnabled = local.PanelAuthEnabled
+	out[0].AdminUsername = local.AdminUsername
+	out[0].AdminPasswordHash = local.AdminPasswordHash
+	out[0].SessionTTLSecond = local.SessionTTLSecond
+	return out
 }
 
 func (s *Store) restoreDatabaseFrom(ctx context.Context, source *sql.DB) error {
