@@ -145,7 +145,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tool="$(find .immortalwrt-sdk -path '*/staging_dir/toolchain-*/bin/aarch64-openwrt-linux-musl-gcc' -print -quit)"
+          tool="$(find "$GITHUB_WORKSPACE/.immortalwrt-sdk" -path '*/staging_dir/toolchain-*/bin/aarch64-openwrt-linux-musl-gcc' -print -quit)"
           test -x "$tool"
           sdk="${tool%%/staging_dir/*}"
           out="$GITHUB_WORKSPACE/build/openwrt-mediatek-filogic"
