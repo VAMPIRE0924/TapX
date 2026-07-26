@@ -47,6 +47,15 @@ start_service() {
 	# Xray child can overlap with the panel-managed instance.
 	if pidof tapx-core >/dev/null 2>&1; then
 		/etc/init.d/tapx stop
+		local shutdown_wait=20
+		while pidof tapx-core >/dev/null 2>&1 && [ "$shutdown_wait" -gt 0 ]; do
+			sleep 1
+			shutdown_wait=$((shutdown_wait - 1))
+		done
+		if pidof tapx-core >/dev/null 2>&1; then
+			echo "tapx-panel: standalone core did not stop before ownership handoff" >&2
+			return 1
+		fi
 	fi
 	mkdir -p "${db_path%/*}"
 	mkdir -p "${CONTROL_SOCKET%/*}"
