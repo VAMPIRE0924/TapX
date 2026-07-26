@@ -93,6 +93,14 @@ define Package/tapx-panel/install
 	$(INSTALL_DATA) ./tapx-panel/files/lib/upgrade/keep.d/tapx $(1)/lib/upgrade/keep.d/tapx
 endef
 
+define Package/tapx-panel/postinst
+#!/bin/sh
+if [ -z "$${IPKG_INSTROOT:-}" ] && [ "$${PKG_UPGRADE:-0}" = "1" ]; then
+	/etc/init.d/tapx-panel restart
+fi
+exit 0
+endef
+
 define Package/luci-app-tapx/install
 	$(INSTALL_DIR) $(1)/usr/libexec
 	$(INSTALL_BIN) ./luci-app-tapx/root/usr/libexec/tapx-openwrt-config $(1)/usr/libexec/tapx-openwrt-config
