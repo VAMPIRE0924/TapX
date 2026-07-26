@@ -39,12 +39,13 @@ func systemLogEvents(output string, limit int) []LogEvent {
 		if line == "" {
 			continue
 		}
+		eventTime, message := parseSystemLogLine(line)
 		events = append(events, LogEvent{
 			Seq:     uint64(len(events) + 1),
-			Time:    "",
+			Time:    eventTime,
 			Level:   inferSystemLogLevel(line),
 			Action:  "syslog",
-			Message: line,
+			Message: message,
 		})
 	}
 	if len(events) > limit {
@@ -53,13 +54,38 @@ func systemLogEvents(output string, limit int) []LogEvent {
 	return events
 }
 
+func parseSystemLogLine(line string) (string, string) {
+	fields := strings.Fields(line)
+	if len(fields) >= 3 {
+		if stamp, err := time.Parse("2006-01-02T15:04:05-0700", fields[0]); err == nil {
+			message := strings.TrimSpace(strings.TrimPrefix(line, fields[0]))
+			message = strings.TrimSpace(strings.TrimPrefix(message, fields[1]))
+			return stamp.Format(time.RFC3339), message
+		}
+	}
+	if len(fields) >= 7 {
+		rawStamp := strings.Join(fields[:5], " ")
+		if stamp, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", rawStamp, time.Local); err == nil {
+			prefix := strings.Join(fields[:6], " ")
+			message := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			return stamp.Format(time.RFC3339), message
+		}
+	}
+	return "", line
+}
+
 func inferSystemLogLevel(line string) string {
 	normalized := strings.ToLower(line)
 	switch {
-	case strings.Contains(normalized, "panic"), strings.Contains(normalized, "fatal"), strings.Contains(normalized, "error"), strings.Contains(normalized, " err"):
+	case strings.Contains(normalized, "panic"), strings.Contains(normalized, "fatal"),
+		strings.Contains(normalized, "error"), strings.Contains(normalized, " err"),
+		strings.Contains(normalized, ".err "), strings.Contains(normalized, "failed"):
 		return "error"
-	case strings.Contains(normalized, "warning"), strings.Contains(normalized, " warn"):
+	case strings.Contains(normalized, "warning"), strings.Contains(normalized, " warn"),
+		strings.Contains(normalized, ".warning "):
 		return "warn"
+	case strings.Contains(normalized, "notice"), strings.Contains(normalized, ".notice "):
+		return "notice"
 	case strings.Contains(normalized, "debug"):
 		return "debug"
 	default:
