@@ -4,6 +4,10 @@ export interface RuntimePipeSummary {
 }
 
 export interface RuntimePipeCollection {
+  running?: boolean;
+  componentStates?: {
+    tapx?: boolean;
+  };
   udpPipes?: unknown[];
   tcpPipes?: unknown[];
 }
@@ -22,4 +26,11 @@ export function activeExternalXrayPipes(runtime?: RuntimePipeCollection): Runtim
 
 export function activeTapXPipeCount(runtime?: RuntimePipeCollection): number {
   return (runtime?.udpPipes?.length || 0) + activeRawTCPPipes(runtime).length;
+}
+
+export function tapxComponentRunning(runtime?: RuntimePipeCollection): boolean {
+  if (typeof runtime?.componentStates?.tapx === 'boolean') {
+    return runtime.componentStates.tapx;
+  }
+  return activeTapXPipeCount(runtime) > 0 || runtime?.running === true;
 }

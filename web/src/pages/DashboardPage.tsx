@@ -27,6 +27,7 @@ import {
   activeExternalXrayPipes,
   activeRawTCPPipes,
   activeTapXPipeCount,
+  tapxComponentRunning,
 } from '../shared/runtime-status';
 import { useI18n } from '../i18n/I18nProvider';
 import {
@@ -99,7 +100,7 @@ export function DashboardPage({ onNavigate }: { onNavigate: (path: string) => vo
   const system = data.system || {};
   const rates = data.rates || {};
   const activeRawTcpPipes = activeRawTCPPipes(runtime);
-  const tapxRunning = runtime.running === true;
+  const tapxRunning = tapxComponentRunning(runtime);
   const xrayPipes = runtime.xrayPipes?.length || 0;
   const externalXrayTunnels = activeExternalXrayPipes(runtime).length;
   const rawTcpTunnels = activeRawTcpPipes.length;

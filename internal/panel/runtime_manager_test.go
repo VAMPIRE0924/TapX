@@ -104,6 +104,16 @@ func TestRuntimeManagerControlsComponentsWithoutReplacingController(t *testing.T
 	if !state.Running || state.LastReloadMode != "component-stop:tapx" {
 		t.Fatalf("state after component stop = %+v", state)
 	}
+	if state.ComponentStates[core.RuntimeComponentTapX] {
+		t.Fatalf("tapx component state after stop = %+v", state.ComponentStates)
+	}
+	state, err = manager.RestartComponent(core.RuntimeComponentTapX)
+	if err != nil {
+		t.Fatalf("restart tapx: %v", err)
+	}
+	if !state.ComponentStates[core.RuntimeComponentTapX] {
+		t.Fatalf("tapx component state after restart = %+v", state.ComponentStates)
+	}
 }
 
 func TestRuntimeManagerRollsBackWhenReplacementStartFails(t *testing.T) {

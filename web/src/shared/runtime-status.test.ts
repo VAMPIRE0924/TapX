@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { activeExternalXrayPipes, activeRawTCPPipes, activeTapXPipeCount } from './runtime-status';
+import {
+  activeExternalXrayPipes,
+  activeRawTCPPipes,
+  activeTapXPipeCount,
+  tapxComponentRunning,
+} from './runtime-status';
 
 describe('runtime component status helpers', () => {
   it('does not report TapX running when only external Xray bridges remain', () => {
@@ -27,5 +32,21 @@ describe('runtime component status helpers', () => {
 
     expect(activeRawTCPPipes(runtime)).toHaveLength(1);
     expect(activeTapXPipeCount(runtime)).toBe(2);
+  });
+
+  it('uses the explicit TapX lifecycle state even while the supervisor remains running', () => {
+    expect(tapxComponentRunning({
+      running: true,
+      componentStates: { tapx: false },
+      udpPipes: [],
+      tcpPipes: [{ xrayRuntime: 'external' }],
+    })).toBe(false);
+
+    expect(tapxComponentRunning({
+      running: true,
+      componentStates: { tapx: true },
+      udpPipes: [],
+      tcpPipes: [],
+    })).toBe(true);
   });
 });

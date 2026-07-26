@@ -54,6 +54,7 @@ type RuntimeManager struct {
 	lastRollbackError    string
 	lastReloadMode       string
 	lastError            string
+	componentStates      map[string]bool
 	enforcementStop      chan struct{}
 	enforcementDone      chan struct{}
 	enforcementEvents    []EnforcementEvent
@@ -85,6 +86,7 @@ type RuntimeState struct {
 	TCPPipes          []RuntimePipeState  `json:"tcpPipes"`
 	XrayPipes         []RuntimePipeState  `json:"xrayPipes"`
 	XrayRuntimes      []xrayruntime.State `json:"xrayRuntimes,omitempty"`
+	ComponentStates   map[string]bool     `json:"componentStates,omitempty"`
 }
 
 type RuntimePipeState struct {
@@ -176,6 +178,7 @@ func (m *RuntimeManager) Apply(runtime *config.GeneratedRuntime, cfg ...config.R
 			return m.stateLocked(), err
 		}
 		m.controller = nil
+		m.componentStates = nil
 		m.stoppedAt = time.Now()
 	}
 
@@ -188,6 +191,7 @@ func (m *RuntimeManager) Apply(runtime *config.GeneratedRuntime, cfg ...config.R
 	now := time.Now()
 	m.controller = next
 	m.activeRuntime = cloneGeneratedRuntime(runtime)
+	m.setComponentRunningLocked(core.RuntimeComponentTapX, true)
 	m.generation++
 	m.startedAt = now
 	m.lastAppliedAt = now
@@ -217,6 +221,7 @@ func (m *RuntimeManager) Stop() (RuntimeState, error) {
 	m.controller = nil
 	m.activeRuntime = nil
 	m.activeConfig = nil
+	m.componentStates = nil
 	m.stoppedAt = time.Now()
 	return m.stateLocked(), nil
 }
@@ -236,6 +241,7 @@ func (m *RuntimeManager) RestartComponent(component string) (RuntimeState, error
 		return m.stateLocked(), err
 	}
 	m.lastReloadMode = "component-restart:" + component
+	m.setComponentRunningLocked(component, true)
 	m.lastAppliedAt = time.Now()
 	m.lastError = ""
 	return m.stateLocked(), nil
@@ -256,6 +262,7 @@ func (m *RuntimeManager) StopComponent(component string) (RuntimeState, error) {
 		return m.stateLocked(), err
 	}
 	m.lastReloadMode = "component-stop:" + component
+	m.setComponentRunningLocked(component, false)
 	m.lastError = ""
 	return m.stateLocked(), nil
 }
@@ -307,6 +314,7 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 		Generation:        m.generation,
 		LastError:         m.lastError,
 		EnforcementEvents: append([]EnforcementEvent(nil), m.enforcementEvents...),
+		ComponentStates:   cloneComponentStates(m.componentStates),
 	}
 	if !m.startedAt.IsZero() {
 		state.StartedAt = m.startedAt.UTC().Format(time.RFC3339Nano)
@@ -423,6 +431,24 @@ func (m *RuntimeManager) stateLocked() RuntimeState {
 	return state
 }
 
+func (m *RuntimeManager) setComponentRunningLocked(component string, running bool) {
+	if m.componentStates == nil {
+		m.componentStates = make(map[string]bool)
+	}
+	m.componentStates[component] = running
+}
+
+func cloneComponentStates(in map[string]bool) map[string]bool {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(in))
+	for component, running := range in {
+		out[component] = running
+	}
+	return out
+}
+
 func (m *RuntimeManager) applyPreparedRuntimeLocked(runtime *config.GeneratedRuntime, cfg ...config.RuntimeConfig) (RuntimeState, error) {
 	oldRuntime := cloneGeneratedRuntime(m.activeRuntime)
 	oldConfig := cloneOptionalRuntimeConfig(m.activeConfig)
@@ -446,6 +472,7 @@ func (m *RuntimeManager) applyPreparedRuntimeLocked(runtime *config.GeneratedRun
 	now := time.Now()
 	m.controller = next
 	m.activeRuntime = cloneGeneratedRuntime(runtime)
+	m.setComponentRunningLocked(core.RuntimeComponentTapX, true)
 	m.generation++
 	m.startedAt = now
 	m.lastAppliedAt = now
@@ -518,6 +545,7 @@ func (m *RuntimeManager) rollbackUnconfirmedOneArm(generation uint64) {
 	m.controller = nil
 	m.activeRuntime = nil
 	m.activeConfig = nil
+	m.componentStates = nil
 
 	now := time.Now()
 	m.lastRollbackAt = now
@@ -544,6 +572,7 @@ func (m *RuntimeManager) rollbackUnconfirmedOneArm(generation uint64) {
 	m.controller = rollback
 	m.activeRuntime = cloneGeneratedRuntime(pending.oldRuntime)
 	m.activeConfig = cloneOptionalRuntimeConfig(pending.oldConfig)
+	m.setComponentRunningLocked(core.RuntimeComponentTapX, true)
 	m.generation++
 	m.startedAt = now
 	m.stoppedAt = time.Time{}
@@ -592,6 +621,7 @@ func (m *RuntimeManager) rollbackAfterFailedApplyLocked(applyErr error) (Runtime
 		m.controller = nil
 		m.activeRuntime = nil
 		m.activeConfig = nil
+		m.componentStates = nil
 		m.startedAt = time.Time{}
 		m.stoppedAt = now
 		m.lastRollbackAt = now
@@ -603,6 +633,7 @@ func (m *RuntimeManager) rollbackAfterFailedApplyLocked(applyErr error) (Runtime
 	now := time.Now()
 	m.controller = rollback
 	m.activeRuntime = oldRuntime
+	m.setComponentRunningLocked(core.RuntimeComponentTapX, true)
 	m.startedAt = now
 	m.stoppedAt = time.Time{}
 	m.lastRollbackAt = now
