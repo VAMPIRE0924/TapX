@@ -11,6 +11,7 @@ export interface DashboardReport {
     udpPipes?: unknown[];
     tcpPipes?: unknown[];
     xrayPipes?: unknown[];
+    componentStates?: Partial<Record<RuntimeComponent, boolean>>;
     xrayRuntimes?: Array<{
       running?: boolean;
       runtime?: string;
