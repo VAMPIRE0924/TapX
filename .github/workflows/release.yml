@@ -96,3 +96,90 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+
+  lab-filogic:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    env:
+      TAPX_VERSION: ${{ github.event.inputs.version || '0.0.0-dev' }}
+      IMMORTALWRT_VERSION: "25.12.1"
+      IMMORTALWRT_TARGET: "mediatek/filogic"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize version
+        shell: bash
+        run: echo "TAPX_VERSION=${TAPX_VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc make pkg-config file curl ca-certificates zstd xz-utils tar gzip rsync unzip
+
+      - name: Download verified ImmortalWrt SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://downloads.immortalwrt.org/releases/${IMMORTALWRT_VERSION}/targets/${IMMORTALWRT_TARGET}"
+          mkdir -p .immortalwrt-sdk/download
+          curl -4 -fL --retry 5 -o .immortalwrt-sdk/download/sha256sums "$base/sha256sums"
+          archive="$(awk '$2 ~ /^immortalwrt-sdk-.*Linux-x86_64\.tar\.zst$/ { sub(/^\*/, "", $2); print $2; exit }' .immortalwrt-sdk/download/sha256sums)"
+          test -n "$archive"
+          curl -4 -fL --retry 5 -o ".immortalwrt-sdk/download/$archive" "$base/$archive"
+          (
+            cd .immortalwrt-sdk/download
+            grep -F " $archive" sha256sums | head -n 1 | sha256sum -c -
+          )
+          tar -C .immortalwrt-sdk -xf ".immortalwrt-sdk/download/$archive"
+
+      - name: Build TapX arm64 musl binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool="$(find .immortalwrt-sdk -path '*/staging_dir/toolchain-*/bin/aarch64-openwrt-linux-musl-gcc' -print -quit)"
+          test -x "$tool"
+          sdk="${tool%%/staging_dir/*}"
+          out="$GITHUB_WORKSPACE/build/openwrt-mediatek-filogic"
+          mkdir -p "$out"
+          for target in tapx-core tapx-panel; do
+            package="./cmd/$target"
+            STAGING_DIR="$sdk/staging_dir" GOTOOLCHAIN=local CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$tool" \
+              go build -trimpath -ldflags="-s -w -X tapx/internal/buildinfo.Version=$TAPX_VERSION" \
+              -o "$out/$target" "$package"
+            file "$out/$target"
+          done
+          echo "IMMORTALWRT_SDK=$sdk" >> "$GITHUB_ENV"
+
+      - name: Build ImmortalWrt filogic APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          feed="$IMMORTALWRT_SDK/package/tapx"
+          rm -rf "$feed"
+          mkdir -p "$feed"
+          cp -a openwrt/. "$feed/"
+          "$IMMORTALWRT_SDK/scripts/feeds" update -a
+          "$IMMORTALWRT_SDK/scripts/feeds" install -a
+          make -C "$IMMORTALWRT_SDK" defconfig
+          TAPX_PREBUILT_DIR="$GITHUB_WORKSPACE/build/openwrt-mediatek-filogic" TAPX_VERSION="$TAPX_VERSION" \
+            make -C "$IMMORTALWRT_SDK" package/tapx/compile V=sc
+          mkdir -p dist-filogic
+          find "$IMMORTALWRT_SDK/bin" -type f \
+            \( -name 'tapx-core-*.apk' -o -name 'tapx-panel-*.apk' -o -name 'luci-app-tapx-*.apk' \) \
+            -exec cp {} dist-filogic/ \;
+          test "$(find dist-filogic -type f -name '*.apk' | wc -l)" -eq 3
+          sha256sum dist-filogic/*.apk > dist-filogic/SHA256SUMS
+
+      - name: Upload filogic lab artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tapx-filogic-${{ env.TAPX_VERSION }}
+          path: dist-filogic/*
