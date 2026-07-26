@@ -241,10 +241,10 @@ echo "verify underlay"
 ip netns exec "$NS_A" ping -c 1 -W 1 172.31.252.2 >/dev/null || fail_with_logs
 
 echo "verify allowed guarded TUN/TAP traffic"
-expect_ping_ok "$NS_A" "10.90.0.1" "10.90.0.2"
 expect_ping_ok "$NS_B" "10.90.0.2" "10.90.0.1"
-expect_ping_ok "$NS_A" "10.91.0.1" "10.91.0.2"
+expect_ping_ok "$NS_A" "10.90.0.1" "10.90.0.2"
 expect_ping_ok "$NS_B" "10.91.0.2" "10.91.0.1"
+expect_ping_ok "$NS_A" "10.91.0.1" "10.91.0.2"
 
 echo "verify unauthorized guarded TUN/TAP traffic is dropped"
 expect_ping_blocked "$NS_A" "10.90.0.99" "10.90.0.2"
