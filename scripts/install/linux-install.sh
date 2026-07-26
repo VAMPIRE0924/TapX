@@ -150,7 +150,7 @@ validate_env_value() {
 write_env_file() {
   local listen="$1" base_path="$2" driver="$3" source="$4" https="$5"
   local value
-  for value in "$listen" "$base_path" "$driver" "$source" "$https"; do
+  for value in "$listen" "$base_path" "$driver" "$source" "$https" "${TAPX_PUBLIC_HOST:-}"; do
     if ! validate_env_value "$value"; then
       printf '%s\n' "$(text 'A setting contains an unsupported character.' '配置中包含不支持的字符。')" >&2
       return 1
@@ -164,6 +164,7 @@ TAPX_DB_SOURCE='$source'
 TAPX_PANEL_LISTEN='$listen'
 TAPX_PANEL_BASE_PATH='$base_path'
 TAPX_PANEL_HTTPS='$https'
+TAPX_PUBLIC_HOST='${TAPX_PUBLIC_HOST:-}'
 TAPX_LANG='${TAPX_LANG:-en}'
 EOF
   chmod 0600 "$(env_file)"
@@ -429,6 +430,16 @@ public_host() {
   printf '%s' "${host:-SERVER_IP}"
 }
 
+certificate_public_host() {
+  local cert="${1:-}"
+  [[ -n "$cert" && -r "$cert" ]] || return 0
+  command -v openssl >/dev/null 2>&1 || return 0
+  openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null |
+    tr ',' '\n' |
+    sed -n -e 's/^[[:space:]]*IP Address://p' -e 's/^[[:space:]]*DNS://p' |
+    head -n 1
+}
+
 panel_url() {
   load_env
   local scheme=http host
@@ -499,6 +510,7 @@ install_wizard() {
   local password_hash
   password_hash="$(hash_password "$build_dir/tapx-panel" "$ADMIN_PASSWORD")"
   initialize_database "$build_dir/tapx-panel" "$password_hash"
+  TAPX_PUBLIC_HOST="${TAPX_PUBLIC_HOST:-$(certificate_public_host "$PANEL_CERT_FILE")}"
 
   install -m 0755 "$build_dir/tapx-core" "$prefix/bin/tapx-core"
   install -m 0755 "$build_dir/tapx-panel" "$prefix/bin/tapx-panel"
@@ -703,6 +715,9 @@ modify_endpoint() {
       PANEL_HTTPS=0
       ;;
   esac
+  if [[ -z "${TAPX_PUBLIC_HOST:-}" && -n "$cert" ]]; then
+    TAPX_PUBLIC_HOST="$(certificate_public_host "$cert")"
+  fi
 
   if ! "$prefix/bin/tapx-panel" \
       -set-panel-endpoint \

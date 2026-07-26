@@ -79,29 +79,23 @@ TCP/TUN over an IPv6 underlay constrained to the IPv6 minimum MTU of 1280;
 the UDP case asserts that outer IPv6 fragmentation and reassembly counters do
 not increase while oversized inner packets cross through TapX segmentation.
 
-For installer validation without touching real `/etc/tapx`, install into a
-temporary root and force the database/unit paths into that root:
+For full installer validation, use a disposable systemd VM because the
+installer intentionally exercises the real service, firewall, and lifecycle
+paths:
 
 ```bash
-tmp="$(mktemp -d /tmp/tapx-install-test-XXXXXX)"
 env \
   TAPX_NONINTERACTIVE=1 \
   TAPX_BUILD_DIR="$(pwd)/build/linux-amd64" \
-  TAPX_PREFIX="$tmp/prefix" \
-  TAPX_SYSCONFDIR="$tmp/etc" \
-  TAPX_SYSTEMD_UNIT_DIR="$tmp/systemd" \
   TAPX_DB_DRIVER=sqlite \
-  TAPX_DB_SOURCE="$tmp/state/tapx.db" \
-  TAPX_PANEL_HOST=127.0.0.1 \
+  TAPX_DB_SOURCE=/var/lib/tapx/tapx.db \
   TAPX_PANEL_PORT=18080 \
-  TAPX_PANEL_BASE_PATH=/tapx-test \
+  TAPX_PANEL_BASE_PATH=/tapx-test/ \
+  TAPX_PUBLIC_HOST=203.0.113.10 \
   TAPX_ADMIN_USERNAME=admin \
   TAPX_ADMIN_PASSWORD=testpass \
-  TAPX_ENABLE_SERVICE=n \
-  TAPX_START_SERVICE=n \
   ./scripts/install/linux-install.sh install
-"$tmp/prefix/bin/tapx-panel" -db-driver sqlite -db "$tmp/state/tapx.db" -check
-rm -rf "$tmp"
+tapx check
 ```
 
 The PostgreSQL integration test creates an isolated schema and is opt-in:

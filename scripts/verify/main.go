@@ -491,6 +491,7 @@ func (v *verifier) checkLinuxInstall() {
 		},
 		"packaging/systemd/tapx.env": {
 			"TAPX_PANEL_BASE_PATH",
+			"TAPX_PUBLIC_HOST",
 			"TAPX_DB_DRIVER",
 			"TAPX_DB_SOURCE",
 		},

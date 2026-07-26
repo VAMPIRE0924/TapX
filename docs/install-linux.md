@@ -68,6 +68,7 @@ TAPX_DB_SOURCE=/var/lib/tapx/tapx.db
 TAPX_PANEL_LISTEN=0.0.0.0:<selected-port>
 TAPX_PANEL_BASE_PATH=/tapx-<random>
 TAPX_PANEL_HTTPS=0
+TAPX_PUBLIC_HOST=<public-IP-or-DNS-name>
 ```
 
 PostgreSQL uses:
@@ -81,19 +82,23 @@ The environment file is mode `0600`. The service reads the DSN from that file
 instead of placing a database password in the process command line.
 
 For unattended installation, set `TAPX_NONINTERACTIVE=1` together with
-`TAPX_DB_DRIVER`, `TAPX_DB_SOURCE`, `TAPX_PANEL_HOST`, `TAPX_PANEL_PORT`,
+`TAPX_DB_DRIVER`, `TAPX_DB_SOURCE`, `TAPX_PANEL_PORT`,
 `TAPX_PANEL_BASE_PATH`, `TAPX_ADMIN_USERNAME`, and `TAPX_ADMIN_PASSWORD`.
+Set `TAPX_PANEL_CERT_FILE` and `TAPX_PANEL_KEY_FILE` for HTTPS. Set
+`TAPX_PUBLIC_HOST` when the server is behind NAT or cloud networking; otherwise
+the installer uses the first IP or DNS SAN from the selected certificate and
+then falls back to public-IP discovery.
 
 The installed panel listens on all interfaces. When UFW or firewalld is active,
 the installer opens the selected TCP port. Other provider or host firewalls
-must allow that port separately. The systemd unit passes
-`TAPX_PANEL_BASE_PATH` to `tapx-panel -base-path`, so UI and API endpoints are
-served under the selected path.
+must allow that port separately. After initialization, the database Settings
+object is authoritative for the listen address, URI path, domain restriction,
+and TLS files. This makes changes saved in TapX-UI effective after restart.
 
 If the enabled Settings object has `PanelHTTPS=true`, `PanelCertFile`, and
 `PanelKeyFile`, `tapx-panel` starts its listener with TLS after restart. The
-`-listen` flag or `TAPX_PANEL_LISTEN` still selects the socket address; when no
-listen override is supplied, `Settings.PanelListen` is used.
+The installed systemd service intentionally does not pass `-listen` or
+`-base-path` overrides.
 
 ## Service
 
