@@ -33,5 +33,6 @@ usage, source locations, and original license texts are generated into:
 - `GO_THIRD_PARTY_LICENSES.txt`
 
 The complete module versions, source locations, copyright notices, and license
-texts are included in `GO_THIRD_PARTY_LICENSES.txt`. The license governing the
-TapX distribution is provided in the repository root `LICENSE` file.
+texts are included in `GO_THIRD_PARTY_LICENSES.txt` inside each release archive.
+The proprietary license for TapX-owned material is provided in the repository
+root `LICENSE` file and does not replace or narrow any third-party license.

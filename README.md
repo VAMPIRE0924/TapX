@@ -1,5 +1,7 @@
 # TapX
 
+[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
+
 TapX 是面向 Linux 与 OpenWrt 的网络连接、分流与管理工具。它将监听端、连接端、用户、设备、路由、DNS 与 GeoData 组合在同一套 Web 面板和运行时中，用于构建可观测、可诊断的网络转发方案。
 
 > 本仓库是 TapX 的公开发布仓库，只保存产品说明、安装文档、发布工作流和 Release 资产，不保存源码、开发日志或实验记录。
@@ -30,4 +32,4 @@ TapX 是面向 Linux 与 OpenWrt 的网络连接、分流与管理工具。它�
 
 ## 发布与许可
 
-发布资产由独立的源码仓库完成构建、测试和校验，然后上传到本仓库的草稿 Release，经人工确认后才发布。许可条款以仓库中的 `LICENSE` 及每个 Release 资产内附带的许可和第三方声明为准。
+发布资产由独立的私有源码仓库完成构建、测试和校验，然后上传到本仓库的草稿 Release，经确认后才发布。TapX 自有材料采用[专有闭源许可](LICENSE)；第三方组件继续遵循 Release 资产内附带的独立许可证和声明。
