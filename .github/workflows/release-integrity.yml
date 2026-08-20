@@ -21,19 +21,21 @@ jobs:
     steps:
       - name: Download release assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.RELEASE_TEST_TOKEN || github.token }}
           TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
           RELEASE_ID: ${{ github.event.inputs.release_id }}
         run: |
           mkdir release
           if [[ -n "$RELEASE_ID" ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              --jq '.assets[] | [.name, .url] | @tsv' >release-assets.tsv
             while IFS=$'\t' read -r name url; do
               if [[ -z "$name" || "$name" == */* || "$name" == .* ]]; then
                 echo "unsafe release asset name: $name" >&2
                 exit 1
               fi
               gh api -H "Accept: application/octet-stream" "$url" >"release/$name"
-            done < <(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.assets[] | [.name, .url] | @tsv')
+            done <release-assets.tsv
           else
             if [[ -z "$TAG" ]]; then
               echo "tag or release_id is required" >&2
