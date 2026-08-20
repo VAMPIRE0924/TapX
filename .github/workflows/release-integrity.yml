@@ -1,0 +1,69 @@
+name: Verify release assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+        run: |
+          mkdir release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release
+
+      - name: Verify checksums and manifest
+        run: |
+          cd release
+          test -s SHA256SUMS
+          test -s tapx-update-manifest.json
+          test -s install.sh
+          sha256sum -c SHA256SUMS
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+
+          root = pathlib.Path('.')
+          manifest = json.loads((root / 'tapx-update-manifest.json').read_text())
+          if manifest.get('schemaVersion') != 1:
+              raise SystemExit('unsupported manifest schema')
+          platforms = manifest.get('platforms')
+          if not isinstance(platforms, dict) or not platforms:
+              raise SystemExit('manifest has no platforms')
+          for platform, item in platforms.items():
+              asset = root / item['asset']
+              if not asset.is_file():
+                  raise SystemExit(f'missing {platform} asset: {asset}')
+              digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+              if digest != item['sha256']:
+                  raise SystemExit(f'{platform} checksum mismatch')
+          PY
+
+      - name: Reject unsafe archive entries
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import tarfile
+
+          for archive in pathlib.Path('release').glob('*.tar.gz'):
+              with tarfile.open(archive, 'r:gz') as bundle:
+                  for member in bundle.getmembers():
+                      path = pathlib.PurePosixPath(member.name)
+                      if path.is_absolute() or '..' in path.parts:
+                          raise SystemExit(f'unsafe path in {archive}: {member.name}')
+                      if member.issym() or member.islnk():
+                          raise SystemExit(f'link entry in {archive}: {member.name}')
+          PY
