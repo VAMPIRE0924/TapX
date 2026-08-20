@@ -4,7 +4,7 @@ TapX 的 OpenWrt 发布归档同时提供 APK 与 IPK。两种包面向不同包
 
 ## 当前公开支持范围
 
-当前正式 Release 提供 `tapx-openwrt-x86-64.tar.gz`，只适用于 x86-64 设备。归档中的 APK 面向 OpenWrt 25.12 系列，IPK 面向 OpenWrt 24.10 系列；ARM64、MIPS 等设备不能安装该资产。
+当前正式 Release 提供 `tapx-openwrt-x86-64.tar.gz`，只适用于 x86-64 设备。归档中的 APK 使用 OpenWrt 25.12.5 SDK 构建，IPK 使用 OpenWrt 24.10.8 SDK 构建；其他固件版本只有在包格式、依赖和内核 ABI 均匹配时才能安装。ARM64、MIPS 等设备不能安装该资产。
 
 未来 Release 若增加平台，会使用独立的 `tapx-openwrt-<platform>.tar.gz` 资产。不要把 Linux ARM64 归档当作 OpenWrt ARM64 安装包。
 
@@ -23,7 +23,7 @@ cat /etc/openwrt_release
 | 存在 `/sbin/apk` 或 `apk` | 安装 `tapx-*.apk` |
 | 存在 `/bin/opkg` 或 `opkg` | 安装 `tapx_*.ipk` |
 
-OpenWrt 25.12 及更新版本使用 APK；OpenWrt 24.10 及更早版本使用 OPKG/IPK。ImmortalWrt 应以设备实际存在的包管理器为准。APK 与 IPK 不能互相改名或跨包管理器安装。
+OpenWrt 25.12 起使用 APK，OpenWrt 24.10 使用 OPKG/IPK。这个边界只决定包格式，不代表某个 TapX 包能够跨固件版本或跨内核 ABI 安装。ImmortalWrt 应以设备实际存在的包管理器为准。APK 与 IPK 不能互相改名或跨包管理器安装。
 
 包管理器版本边界可参阅 [OpenWrt 官方软件包管理说明](https://openwrt.org/docs/guide-user/additional-software/managing_packages)。
 

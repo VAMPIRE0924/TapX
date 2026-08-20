@@ -33,13 +33,13 @@ sudo bash install.sh
 
 当前 Release 提供 `tapx-openwrt-x86-64.tar.gz`，归档内同时包含原生 APK 和 IPK。它们是同一版本面向不同包管理器的安装包，必须按设备实际系统选择，不能改名或混装。
 
-| 固件环境 | 包管理器 | 安装包 | 命令 |
+| 当前构建目标 | 包管理器 | 安装包 | 命令 |
 | --- | --- | --- | --- |
-| OpenWrt 25.12 及更新版本 | `apk` | `tapx-*.apk` | `apk add --allow-untrusted --force-reinstall ./tapx-*.apk` |
-| OpenWrt 24.10 及更早版本 | `opkg` | `tapx_*.ipk` | `opkg install --force-reinstall ./tapx_*.ipk` |
-| ImmortalWrt | 以设备实际命令为准 | `.apk` 或 `.ipk` | 先检查 `command -v apk`，否则检查 `command -v opkg` |
+| OpenWrt 25.12.5 x86-64 | `apk` | `tapx-*.apk` | `apk add --allow-untrusted --force-reinstall ./tapx-*.apk` |
+| OpenWrt 24.10.8 x86-64 | `opkg` | `tapx_*.ipk` | `opkg install --force-reinstall ./tapx_*.ipk` |
+| ImmortalWrt x86-64 | 以设备实际命令为准 | `.apk` 或 `.ipk` | 先检查 `command -v apk`，否则检查 `command -v opkg` |
 
-当前公开 OpenWrt 资产仅适用于 x86-64；ARM64、MIPS 等设备不要安装该归档。完整检查与安装步骤见 [OpenWrt / ImmortalWrt 安装与升级](docs/OpenWrt.md)。
+当前公开 OpenWrt 资产仅适用于 x86-64，并分别使用 OpenWrt 25.12.5 与 24.10.8 SDK 构建。其他固件版本只有在包格式、依赖和内核 ABI 均匹配时才能安装；ARM64、MIPS 等设备不要安装该归档。完整检查与安装步骤见 [OpenWrt / ImmortalWrt 安装与升级](docs/OpenWrt.md)。
 
 ## 能力概览
 
