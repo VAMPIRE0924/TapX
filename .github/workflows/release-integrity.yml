@@ -19,6 +19,12 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout release documentation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify public installer syntax
+        run: bash -n install.sh
+
       - name: Download release assets
         env:
           GH_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.RELEASE_TEST_TOKEN || github.token }}
@@ -50,6 +56,7 @@ jobs:
           test -s SHA256SUMS
           test -s tapx-update-manifest.json
           test -s install.sh
+          bash -n install.sh
           sha256sum -c SHA256SUMS
           python3 - <<'PY'
           import hashlib
@@ -70,6 +77,10 @@ jobs:
               digest = hashlib.sha256(asset.read_bytes()).hexdigest()
               if digest != item['sha256']:
                   raise SystemExit(f'{platform} checksum mismatch')
+              if platform.startswith('openwrt-'):
+                  formats = item.get('packageFormats')
+                  if formats != ['apk', 'ipk']:
+                      raise SystemExit(f'{platform} must declare APK and IPK package formats')
           PY
 
       - name: Reject unsafe archive entries
@@ -80,10 +91,29 @@ jobs:
 
           for archive in pathlib.Path('release').glob('*.tar.gz'):
               with tarfile.open(archive, 'r:gz') as bundle:
+                  regular_files = []
                   for member in bundle.getmembers():
                       path = pathlib.PurePosixPath(member.name)
                       if path.is_absolute() or '..' in path.parts:
                           raise SystemExit(f'unsafe path in {archive}: {member.name}')
                       if member.issym() or member.islnk():
                           raise SystemExit(f'link entry in {archive}: {member.name}')
+                      if member.isfile():
+                          regular_files.append(path)
+                  if archive.name.startswith('tapx-openwrt-'):
+                      apk_files = [path for path in regular_files if path.name.startswith('tapx-') and path.suffix == '.apk']
+                      ipk_files = [path for path in regular_files if path.name.startswith('tapx_') and path.suffix == '.ipk']
+                      if len(apk_files) != 1 or len(ipk_files) != 1:
+                          raise SystemExit(f'{archive} must contain exactly one TapX APK and one TapX IPK')
+                      required = {
+                          'LICENSE',
+                          'COPYRIGHT',
+                          'THIRD_PARTY_NOTICES.md',
+                          'GO_THIRD_PARTY_LICENSES.txt',
+                          'WEB_THIRD_PARTY_LICENSES.txt',
+                      }
+                      present = {path.name for path in regular_files}
+                      missing = required - present
+                      if missing:
+                          raise SystemExit(f'{archive} is missing: {sorted(missing)}')
           PY

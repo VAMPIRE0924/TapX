@@ -1,22 +1,67 @@
-# OpenWrt 安装与升级
+# OpenWrt / ImmortalWrt 安装与升级
 
-## 安装前
+TapX 的 OpenWrt 发布归档同时提供 APK 与 IPK。两种包面向不同包管理器，必须选择与设备固件、CPU 架构和内核 ABI 匹配的文件。
 
-1. 确认资产中标注的 OpenWrt 平台、CPU 架构与设备一致。
-2. 检查可用存储空间，并备份 TapX 数据库、配置、证书和外置 Xray。
-3. 记录当前管理网卡、管理 IP 和默认路由。
-4. 校验下载资产的 SHA-256。
+## 选择 APK 或 IPK
 
-## 安装
+先通过 SSH 检查设备：
 
-解压 `tapx-openwrt-<platform>.tar.gz`，使用系统包管理器安装其中唯一的 TapX APK。请勿将不同架构或不同 OpenWrt ABI 的软件包混用。
+```sh
+command -v apk || command -v opkg
+uname -m
+cat /etc/openwrt_release
+```
 
-## 网络安全边界
+| 检测结果 | 选择 |
+| --- | --- |
+| 存在 `/sbin/apk` 或 `apk` | 安装 `tapx-*.apk` |
+| 存在 `/bin/opkg` 或 `opkg` | 安装 `tapx_*.ipk` |
 
-- 不要在未确认管理链路的情况下更改管理网卡、桥接关系或默认路由。
-- TAP/TUN 和 LAN 桥接测试应保留一条独立的恢复通道。
-- TapX 自管 DHCP 仅服务指定接口，不应占用 OpenWrt 系统 `dnsmasq` 的现有 LAN 职责。
+OpenWrt 25.12 及更新版本使用 APK；OpenWrt 24.10 及更早版本使用 OPKG/IPK。ImmortalWrt 应以设备实际存在的包管理器为准。APK 与 IPK 不能互相改名或跨包管理器安装。
+
+包管理器版本边界可参阅 [OpenWrt 官方软件包管理说明](https://openwrt.org/docs/guide-user/additional-software/managing_packages)。
+
+## 安装前检查
+
+1. 从 [Releases](https://github.com/VAMPIRE0924/TapX/releases/latest) 下载对应平台归档及 `SHA256SUMS`。
+2. 校验归档 SHA-256，并确认文件名中的平台与设备一致。
+3. 备份 `/etc/config/tapx`、TapX 数据库、证书、GeoData 和外置 Xray。
+4. 记录管理网卡、管理 IP、默认路由和恢复入口。
+5. 确认设备有足够的 `/overlay` 空间，并且软件源与当前固件版本匹配。
+
+## 安装 APK
+
+```sh
+tar -xzf tapx-openwrt-<platform>.tar.gz
+cd tapx-openwrt-<platform>
+apk add --allow-untrusted --force-reinstall ./tapx-*.apk
+```
+
+## 安装 IPK
+
+```sh
+tar -xzf tapx-openwrt-<platform>.tar.gz
+cd tapx-openwrt-<platform>
+opkg install --force-reinstall ./tapx_*.ipk
+```
+
+若包管理器报告依赖或内核 ABI 不匹配，应停止安装并更换与固件一致的资产或软件源，不要使用忽略依赖的强制选项。
+
+## 打开面板
+
+安装完成后进入 `LuCI → 服务 → TapX`，设置面板监听地址、端口、登录入口和管理员凭据，然后启动服务。TapX 管理员账号不是路由器 SSH 账号。
 
 ## 升级后检查
 
-确认面板可访问、核心服务正常、管理地址与默认路由未改变，然后再检查连接端、终端分流、接入分流、DNS 与 GeoData。
+- `tapx-panel` 与 `tapx-core` 均处于运行状态。
+- 面板、核心和内置 Xray 版本与当前 Release manifest 一致。
+- 管理 IP、管理桥和默认路由未被意外改变。
+- 代表性连接端诊断、终端分流、接入分流、DNS 与 GeoData 正常。
+- LuCI 页面和完整 TapX Web 面板均可访问。
+
+## 网络安全边界
+
+- 修改桥接、TAP/TUN、策略路由或默认路由前，保留独立恢复链路。
+- 不要把公网 Raw UDP/TCP 无加密模式当作安全隧道；公网应启用 TLS、DTLS 或合适的 Xray 安全传输。
+- TapX 自管 DHCP 仅服务明确指定的接口，不会接管 OpenWrt 系统 `dnsmasq` 的其他 LAN 职责。
+- 升级时不要清空数据库、证书或首次初始化状态。

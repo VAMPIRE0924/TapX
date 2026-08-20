@@ -1,38 +1,20 @@
-# TapX Third-Party Notices
+# TapX 第三方组件说明
 
-TapX uses third-party software through declared package and module dependencies.
-These notices apply only to the identified material and do not transfer the
-TapX copyright statement to third-party work.
+TapX Release 包含若干独立的第三方软件和 Web 运行依赖。TapX 专有许可证仅适用于 TapX 自有材料，不替代、不收窄第三方组件直接授予的权利，也不移除其版权和分发义务。
 
-## Web runtime packages
+## 随 Release 提供的清单
 
-The production Web bundle includes React, Ant Design, Day.js, QR Code for
-React, and their runtime dependencies. The exact package
-versions, source locations, copyright notices, and license texts are generated
-from `web/package-lock.json` into:
+每个 Linux 与 OpenWrt 归档均包含：
 
-- `web/THIRD_PARTY_LICENSES.txt`
+- `GO_THIRD_PARTY_LICENSES.txt`：TapX 二进制使用的 Go 模块、版本、来源和完整许可文本；
+- `WEB_THIRD_PARTY_LICENSES.txt`：Web 面板运行依赖、版本、来源和完整许可文本；
+- `THIRD_PARTY_NOTICES.md`：第三方组件边界和许可文件入口；
+- `LICENSE`：仅适用于 TapX 自有材料的专有许可证。
 
-`npm run licenses:check` fails when that file is missing or stale.
+## 主要组件
 
-The connector speed test is implemented by TapX's provider-neutral backend and
-uses public network-quality HTTP endpoints. No Cloudflare Speedtest SDK or npm
-package is embedded in the Web bundle. Service terms, privacy requirements, and
-attribution for each configured provider are reviewed separately from software
-dependency licenses.
+- 内置 Xray 使用未经修改的官方 `github.com/xtls/xray-core`，适用 MPL-2.0；
+- Web 面板使用 React、Ant Design、Day.js、QR Code for React、uPlot 及其依赖；
+- Go 依赖图包含 `github.com/juju/ratelimit`，适用 LGPL-3.0 及其链接例外。
 
-## Xray and Go modules
-
-TapX uses the unmodified official `github.com/xtls/xray-core` module and other
-Go modules. Xray-core is MPL-2.0. The current linked dependency graph also
-contains `github.com/juju/ratelimit` under LGPL-3.0 with its stated linking
-exception; the generated dependency notices contain no GPL-3.0-or-later Go
-module. The exact Linux `tapx-core` and `tapx-panel` module versions, binary
-usage, source locations, and original license texts are generated into:
-
-- `GO_THIRD_PARTY_LICENSES.txt`
-
-The complete module versions, source locations, copyright notices, and license
-texts are included in `GO_THIRD_PARTY_LICENSES.txt` inside each release archive.
-The proprietary license for TapX-owned material is provided in the repository
-root `LICENSE` file and does not replace or narrow any third-party license.
+准确的模块版本、版权声明和许可正文以当前 Release 归档内的两份完整清单为准。
