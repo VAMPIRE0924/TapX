@@ -13,7 +13,7 @@ TapX 是面向 Linux 和 OpenWrt 的网络连接与策略分流平台。一个 W
 
 ### Linux 一键安装
 
-支持使用 `systemd` 的 Linux `amd64` 和 `arm64`：
+支持使用 `systemd` 的 Linux x86-64 和 ARM64：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/VAMPIRE0924/TapX/main/install.sh | sudo bash
