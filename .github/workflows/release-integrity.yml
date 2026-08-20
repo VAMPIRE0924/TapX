@@ -86,6 +86,7 @@ jobs:
       - name: Reject unsafe archive entries
         run: |
           python3 - <<'PY'
+          import gzip
           import pathlib
           import tarfile
 
@@ -105,12 +106,37 @@ jobs:
                       ipk_files = [path for path in regular_files if path.name.startswith('tapx_') and path.suffix == '.ipk']
                       if len(apk_files) != 1 or len(ipk_files) != 1:
                           raise SystemExit(f'{archive} must contain exactly one TapX APK and one TapX IPK')
-                      package_magic = [(apk_files[0], b'ADBd'), (ipk_files[0], b'!<arch>\n')]
-                      for package_path, expected_magic in package_magic:
-                          package_member = bundle.getmember(str(package_path))
-                          package_file = bundle.extractfile(package_member)
-                          if package_file is None or package_file.read(len(expected_magic)) != expected_magic:
-                              raise SystemExit(f'{archive} contains an invalid package format: {package_path}')
+                      apk_member = bundle.getmember(str(apk_files[0]))
+                      apk_file = bundle.extractfile(apk_member)
+                      if apk_file is None or apk_file.read(4) != b'ADBd':
+                          raise SystemExit(f'{archive} contains an invalid APK: {apk_files[0]}')
+
+                      ipk_member = bundle.getmember(str(ipk_files[0]))
+                      ipk_file = bundle.extractfile(ipk_member)
+                      if ipk_file is None:
+                          raise SystemExit(f'{archive} contains an unreadable IPK: {ipk_files[0]}')
+                      expected_ipk_members = {'debian-binary', 'data.tar.gz', 'control.tar.gz'}
+                      seen_ipk_members = set()
+                      try:
+                          with tarfile.open(fileobj=ipk_file, mode='r|gz') as ipk:
+                              for member in ipk:
+                                  name = member.name.removeprefix('./')
+                                  if name not in expected_ipk_members or not member.isfile() or name in seen_ipk_members:
+                                      raise SystemExit(f'{archive} contains an invalid IPK member: {member.name}')
+                                  seen_ipk_members.add(name)
+                                  member_file = ipk.extractfile(member)
+                                  if member_file is None:
+                                      raise SystemExit(f'{archive} contains an unreadable IPK member: {member.name}')
+                                  prefix = member_file.read(16)
+                                  if name == 'debian-binary' and (prefix.strip() != b'2.0' or member.size > 16):
+                                      raise SystemExit(f'{archive} contains an invalid debian-binary marker')
+                                  if name in {'data.tar.gz', 'control.tar.gz'} and not prefix.startswith(b'\x1f\x8b'):
+                                      raise SystemExit(f'{archive} contains an uncompressed IPK member: {member.name}')
+                      except (gzip.BadGzipFile, tarfile.TarError, EOFError) as error:
+                          raise SystemExit(f'{archive} contains an invalid IPK: {error}') from error
+                      if seen_ipk_members != expected_ipk_members:
+                          missing_ipk_members = expected_ipk_members - seen_ipk_members
+                          raise SystemExit(f'{archive} IPK is missing: {sorted(missing_ipk_members)}')
                       required = {
                           'LICENSE',
                           'COPYRIGHT',
