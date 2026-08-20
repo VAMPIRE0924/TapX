@@ -5,7 +5,7 @@
 ## 请提供
 
 - TapX 版本、Release 资产名及 SHA-256；
-- Linux/OpenWrt/ImmortalWrt 版本、CPU 架构和包格式；
+- Linux/OpenWrt 版本、CPU 架构和包格式；
 - 问题所在页面、完整操作步骤、预期结果和实际结果；
 - 运行内核：TapX、内置 Xray 或外置 Xray；
 - 已脱敏的错误信息、服务状态和必要日志；

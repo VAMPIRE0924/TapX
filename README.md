@@ -2,10 +2,10 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/VAMPIRE0924/TapX?display_name=tag&sort=semver)](https://github.com/VAMPIRE0924/TapX/releases/latest)
 [![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
-[![Linux](https://img.shields.io/badge/Linux-amd64%20%7C%20arm64-2ea44f)](docs/安装与升级.md)
+[![Linux](https://img.shields.io/badge/Linux-x86--64%20%7C%20ARM64-2ea44f)](docs/安装与升级.md)
 [![OpenWrt](https://img.shields.io/badge/OpenWrt-APK%20%7C%20IPK-00b5e2)](docs/OpenWrt.md)
 
-TapX 是面向 Linux、OpenWrt 和 ImmortalWrt 的网络连接与策略分流平台。一个 Web 面板统一管理网卡、TUN/TAP、监听端、连接端、用户、路由、DNS、GeoData 和多节点，并从真实运行链路回读状态、流量、速度、延迟与诊断结果。
+TapX 是面向 Linux 和 OpenWrt 的网络连接与策略分流平台。一个 Web 面板统一管理网卡、TUN/TAP、监听端、连接端、用户、路由、DNS、GeoData 和多节点，并从真实运行链路回读状态、流量、速度、延迟与诊断结果。
 
 > 本仓库只提供正式发布资产、安装入口和用户文档，不包含 TapX 源代码。
 
@@ -29,17 +29,18 @@ sudo bash install.sh
 
 指定版本、备份、升级和服务管理见 [Linux 安装与升级](docs/安装与升级.md)。
 
-### OpenWrt / ImmortalWrt
+### OpenWrt
 
-当前 Release 提供 `tapx-openwrt-x86-64.tar.gz`，归档内同时包含原生 APK 和 IPK。它们是同一版本面向不同包管理器的安装包，必须按设备实际系统选择，不能改名或混装。
+每个正式 Release 分别提供 OpenWrt x86-64 和 ARM64 归档；每个归档内都同时包含同版本的 APK 与 IPK。先按设备 CPU 架构下载归档，再按设备实际存在的包管理器选择安装包，不能改名或混装。
 
-| 当前构建目标 | 包管理器 | 安装包 | 命令 |
+| OpenWrt 平台 | 包管理器检测 | 安装包 | 命令 |
 | --- | --- | --- | --- |
-| OpenWrt 25.12.5 x86-64 | `apk` | `tapx-*.apk` | `apk add --allow-untrusted --force-reinstall ./tapx-*.apk` |
-| OpenWrt 24.10.8 x86-64 | `opkg` | `tapx_*.ipk` | `opkg install --force-reinstall ./tapx_*.ipk` |
-| ImmortalWrt x86-64 | 以设备实际命令为准 | `.apk` 或 `.ipk` | 先检查 `command -v apk`，否则检查 `command -v opkg` |
+| x86-64 | `command -v apk` | `tapx-*.apk` | `apk add --allow-untrusted --force-reinstall ./tapx-*.apk` |
+| x86-64 | `command -v opkg` | `tapx_*.ipk` | `opkg install --force-reinstall ./tapx_*.ipk` |
+| ARM64 | `command -v apk` | `tapx-*.apk` | `apk add --allow-untrusted --force-reinstall ./tapx-*.apk` |
+| ARM64 | `command -v opkg` | `tapx_*.ipk` | `opkg install --force-reinstall ./tapx_*.ipk` |
 
-当前公开 OpenWrt 资产仅适用于 x86-64，并分别使用 OpenWrt 25.12.5 与 24.10.8 SDK 构建。其他固件版本只有在包格式、依赖和内核 ABI 均匹配时才能安装；ARM64、MIPS 等设备不要安装该归档。完整检查与安装步骤见 [OpenWrt / ImmortalWrt 安装与升级](docs/OpenWrt.md)。
+包格式不能由固件大版本推断：无论固件版本号是多少，都只以设备实际存在的 `apk` 或 `opkg` 为准。完整检查与安装步骤见 [OpenWrt 安装与升级](docs/OpenWrt.md)。
 
 ## 能力概览
 
@@ -86,6 +87,7 @@ Go 控制面负责 Web/API、对象校验、数据库、运行配置和生命周
 | `tapx-linux-amd64.tar.gz` | x86-64 Linux |
 | `tapx-linux-arm64.tar.gz` | ARM64 Linux |
 | `tapx-openwrt-x86-64.tar.gz` | x86-64 OpenWrt，内含 APK 与 IPK |
+| `tapx-openwrt-arm64.tar.gz` | ARM64 OpenWrt，内含 APK 与 IPK |
 | `install.sh` | Linux Release 安装器 |
 | `tapx-update-manifest.json` | 版本、平台、组件和 SHA-256 清单 |
 | `SHA256SUMS` | 本 Release 下载资产的 SHA-256 清单 |
@@ -101,6 +103,7 @@ Go 控制面负责 Web/API、对象校验、数据库、运行配置和生命周
 | [OpenWrt 安装与升级](docs/OpenWrt.md) | 平台限制、APK/IPK 选择、LuCI、升级与恢复 |
 | [工作原理](docs/工作原理.md) | 控制面、数据面、对象关系和流量处理链 |
 | [面板使用说明](docs/面板说明.md) | 页面功能、保存/应用语义、诊断和多节点管理 |
+| [Panel API](docs/Panel-API.md) | 认证、配置修订、运行时、诊断、GeoData 和托管节点接口 |
 | [常见故障排查](docs/故障排查.md) | 面板、服务、连接端、路由、DNS 和升级问题 |
 | [发布资产校验](docs/发布校验.md) | SHA-256、manifest 和归档内容检查 |
 | [安全政策](SECURITY.md) | 漏洞报告与敏感信息保护 |

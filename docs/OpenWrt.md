@@ -1,12 +1,15 @@
-# OpenWrt / ImmortalWrt 安装与升级
+# OpenWrt 安装与升级
 
 TapX 的 OpenWrt 发布归档同时提供 APK 与 IPK。两种包面向不同包管理器，必须选择与设备固件、CPU 架构和内核 ABI 匹配的文件。
 
 ## 当前公开支持范围
 
-当前正式 Release 提供 `tapx-openwrt-x86-64.tar.gz`，只适用于 x86-64 设备。归档中的 APK 使用 OpenWrt 25.12.5 SDK 构建，IPK 使用 OpenWrt 24.10.8 SDK 构建；其他固件版本只有在包格式、依赖和内核 ABI 均匹配时才能安装。ARM64、MIPS 等设备不能安装该资产。
+当前正式 Release 提供两个 OpenWrt 归档：
 
-未来 Release 若增加平台，会使用独立的 `tapx-openwrt-<platform>.tar.gz` 资产。不要把 Linux ARM64 归档当作 OpenWrt ARM64 安装包。
+- `tapx-openwrt-x86-64.tar.gz`：OpenWrt x86-64，内含一个 APK 和一个 IPK。
+- `tapx-openwrt-arm64.tar.gz`：OpenWrt ARM64，内含一个 APK 和一个 IPK。
+
+先用 `uname -m` 确认 CPU 架构，再下载对应归档。不要跨架构安装，也不要把 Linux ARM64 归档当作 OpenWrt ARM64 安装包。
 
 ## 选择 APK 或 IPK
 
@@ -23,13 +26,11 @@ cat /etc/openwrt_release
 | 存在 `/sbin/apk` 或 `apk` | 安装 `tapx-*.apk` |
 | 存在 `/bin/opkg` 或 `opkg` | 安装 `tapx_*.ipk` |
 
-OpenWrt 25.12 起使用 APK，OpenWrt 24.10 使用 OPKG/IPK。这个边界只决定包格式，不代表某个 TapX 包能够跨固件版本或跨内核 ABI 安装。ImmortalWrt 应以设备实际存在的包管理器为准。APK 与 IPK 不能互相改名或跨包管理器安装。
-
-包管理器版本边界可参阅 [OpenWrt 官方软件包管理说明](https://openwrt.org/docs/guide-user/additional-software/managing_packages)。
+不要根据 OpenWrt 版本号推断包格式；同一个大版本可能使用不同的包管理器。只以设备上实际存在的命令为准。APK 与 IPK 不能互相改名或跨包管理器安装。
 
 ## 安装前检查
 
-1. 从 [Releases](https://github.com/VAMPIRE0924/TapX/releases/latest) 下载 `tapx-openwrt-x86-64.tar.gz` 及同一版本的 `SHA256SUMS`。
+1. 从 [Releases](https://github.com/VAMPIRE0924/TapX/releases/latest) 下载与设备架构一致的 OpenWrt 归档及同一版本的 `SHA256SUMS`。
 2. 校验归档 SHA-256，并确认文件名中的平台与设备一致。
 3. 备份 `/etc/config/tapx`、TapX 数据库、证书、GeoData 和外置 Xray 文件。
 4. 记录管理网卡、管理 IP、默认路由和恢复入口。
@@ -38,16 +39,18 @@ OpenWrt 25.12 起使用 APK，OpenWrt 24.10 使用 OPKG/IPK。这个边界只决
 ## 安装 APK
 
 ```sh
-tar -xzf tapx-openwrt-x86-64.tar.gz
-cd tapx-openwrt-x86-64
+archive=tapx-openwrt-arm64  # x86-64 设备改为 tapx-openwrt-x86-64
+tar -xzf "$archive.tar.gz"
+cd "$archive"
 apk add --allow-untrusted --force-reinstall ./tapx-*.apk
 ```
 
 ## 安装 IPK
 
 ```sh
-tar -xzf tapx-openwrt-x86-64.tar.gz
-cd tapx-openwrt-x86-64
+archive=tapx-openwrt-arm64  # x86-64 设备改为 tapx-openwrt-x86-64
+tar -xzf "$archive.tar.gz"
+cd "$archive"
 opkg install --force-reinstall ./tapx_*.ipk
 ```
 
