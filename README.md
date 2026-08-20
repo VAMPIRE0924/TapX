@@ -37,7 +37,7 @@ sudo bash install.sh
 | --- | --- | --- | --- |
 | OpenWrt 25.12 及更新版本 | `apk` | `tapx-*.apk` | `apk add --allow-untrusted --force-reinstall ./tapx-*.apk` |
 | OpenWrt 24.10 及更早版本 | `opkg` | `tapx_*.ipk` | `opkg install --force-reinstall ./tapx_*.ipk` |
-| ImmortalWrt | 以设备实际命令为准 | `.apk` 或 `.ipk` | 先运行 `command -v apk || command -v opkg` |
+| ImmortalWrt | 以设备实际命令为准 | `.apk` 或 `.ipk` | 先检查 `command -v apk`，否则检查 `command -v opkg` |
 
 当前公开 OpenWrt 资产仅适用于 x86-64；ARM64、MIPS 等设备不要安装该归档。完整检查与安装步骤见 [OpenWrt / ImmortalWrt 安装与升级](docs/OpenWrt.md)。
 
