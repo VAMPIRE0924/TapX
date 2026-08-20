@@ -105,6 +105,12 @@ jobs:
                       ipk_files = [path for path in regular_files if path.name.startswith('tapx_') and path.suffix == '.ipk']
                       if len(apk_files) != 1 or len(ipk_files) != 1:
                           raise SystemExit(f'{archive} must contain exactly one TapX APK and one TapX IPK')
+                      package_magic = [(apk_files[0], b'ADBd'), (ipk_files[0], b'!<arch>\n')]
+                      for package_path, expected_magic in package_magic:
+                          package_member = bundle.getmember(str(package_path))
+                          package_file = bundle.extractfile(package_member)
+                          if package_file is None or package_file.read(len(expected_magic)) != expected_magic:
+                              raise SystemExit(f'{archive} contains an invalid package format: {package_path}')
                       required = {
                           'LICENSE',
                           'COPYRIGHT',
