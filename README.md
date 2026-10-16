@@ -84,7 +84,7 @@ Go 控制面负责 Web/API、对象校验、数据库、运行配置和生命周
 
 | 资产 | 用途 |
 | --- | --- |
-| `tapx-linux-amd64.tar.gz` | x86-64 Linux |
+| `tapx-linux-x86-64.tar.gz` | x86-64 Linux |
 | `tapx-linux-arm64.tar.gz` | ARM64 Linux |
 | `tapx-openwrt-x86-64.tar.gz` | x86-64 OpenWrt，内含 APK 与 IPK |
 | `tapx-openwrt-arm64.tar.gz` | ARM64 OpenWrt，内含 APK 与 IPK |
