@@ -45,6 +45,9 @@ cd "$archive"
 apk add --allow-untrusted --force-reinstall ./tapx-*.apk
 ```
 
+LuCI 上传 APK 若提示 `UNTRUSTED signature`，请校验下载来源后按上述命令安装。
+该错误表示包签名未被固件信任，修改文件名不能解决；本版本不改变固件的签名验证规则。
+
 ## 安装 IPK
 
 ```sh
