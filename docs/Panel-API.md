@@ -83,7 +83,7 @@ POST   /api/runtime/components/{tapx|embedded-xray|external-xray}/{start|stop|re
 - `GET /api/runtime` 返回由当前存储对象生成的运行配置。
 - `apply` 生成并应用待生效配置，失败时返回真实阶段与原因，并保留或恢复上一份可用配置。
 - `reload-routing` 重新载入已保存的接入分流、终端分流和 DNS 配置，不保存草稿，也不等同于完整重启。
-- 三个运行组件分别启停；一个组件的操作不会被伪装成全部内核状态。
+- 三个运行组件可分别启停，接口分别返回各组件的运行状态。
 
 ## 状态、统计与日志
 
