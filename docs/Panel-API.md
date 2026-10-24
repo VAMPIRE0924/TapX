@@ -81,7 +81,7 @@ POST   /api/runtime/components/{tapx|embedded-xray|external-xray}/{start|stop|re
 ```
 
 - `GET /api/runtime` 返回由当前存储对象生成的运行配置。
-- `apply` 生成并应用候选配置，失败时返回真实阶段与原因，并保留或恢复上一份可用配置。
+- `apply` 生成并应用待生效配置，失败时返回真实阶段与原因，并保留或恢复上一份可用配置。
 - `reload-routing` 重新载入已保存的接入分流、终端分流和 DNS 配置，不保存草稿，也不等同于完整重启。
 - 三个运行组件分别启停；一个组件的操作不会被伪装成全部内核状态。
 
@@ -139,7 +139,7 @@ POST   /api/xray/route-groups/import
 POST   /api/xray/routes/query
 ```
 
-外置 Xray 候选文件必须通过版本与可执行性检查后才会替换当前文件。GeoData 更新会校验文件并成对切换；路由组导入、导出和链路查询不会绕过对象引用与配置验证。
+外置 Xray 待安装文件必须通过版本与可执行性检查后才会替换当前文件。GeoData 更新会校验文件并成对切换；路由组导入、导出和链路查询不会绕过对象引用与配置验证。
 
 ## 更新、备份与集成
 
